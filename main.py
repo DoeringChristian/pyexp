@@ -1,8 +1,8 @@
-import runner
-from runner import Config
+import pyexp
+from pyexp import Config
 
 
-@runner.experiment
+@pyexp.experiment
 def experiment(config: Config):
     """Run a single experiment with the given config."""
     lr = config["learning_rate"]

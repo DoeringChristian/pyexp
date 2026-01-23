@@ -1,20 +1,20 @@
-# Runner
+# pyexp
 
 A lightweight Python library for running experiments with automatic caching, configuration management, and reporting.
 
 ## Installation
 
 ```bash
-pip install git+https://github.com/username/runner.git
+pip install git+https://github.com/username/pyexp.git
 ```
 
 ## Quick Start
 
 ```python
-import runner
-from runner import Config
+import pyexp
+from pyexp import Config
 
-@runner.experiment
+@pyexp.experiment
 def experiment(config: Config):
     lr = config.learning_rate
     epochs = config.epochs
@@ -65,7 +65,7 @@ config.optimizer.lr      # nested access
 Each experiment receives an `out_dir` in its config pointing to its cache directory. Use this to save artifacts:
 
 ```python
-@runner.experiment
+@pyexp.experiment
 def experiment(config: Config):
     model = train(config)
     torch.save(model, config.out_dir / "model.pt")
