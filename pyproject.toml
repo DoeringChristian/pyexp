@@ -3,7 +3,7 @@ name = "pyexp"
 version = "0.1.0"
 description = "A library for running Python experiments with config, experiment, and report phases"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12"
 dependencies = []
 
 [build-system]
