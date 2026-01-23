@@ -70,6 +70,7 @@ class Runner:
         results = []
 
         for config in configs:
+            assert "out_dir" not in config, "Config cannot contain 'out_dir' key; it is reserved"
             experiment_dir = _get_experiment_dir(config, output_dir)
             result_path = experiment_dir / "result.pkl"
 
@@ -77,8 +78,9 @@ class Runner:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
             else:
-                result = self._experiment_fn(config)
                 experiment_dir.mkdir(parents=True, exist_ok=True)
+                config_with_out = {**config, "out_dir": experiment_dir}
+                result = self._experiment_fn(config_with_out)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
 
