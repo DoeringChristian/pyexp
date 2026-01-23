@@ -1,4 +1,5 @@
 import runner
+from runner import Config
 
 
 @runner.configs
@@ -12,10 +13,10 @@ def configs() -> list[dict]:
 
 
 @runner.experiment
-def experiment(config: dict):
+def experiment(config: Config):
     """Run a single experiment with the given config."""
     lr = config["learning_rate"]
-    epochs = config["epochs"]
+    epochs = config.epochs
     print(f"Running experiment with lr={lr}, epochs={epochs}")
     # Simulate experiment result
     return {"accuracy": 0.9 + lr * epochs / 100}

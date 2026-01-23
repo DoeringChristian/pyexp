@@ -8,6 +8,41 @@ import pickle
 import sys
 
 
+class Config(dict):
+    """A dictionary that supports dot notation access for keys.
+
+    Nested dictionaries are automatically converted to Config objects.
+
+    Example:
+        config = Config({"optimizer": {"learning_rate": 0.01}})
+        config.optimizer.learning_rate  # 0.01
+        config["optimizer"]["learning_rate"]  # also works
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for key, value in self.items():
+            if isinstance(value, dict) and not isinstance(value, Config):
+                self[key] = Config(value)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"Config has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if isinstance(value, dict) and not isinstance(value, Config):
+            value = Config(value)
+        self[name] = value
+
+    def __delattr__(self, name: str) -> None:
+        try:
+            del self[name]
+        except KeyError:
+            raise AttributeError(f"Config has no attribute '{name}'")
+
+
 def _config_hash(config: dict) -> str:
     """Generate a short hash of the config for cache identification."""
     config_without_name = {k: v for k, v in config.items() if k != "name"}
@@ -99,7 +134,7 @@ class Runner:
                     result = pickle.load(f)
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = {**config, "out_dir": experiment_dir}
+                config_with_out = Config({**config, "out_dir": experiment_dir})
                 result = self._experiment_fn(config_with_out)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
