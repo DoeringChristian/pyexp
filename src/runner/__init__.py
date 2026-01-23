@@ -1,9 +1,11 @@
 from functools import wraps
 from pathlib import Path
 from typing import Callable, Any
+import argparse
 import hashlib
 import json
 import pickle
+import sys
 
 
 def _config_hash(config: dict) -> str:
@@ -52,6 +54,21 @@ class Runner:
         self._report_fn = wrapper
         return wrapper
 
+    def _parse_args(self) -> argparse.Namespace:
+        """Parse command line arguments."""
+        parser = argparse.ArgumentParser(description="Experiment runner")
+        parser.add_argument(
+            "--report",
+            action="store_true",
+            help="Skip experiments and only generate report from cached results",
+        )
+        parser.add_argument(
+            "--rerun",
+            action="store_true",
+            help="Re-run experiments ignoring cache",
+        )
+        return parser.parse_args()
+
     def run(self, output_dir: str | Path = "out") -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -65,6 +82,7 @@ class Runner:
         if self._report_fn is None:
             raise RuntimeError("No report function registered. Use @runner.report decorator.")
 
+        args = self._parse_args()
         output_dir = Path(output_dir)
         configs = self._configs_fn()
         results = []
@@ -74,15 +92,20 @@ class Runner:
             experiment_dir = _get_experiment_dir(config, output_dir)
             result_path = experiment_dir / "result.pkl"
 
-            if result_path.exists():
+            if args.report:
+                if not result_path.exists():
+                    raise RuntimeError(f"No cached result for config {config}. Run experiments first.")
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
-            else:
+            elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = {**config, "out_dir": experiment_dir}
                 result = self._experiment_fn(config_with_out)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
+            else:
+                with open(result_path, "rb") as f:
+                    result = pickle.load(f)
 
             results.append(result)
 
