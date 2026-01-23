@@ -2,16 +2,6 @@ import runner
 from runner import Config
 
 
-@runner.configs
-def configs() -> list[dict]:
-    """Generate experiment configurations."""
-    return [
-        {"name": "fast", "learning_rate": 0.01, "epochs": 10},
-        {"name": "medium", "learning_rate": 0.001, "epochs": 20},
-        {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
-    ]
-
-
 @runner.experiment
 def experiment(config: Config):
     """Run a single experiment with the given config."""
@@ -22,7 +12,17 @@ def experiment(config: Config):
     return {"accuracy": 0.9 + lr * epochs / 100}
 
 
-@runner.report
+@experiment.configs
+def configs() -> list[dict]:
+    """Generate experiment configurations."""
+    return [
+        {"name": "fast", "learning_rate": 0.01, "epochs": 10},
+        {"name": "medium", "learning_rate": 0.001, "epochs": 20},
+        {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
+    ]
+
+
+@experiment.report
 def report(configs: list[dict], results: list):
     """Generate report from all experiment results."""
     print("\n=== Experiment Report ===")
@@ -35,4 +35,4 @@ def report(configs: list[dict], results: list):
 
 
 if __name__ == "__main__":
-    runner.run()
+    experiment.run()

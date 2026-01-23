@@ -5,7 +5,6 @@ import argparse
 import hashlib
 import json
 import pickle
-import sys
 
 
 class Config(dict):
@@ -57,72 +56,72 @@ def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
     return output_dir / f"{name}-{hash_str}"
 
 
-class Runner:
-    """Orchestrates experiment execution with configs, experiment, and report phases."""
+def _parse_args() -> argparse.Namespace:
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="Experiment runner")
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Skip experiments and only generate report from cached results",
+    )
+    parser.add_argument(
+        "--rerun",
+        action="store_true",
+        help="Re-run experiments ignoring cache",
+    )
+    return parser.parse_args()
 
-    def __init__(self):
+
+class Experiment:
+    """An experiment that can be run with configs and report functions."""
+
+    def __init__(self, fn: Callable[[dict], Any]):
+        self._fn = fn
         self._configs_fn: Callable[[], list[dict]] | None = None
-        self._experiment_fn: Callable[[dict], Any] | None = None
         self._report_fn: Callable[[list[dict], list[Any]], Any] | None = None
+        wraps(fn)(self)
+
+    def __call__(self, config: dict) -> Any:
+        """Run the experiment function directly."""
+        return self._fn(config)
 
     def configs(self, fn: Callable[[], list[dict]]) -> Callable[[], list[dict]]:
         """Decorator to register the configs generator function."""
-        @wraps(fn)
-        def wrapper() -> list[dict]:
-            return fn()
-        self._configs_fn = wrapper
-        return wrapper
-
-    def experiment(self, fn: Callable[[dict], Any]) -> Callable[[dict], Any]:
-        """Decorator to register the experiment function."""
-        @wraps(fn)
-        def wrapper(config: dict) -> Any:
-            return fn(config)
-        self._experiment_fn = wrapper
-        return wrapper
+        self._configs_fn = fn
+        return fn
 
     def report(self, fn: Callable[[list[dict], list[Any]], Any]) -> Callable[[list[dict], list[Any]], Any]:
         """Decorator to register the report function."""
-        @wraps(fn)
-        def wrapper(configs: list[dict], results: list[Any]) -> Any:
-            return fn(configs, results)
-        self._report_fn = wrapper
-        return wrapper
+        self._report_fn = fn
+        return fn
 
-    def _parse_args(self) -> argparse.Namespace:
-        """Parse command line arguments."""
-        parser = argparse.ArgumentParser(description="Experiment runner")
-        parser.add_argument(
-            "--report",
-            action="store_true",
-            help="Skip experiments and only generate report from cached results",
-        )
-        parser.add_argument(
-            "--rerun",
-            action="store_true",
-            help="Re-run experiments ignoring cache",
-        )
-        return parser.parse_args()
-
-    def run(self, output_dir: str | Path = "out") -> Any:
+    def run(
+        self,
+        configs: Callable[[], list[dict]] | None = None,
+        report: Callable[[list[dict], list[Any]], Any] | None = None,
+        output_dir: str | Path = "out",
+    ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
         Args:
+            configs: Optional configs function. If not provided, uses @experiment.configs decorated function.
+            report: Optional report function. If not provided, uses @experiment.report decorated function.
             output_dir: Directory for caching experiment results. Defaults to "out".
         """
-        if self._configs_fn is None:
-            raise RuntimeError("No configs function registered. Use @runner.configs decorator.")
-        if self._experiment_fn is None:
-            raise RuntimeError("No experiment function registered. Use @runner.experiment decorator.")
-        if self._report_fn is None:
-            raise RuntimeError("No report function registered. Use @runner.report decorator.")
+        configs_fn = configs or self._configs_fn
+        report_fn = report or self._report_fn
 
-        args = self._parse_args()
+        if configs_fn is None:
+            raise RuntimeError("No configs function provided. Use @experiment.configs or pass configs= argument.")
+        if report_fn is None:
+            raise RuntimeError("No report function provided. Use @experiment.report or pass report= argument.")
+
+        args = _parse_args()
         output_dir = Path(output_dir)
-        configs = self._configs_fn()
+        config_list = configs_fn()
         results = []
 
-        for config in configs:
+        for config in config_list:
             assert "out_dir" not in config, "Config cannot contain 'out_dir' key; it is reserved"
             experiment_dir = _get_experiment_dir(config, output_dir)
             result_path = experiment_dir / "result.pkl"
@@ -135,7 +134,7 @@ class Runner:
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = Config({**config, "out_dir": experiment_dir})
-                result = self._experiment_fn(config_with_out)
+                result = self._fn(config_with_out)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
             else:
@@ -144,13 +143,30 @@ class Runner:
 
             results.append(result)
 
-        return self._report_fn(configs, results)
+        return report_fn(config_list, results)
 
 
-# Default runner instance for simple usage
-_default_runner = Runner()
+def experiment(fn: Callable[[dict], Any]) -> Experiment:
+    """Decorator to create an Experiment from a function.
 
-configs = _default_runner.configs
-experiment = _default_runner.experiment
-report = _default_runner.report
-run = _default_runner.run
+    Example usage:
+
+        @runner.experiment
+        def my_experiment(config):
+            ...
+
+        # Option 1: Use decorators
+        @my_experiment.configs
+        def configs():
+            return [{"lr": 0.01}, {"lr": 0.001}]
+
+        @my_experiment.report
+        def report(configs, results):
+            ...
+
+        my_experiment.run()
+
+        # Option 2: Pass functions directly
+        my_experiment.run(configs=configs_fn, report=report_fn)
+    """
+    return Experiment(fn)
