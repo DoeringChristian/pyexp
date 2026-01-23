@@ -1,0 +1,55 @@
+default = "main"
+
+[containers.main]
+uuid = "0f9ffa93-f727-489a-9b2f-13524e91c91e"
+profile = "default"
+created_at = "2026-01-23T17:53:49.259769806Z"
+image_tag = "claudepod:4a95d4c6a77f"
+
+[containers.main.docker]
+container_runtime = "podman"
+enable_gpu = true
+gpu_driver = "all"
+interactive = true
+remove_on_exit = true
+extra_args = []
+
+[[containers.main.docker.volumes]]
+host = "$PWD"
+container = "$PWD"
+readonly = false
+
+[[containers.main.docker.volumes]]
+host = "$HOME/.claude"
+container = "/home/code/.claude"
+readonly = false
+
+[[containers.main.docker.volumes]]
+host = "$HOME/.claude.json"
+container = "/home/code/.claude.json"
+readonly = false
+
+[[containers.main.docker.tmpfs]]
+path = "/workspace/build"
+readonly = true
+size = "1m"
+
+[containers.main.commands]
+default = "claude"
+
+[containers.main.commands.bash]
+args = ""
+
+[containers.main.commands.zsh]
+args = ""
+
+[containers.main.commands.shell]
+args = ""
+command = "bash"
+
+[containers.main.commands.claude]
+install = '''
+RUN mkdir -p /home/code/.npm-global && \
+    npm config set prefix /home/code/.npm-global && \
+    npm install --silent -g @anthropic-ai/claude-code'''
+args = "--dangerously-skip-permissions --max-turns 99999999"
