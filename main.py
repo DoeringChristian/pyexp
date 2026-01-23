@@ -5,9 +5,9 @@ import runner
 def configs() -> list[dict]:
     """Generate experiment configurations."""
     return [
-        {"learning_rate": 0.01, "epochs": 10},
-        {"learning_rate": 0.001, "epochs": 20},
-        {"learning_rate": 0.0001, "epochs": 50},
+        {"name": "fast", "learning_rate": 0.01, "epochs": 10},
+        {"name": "medium", "learning_rate": 0.001, "epochs": 20},
+        {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
     ]
 
 

@@ -1,5 +1,23 @@
 from functools import wraps
+from pathlib import Path
 from typing import Callable, Any
+import hashlib
+import json
+import pickle
+
+
+def _config_hash(config: dict) -> str:
+    """Generate a short hash of the config for cache identification."""
+    config_without_name = {k: v for k, v in config.items() if k != "name"}
+    config_str = json.dumps(config_without_name, sort_keys=True, default=str)
+    return hashlib.sha256(config_str.encode()).hexdigest()[:12]
+
+
+def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
+    """Get the cache directory path for an experiment config."""
+    name = config.get("name", "experiment")
+    hash_str = _config_hash(config)
+    return output_dir / f"{name}-{hash_str}"
 
 
 class Runner:
@@ -34,8 +52,12 @@ class Runner:
         self._report_fn = wrapper
         return wrapper
 
-    def run(self) -> Any:
-        """Execute the full pipeline: configs -> experiments -> report."""
+    def run(self, output_dir: str | Path = "out") -> Any:
+        """Execute the full pipeline: configs -> experiments -> report.
+
+        Args:
+            output_dir: Directory for caching experiment results. Defaults to "out".
+        """
         if self._configs_fn is None:
             raise RuntimeError("No configs function registered. Use @runner.configs decorator.")
         if self._experiment_fn is None:
@@ -43,10 +65,23 @@ class Runner:
         if self._report_fn is None:
             raise RuntimeError("No report function registered. Use @runner.report decorator.")
 
+        output_dir = Path(output_dir)
         configs = self._configs_fn()
         results = []
+
         for config in configs:
-            result = self._experiment_fn(config)
+            experiment_dir = _get_experiment_dir(config, output_dir)
+            result_path = experiment_dir / "result.pkl"
+
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    result = pickle.load(f)
+            else:
+                result = self._experiment_fn(config)
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                with open(result_path, "wb") as f:
+                    pickle.dump(result, f)
+
             results.append(result)
 
         return self._report_fn(configs, results)
