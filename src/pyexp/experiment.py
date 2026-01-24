@@ -98,7 +98,7 @@ class Experiment:
         results = []
 
         for config in config_list:
-            assert "out_dir" not in config, "Config cannot contain 'out_dir' key; it is reserved"
+            assert "out" not in config, "Config cannot contain 'out' key; it is reserved"
             experiment_dir = _get_experiment_dir(config, output_dir)
             result_path = experiment_dir / "result.pkl"
 
@@ -109,7 +109,7 @@ class Experiment:
                     result = pickle.load(f)
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = Config({**config, "out_dir": experiment_dir})
+                config_with_out = Config({**config, "out": experiment_dir})
                 result = self._fn(config_with_out)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)

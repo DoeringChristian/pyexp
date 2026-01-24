@@ -7,7 +7,7 @@ from pyexp import Config
 
 @pyexp.experiment
 def experiment(config: Config):
-    """Run experiment and save artifacts to out_dir."""
+    """Run experiment and save artifacts to out."""
     print(f"Running: {config.name}")
 
     # Access nested config with dot notation
@@ -21,7 +21,7 @@ def experiment(config: Config):
     }
 
     # Save artifacts to the experiment's output directory
-    with open(config.out_dir / "metrics.json", "w") as f:
+    with open(config.out / "metrics.json", "w") as f:
         json.dump(result, f, indent=2)
 
     return result

@@ -62,13 +62,13 @@ config.optimizer.lr      # nested access
 
 ### Output Directory
 
-Each experiment receives an `out_dir` in its config pointing to its cache directory. Use this to save artifacts:
+Each experiment receives an `out` in its config pointing to its cache directory. Use this to save artifacts:
 
 ```python
 @pyexp.experiment
 def experiment(config: Config):
     model = train(config)
-    torch.save(model, config.out_dir / "model.pt")
+    torch.save(model, config.out / "model.pt")
     return {"accuracy": 0.95}
 ```
 

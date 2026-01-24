@@ -200,13 +200,13 @@ class TestExperimentRun:
 
         assert out_dir.exists()
 
-    def test_config_receives_out_dir(self, tmp_path):
-        received_out_dir = None
+    def test_config_receives_out(self, tmp_path):
+        received_out = None
 
         @experiment
         def my_exp(config):
-            nonlocal received_out_dir
-            received_out_dir = config.out_dir
+            nonlocal received_out
+            received_out = config.out
             return 1
 
         @my_exp.configs
@@ -220,9 +220,9 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path)
 
-        assert received_out_dir is not None
-        assert isinstance(received_out_dir, Path)
-        assert received_out_dir.exists()
+        assert received_out is not None
+        assert isinstance(received_out, Path)
+        assert received_out.exists()
 
     def test_config_is_config_type(self, tmp_path):
         received_config = None
@@ -273,21 +273,21 @@ class TestExperimentRun:
             with pytest.raises(RuntimeError, match="No report function"):
                 my_exp.run(output_dir=tmp_path)
 
-    def test_out_dir_in_config_raises(self, tmp_path):
+    def test_out_in_config_raises(self, tmp_path):
         @experiment
         def my_exp(config):
             return 1
 
         @my_exp.configs
         def configs():
-            return [{"name": "bad", "out_dir": "/some/path"}]
+            return [{"name": "bad", "out": "/some/path"}]
 
         @my_exp.report
         def report(configs, results):
             return results
 
         with patch.object(sys, "argv", ["test"]):
-            with pytest.raises(AssertionError, match="out_dir"):
+            with pytest.raises(AssertionError, match="out"):
                 my_exp.run(output_dir=tmp_path)
 
     def test_multiple_configs(self, tmp_path):
