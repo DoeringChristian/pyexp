@@ -66,10 +66,13 @@ def configs() -> list[dict]:
         ],
     )
     # Should be 4 configs now (2 x 2).
-    # Names should be "exp_lr0.1_epochs10" etc
+    # Names are "exp_lr0.1_epochs10", "exp_lr0.1_epochs20", etc.
 
-    # Should be able to access
-    cfgs["exp", "lr0.1", "epochs10"]
+    # Pattern matching examples:
+    # cfgs["exp_lr0.1_*"]  -> shape (1, 1, 2), matches both epochs variants
+    # cfgs["*_epochs10"]   -> shape (1, 2, 1), matches both lr variants
+    # cfgs["exp_lr0.1_epochs10"]  -> single config (exact match)
+
     return cfgs
 
 

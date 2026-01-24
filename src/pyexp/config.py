@@ -1,5 +1,6 @@
 """Configuration utilities: Config, Tensor, merge, sweep."""
 
+import fnmatch
 from typing import Any
 
 
@@ -100,55 +101,37 @@ class Tensor:
 
     Example:
         configs = Tensor([{"name": "exp"}])  # shape: (1,)
-        configs = sweep(configs, [{"lr": 0.1}, {"lr": 0.01}])  # shape: (1, 2)
-        configs = sweep(configs, [{"epochs": 10}, {"epochs": 20}])  # shape: (1, 2, 2)
+        configs = sweep(configs, [{"name": "a", "lr": 0.1}, {"name": "b", "lr": 0.01}])  # shape: (1, 2)
+        configs = sweep(configs, [{"name": "x", "epochs": 10}, {"name": "y", "epochs": 20}])  # shape: (1, 2, 2)
 
         # Index along dimensions
         configs[:, 0, :]  # All configs with first lr value
         configs[:, :, 1]  # All configs with second epochs value
 
-        # Index by name (if names are set)
-        configs["exp", "lr0.1", "epochs10"]
+        # Pattern matching on combined name (glob-style)
+        configs["exp_a_*"]  # All configs matching pattern, shape (1, 1, 2)
+        configs["exp_*_x"]  # All configs matching pattern, shape (1, 2, 1)
     """
 
-    def __init__(
-        self,
-        data: list,
-        shape: tuple[int, ...] | None = None,
-        names: list[list[str]] | None = None,
-    ):
+    def __init__(self, data: list, shape: tuple[int, ...] | None = None):
         """Create a Tensor.
 
         Args:
             data: List of items (flattened).
             shape: Shape tuple. If None, inferred as (len(data),).
-            names: List of name lists, one per dimension. Each name list has
-                   length equal to that dimension's size. Used for name-based indexing.
         """
         self._data = list(data)
         self._shape = shape if shape is not None else (len(data),)
-        self._names = names  # List of name lists per dimension
         expected_size = 1
         for dim in self._shape:
             expected_size *= dim
         if expected_size != len(self._data):
             raise ValueError(f"Shape {self._shape} does not match data length {len(self._data)}")
-        if names is not None:
-            if len(names) != len(self._shape):
-                raise ValueError(f"Names has {len(names)} dimensions but shape has {len(self._shape)}")
-            for i, (name_list, dim_size) in enumerate(zip(names, self._shape)):
-                if len(name_list) != dim_size:
-                    raise ValueError(f"Names dimension {i} has {len(name_list)} names but shape has {dim_size}")
 
     @property
     def shape(self) -> tuple[int, ...]:
         """Return the shape of the config tensor."""
         return self._shape
-
-    @property
-    def names(self) -> list[list[str]] | None:
-        """Return the name mappings per dimension, or None if not set."""
-        return self._names
 
     def __len__(self) -> int:
         """Return total number of configs."""
@@ -158,22 +141,30 @@ class Tensor:
         """Iterate over all configs (flattened)."""
         return iter(self._data)
 
-    def _name_to_index(self, name: str, dim: int) -> int:
-        """Convert a name to an index for the given dimension."""
-        if self._names is None:
-            raise IndexError("Cannot use string indexing: Tensor has no name mappings")
-        try:
-            return self._names[dim].index(name)
-        except ValueError:
-            raise IndexError(f"Name '{name}' not found in dimension {dim}. Available: {self._names[dim]}")
+    def _multi_index(self, flat_idx: int) -> tuple[int, ...]:
+        """Convert flat index to multi-dimensional indices."""
+        indices = []
+        for dim_size in reversed(self._shape):
+            indices.append(flat_idx % dim_size)
+            flat_idx //= dim_size
+        return tuple(reversed(indices))
+
+    def _flat_index(self, indices: tuple[int, ...]) -> int:
+        """Convert multi-dimensional indices to flat index."""
+        flat = 0
+        stride = 1
+        for i in range(len(indices) - 1, -1, -1):
+            flat += indices[i] * stride
+            stride *= self._shape[i]
+        return flat
 
     def __getitem__(self, key):
         """Advanced indexing to select elements along dimensions.
 
-        Supports integers, slices, strings (name lookup), and tuples of these.
+        Supports integers, slices, and tuples of these, plus pattern matching.
         - Single integer: flat index into data (for backwards compatibility)
-        - String: name-based lookup (requires names to be set)
-        - Tuple: multi-dimensional indexing
+        - Single string: pattern match on config["name"] (glob-style with *)
+        - Tuple of int/slice: multi-dimensional indexing
         Returns a new Tensor or single element.
         """
         # Single integer = flat index for backwards compatibility
@@ -181,6 +172,10 @@ class Tensor:
             if key < 0:
                 key = len(self._data) + key
             return self._data[key]
+
+        # Single string = pattern matching on name
+        if isinstance(key, str):
+            return self._match_pattern(key)
 
         if not isinstance(key, tuple):
             key = (key,)
@@ -194,14 +189,8 @@ class Tensor:
         # Convert each key element to a list of indices
         index_lists = []
         new_shape = []
-        new_names = [] if self._names is not None else None
         for dim, (k, dim_size) in enumerate(zip(key, self._shape)):
-            if isinstance(k, str):
-                # Name-based indexing
-                idx = self._name_to_index(k, dim)
-                index_lists.append([idx])
-                # String index collapses dimension (not added to new_shape)
-            elif isinstance(k, int):
+            if isinstance(k, int):
                 if k < 0:
                     k = dim_size + k
                 if k < 0 or k >= dim_size:
@@ -212,8 +201,6 @@ class Tensor:
                 indices = list(range(*k.indices(dim_size)))
                 index_lists.append(indices)
                 new_shape.append(len(indices))
-                if new_names is not None:
-                    new_names.append([self._names[dim][i] for i in indices])
             else:
                 raise TypeError(f"Invalid index type: {type(k)}")
 
@@ -221,11 +208,52 @@ class Tensor:
         selected_data = []
         self._select_recursive(index_lists, 0, [], selected_data)
 
-        # If all dimensions collapsed, return single config
+        # If all dimensions collapsed, return single element
         if not new_shape:
             return self._data[self._flat_index(tuple(il[0] for il in index_lists))]
 
-        return Tensor(selected_data, tuple(new_shape), new_names if new_names else None)
+        return Tensor(selected_data, tuple(new_shape))
+
+    def _match_pattern(self, pattern: str) -> "Tensor":
+        """Match configs by name pattern (glob-style).
+
+        Returns a Tensor with the same number of dimensions, but with
+        each dimension's size reduced to the number of unique indices
+        that matched along that dimension.
+        """
+        # Find all matching indices
+        matching_multi_indices: list[tuple[int, ...]] = []
+        for flat_idx, item in enumerate(self._data):
+            name = item.get("name", "") if isinstance(item, dict) else ""
+            if fnmatch.fnmatch(name, pattern):
+                matching_multi_indices.append(self._multi_index(flat_idx))
+
+        if not matching_multi_indices:
+            raise IndexError(f"No configs match pattern '{pattern}'")
+
+        # Find unique indices per dimension and build mapping
+        unique_per_dim: list[list[int]] = [[] for _ in self._shape]
+        for indices in matching_multi_indices:
+            for dim, idx in enumerate(indices):
+                if idx not in unique_per_dim[dim]:
+                    unique_per_dim[dim].append(idx)
+
+        # Sort unique indices to maintain order
+        for dim_indices in unique_per_dim:
+            dim_indices.sort()
+
+        # Build new shape
+        new_shape = tuple(len(indices) for indices in unique_per_dim)
+
+        # Build new data in correct order
+        selected_data = []
+        self._select_recursive(unique_per_dim, 0, [], selected_data)
+
+        # If single element, return it directly
+        if all(s == 1 for s in new_shape):
+            return self._data[self._flat_index(matching_multi_indices[0])]
+
+        return Tensor(selected_data, new_shape)
 
     def _select_recursive(self, index_lists: list[list[int]], dim: int, current: list[int], result: list):
         """Recursively select configs based on index lists."""
@@ -234,15 +262,6 @@ class Tensor:
             return
         for idx in index_lists[dim]:
             self._select_recursive(index_lists, dim + 1, current + [idx], result)
-
-    def _flat_index(self, indices: tuple[int, ...]) -> int:
-        """Convert multi-dimensional indices to flat index."""
-        flat = 0
-        stride = 1
-        for i in range(len(indices) - 1, -1, -1):
-            flat += indices[i] * stride
-            stride *= self._shape[i]
-        return flat
 
     def tolist(self) -> list:
         """Return data as a flat list."""
@@ -259,16 +278,15 @@ def sweep(configs: list[dict] | Tensor, variations: list[dict]) -> Tensor:
     dot-notation for nested key access. Returns a Tensor with an additional
     dimension for the variations.
 
-    The "name" key is handled specially:
-    - Names from variations become the name list for the new dimension
-    - Config names are combined with underscore separator (e.g., "exp_lr0.1")
-    - This enables name-based indexing: configs["exp", "lr0.1", "epochs10"]
+    The "name" key is handled specially: names are combined with underscore
+    separator (e.g., "exp" + "lr0.1" -> "exp_lr0.1"). This enables pattern-based
+    selection: configs["exp_lr0.1_*"] matches all configs with that prefix.
 
     Args:
         configs: Base configurations to expand (list or Tensor).
         variations: List of parameter variations to sweep over.
             Keys can use dot-notation for nested access (e.g., "mlp.width").
-            Each variation should have a "name" key for name-based indexing.
+            Each variation should have a "name" key for pattern matching.
 
     Returns:
         Tensor with shape (*old_shape, len(variations)).
@@ -276,43 +294,30 @@ def sweep(configs: list[dict] | Tensor, variations: list[dict]) -> Tensor:
     Example:
         configs = [{"name": "exp", "mlp": {"width": 32}}]
         configs = sweep(configs, [{"name": "w64", "mlp.width": 64}, {"name": "w128", "mlp.width": 128}])
-        # Returns Tensor with shape (1, 2), names = [["exp"], ["w64", "w128"]]
+        # Returns Tensor with shape (1, 2)
         # Config names become "exp_w64", "exp_w128"
+        # Access via: configs["exp_w64"] or configs["exp_*"]
     """
     if isinstance(configs, Tensor):
         old_shape = configs.shape
         old_data = configs._data
-        old_names = configs._names
     else:
         old_shape = (len(configs),)
         old_data = list(configs)
-        old_names = None
-
-    # Extract names from the first dimension if not already tracked
-    # Only do this for lists (new sweep chains) or single-dim Tensors
-    if old_names is None and len(old_shape) == 1:
-        # First sweep: extract names from base configs
-        first_dim_names = [c.get("name", f"cfg{i}") for i, c in enumerate(old_data)]
-        old_names = [first_dim_names]
-
-    # Extract names from variations for the new dimension (only if tracking names)
-    new_dim_names = [v.get("name", f"var{i}") for i, v in enumerate(variations)] if old_names is not None else None
 
     result = []
     for config in old_data:
         base_name = config.get("name", "")
         for variation in variations:
             merged = merge(config, variation)
-            # Combine names with underscore (only if tracking names)
-            if old_names is not None:
-                var_name = variation.get("name", "")
-                if base_name and var_name:
-                    merged["name"] = f"{base_name}_{var_name}"
-                elif var_name:
-                    merged["name"] = var_name
-                # else keep base_name or no name
+            # Combine names with underscore
+            var_name = variation.get("name", "")
+            if base_name and var_name:
+                merged["name"] = f"{base_name}_{var_name}"
+            elif var_name:
+                merged["name"] = var_name
+            # else keep base_name or no name
             result.append(merged)
 
     new_shape = old_shape + (len(variations),)
-    new_names = old_names + [new_dim_names] if old_names is not None else None
-    return Tensor(result, new_shape, new_names)
+    return Tensor(result, new_shape)

@@ -128,85 +128,73 @@ class TestTensor:
         assert tensor[:, 0].tolist() == [1, 3]
 
 
-class TestTensorNames:
-    """Tests for Tensor name-based indexing."""
+class TestTensorPatternMatching:
+    """Tests for Tensor pattern-based name matching."""
 
-    def test_create_with_names(self):
+    def test_exact_match_single_result(self):
+        tensor = Tensor([{"name": "a"}, {"name": "b"}])
+        result = tensor["a"]
+        assert result == {"name": "a"}
+
+    def test_exact_match_returns_single_element(self):
         tensor = Tensor(
-            [{"a": 1}, {"a": 2}],
-            shape=(2,),
-            names=[["first", "second"]],
-        )
-        assert tensor.names == [["first", "second"]]
-
-    def test_names_dimension_mismatch_raises(self):
-        with pytest.raises(ValueError, match="Names has 1 dimensions but shape has 2"):
-            Tensor([1, 2, 3, 4], shape=(2, 2), names=[["a", "b"]])
-
-    def test_names_size_mismatch_raises(self):
-        with pytest.raises(ValueError, match="Names dimension 0 has 3 names but shape has 2"):
-            Tensor([1, 2], shape=(2,), names=[["a", "b", "c"]])
-
-    def test_name_indexing_single_dim(self):
-        tensor = Tensor(
-            [{"v": 1}, {"v": 2}],
-            shape=(2,),
-            names=[["first", "second"]],
-        )
-        assert tensor["first",] == {"v": 1}
-        assert tensor["second",] == {"v": 2}
-
-    def test_name_indexing_multi_dim(self):
-        tensor = Tensor(
-            [1, 2, 3, 4],
+            [{"name": "a_x"}, {"name": "a_y"}, {"name": "b_x"}, {"name": "b_y"}],
             shape=(2, 2),
-            names=[["row0", "row1"], ["col0", "col1"]],
         )
-        assert tensor["row0", "col0"] == 1
-        assert tensor["row0", "col1"] == 2
-        assert tensor["row1", "col0"] == 3
-        assert tensor["row1", "col1"] == 4
+        result = tensor["a_x"]
+        assert result == {"name": "a_x"}
 
-    def test_name_indexing_mixed_with_int(self):
+    def test_wildcard_match(self):
         tensor = Tensor(
-            [1, 2, 3, 4],
+            [{"name": "a_x"}, {"name": "a_y"}, {"name": "b_x"}, {"name": "b_y"}],
             shape=(2, 2),
-            names=[["row0", "row1"], ["col0", "col1"]],
         )
-        assert tensor["row0", 1] == 2
-        assert tensor[0, "col1"] == 2
+        result = tensor["a_*"]
+        assert result.shape == (1, 2)
+        assert [c["name"] for c in result] == ["a_x", "a_y"]
 
-    def test_name_indexing_with_slice(self):
+    def test_wildcard_second_dimension(self):
         tensor = Tensor(
-            [1, 2, 3, 4],
+            [{"name": "a_x"}, {"name": "a_y"}, {"name": "b_x"}, {"name": "b_y"}],
             shape=(2, 2),
-            names=[["row0", "row1"], ["col0", "col1"]],
         )
-        result = tensor["row0", :]
+        result = tensor["*_x"]
+        assert result.shape == (2, 1)
+        assert [c["name"] for c in result] == ["a_x", "b_x"]
+
+    def test_pattern_preserves_structure(self):
+        """Pattern matching should preserve tensor structure."""
+        tensor = Tensor(
+            [
+                {"name": "e_a_x"}, {"name": "e_a_y"},
+                {"name": "e_b_x"}, {"name": "e_b_y"},
+            ],
+            shape=(1, 2, 2),
+        )
+        result = tensor["e_a_*"]
+        assert result.shape == (1, 1, 2)
+
+    def test_pattern_no_match_raises(self):
+        tensor = Tensor([{"name": "a"}, {"name": "b"}])
+        with pytest.raises(IndexError, match="No configs match pattern"):
+            _ = tensor["xyz"]
+
+    def test_pattern_with_question_mark(self):
+        tensor = Tensor([{"name": "a1"}, {"name": "a2"}, {"name": "b1"}])
+        result = tensor["a?"]
         assert result.shape == (2,)
-        assert result.tolist() == [1, 2]
-        assert result.names == [["col0", "col1"]]
+        assert [c["name"] for c in result] == ["a1", "a2"]
 
-    def test_name_not_found_raises(self):
+    def test_pattern_all_match(self):
         tensor = Tensor(
-            [1, 2],
-            shape=(2,),
-            names=[["a", "b"]],
+            [{"name": "x_a"}, {"name": "x_b"}, {"name": "x_c"}, {"name": "x_d"}],
+            shape=(2, 2),
         )
-        with pytest.raises(IndexError, match="Name 'c' not found"):
-            _ = tensor["c",]
+        result = tensor["x_*"]
+        assert result.shape == (2, 2)
 
-    def test_name_indexing_without_names_raises(self):
-        tensor = Tensor([1, 2], shape=(2,))
-        with pytest.raises(IndexError, match="Tensor has no name mappings"):
-            _ = tensor["a",]
-
-    def test_slice_preserves_names(self):
-        tensor = Tensor(
-            list(range(12)),
-            shape=(2, 3, 2),
-            names=[["a", "b"], ["x", "y", "z"], ["0", "1"]],
-        )
-        result = tensor[:, 1:3, :]
-        assert result.shape == (2, 2, 2)
-        assert result.names == [["a", "b"], ["y", "z"], ["0", "1"]]
+    def test_pattern_on_non_dict_no_match(self):
+        """Pattern matching on non-dict items won't match specific patterns."""
+        tensor = Tensor([1, 2, 3])
+        with pytest.raises(IndexError, match="No configs match pattern"):
+            _ = tensor["some_name"]
