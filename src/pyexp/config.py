@@ -111,6 +111,11 @@ class Tensor:
         # Pattern matching on combined name (glob-style)
         configs["exp_a_*"]  # All configs matching pattern, shape (1, 1, 2)
         configs["exp_*_x"]  # All configs matching pattern, shape (1, 2, 1)
+
+        # Dict matching on config values
+        configs[{"lr": 0.1}]  # All configs where lr == 0.1
+        configs[{"lr": 0.1, "epochs": 10}]  # Match multiple values
+        configs[{"mlp.width": 32}]  # Dot notation for nested keys
     """
 
     def __init__(self, data: list, shape: tuple[int, ...] | None = None):
@@ -164,6 +169,7 @@ class Tensor:
         Supports integers, slices, and tuples of these, plus pattern matching.
         - Single integer: flat index into data (for backwards compatibility)
         - Single string: pattern match on config["name"] (glob-style with *)
+        - Dict/Config: match configs where all key-value pairs match
         - Tuple of int/slice: multi-dimensional indexing
         Returns a new Tensor or single element.
         """
@@ -176,6 +182,10 @@ class Tensor:
         # Single string = pattern matching on name
         if isinstance(key, str):
             return self._match_pattern(key)
+
+        # Dict = match by key-value pairs
+        if isinstance(key, dict):
+            return self._match_dict(key)
 
         if not isinstance(key, tuple):
             key = (key,)
@@ -254,6 +264,66 @@ class Tensor:
             return self._data[self._flat_index(matching_multi_indices[0])]
 
         return Tensor(selected_data, new_shape)
+
+    def _match_dict(self, query: dict) -> "Tensor":
+        """Match configs by key-value pairs.
+
+        Returns configs where all query key-value pairs match.
+        Supports dot-notation keys (e.g., "mlp.width": 32) and nested dicts.
+        """
+        matching_multi_indices: list[tuple[int, ...]] = []
+        for flat_idx, item in enumerate(self._data):
+            if isinstance(item, dict) and self._dict_matches(item, query):
+                matching_multi_indices.append(self._multi_index(flat_idx))
+
+        if not matching_multi_indices:
+            raise IndexError(f"No configs match query {query}")
+
+        # Find unique indices per dimension
+        unique_per_dim: list[list[int]] = [[] for _ in self._shape]
+        for indices in matching_multi_indices:
+            for dim, idx in enumerate(indices):
+                if idx not in unique_per_dim[dim]:
+                    unique_per_dim[dim].append(idx)
+
+        for dim_indices in unique_per_dim:
+            dim_indices.sort()
+
+        new_shape = tuple(len(indices) for indices in unique_per_dim)
+
+        selected_data = []
+        self._select_recursive(unique_per_dim, 0, [], selected_data)
+
+        if all(s == 1 for s in new_shape):
+            return self._data[self._flat_index(matching_multi_indices[0])]
+
+        return Tensor(selected_data, new_shape)
+
+    def _dict_matches(self, config: dict, query: dict) -> bool:
+        """Check if config matches all key-value pairs in query."""
+        for key, expected in query.items():
+            if "." in key:
+                # Dot notation: navigate to nested value
+                parts = key.split(".")
+                value = config
+                for part in parts:
+                    if not isinstance(value, dict) or part not in value:
+                        return False
+                    value = value[part]
+            else:
+                if key not in config:
+                    return False
+                value = config[key]
+
+            # Compare values
+            if isinstance(expected, dict) and isinstance(value, dict):
+                # Recursive dict matching
+                if not self._dict_matches(value, expected):
+                    return False
+            elif value != expected:
+                return False
+
+        return True
 
     def _select_recursive(self, index_lists: list[list[int]], dim: int, current: list[int], result: list):
         """Recursively select configs based on index lists."""

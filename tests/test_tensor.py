@@ -198,3 +198,85 @@ class TestTensorPatternMatching:
         tensor = Tensor([1, 2, 3])
         with pytest.raises(IndexError, match="No configs match pattern"):
             _ = tensor["some_name"]
+
+
+class TestTensorDictMatching:
+    """Tests for Tensor dict-based matching."""
+
+    def test_simple_dict_match(self):
+        tensor = Tensor([{"x": 1}, {"x": 2}, {"x": 3}])
+        result = tensor[{"x": 2}]
+        assert result == {"x": 2}
+
+    def test_dict_match_multiple_results(self):
+        tensor = Tensor(
+            [{"a": 1, "b": 10}, {"a": 1, "b": 20}, {"a": 2, "b": 10}, {"a": 2, "b": 20}],
+            shape=(2, 2),
+        )
+        result = tensor[{"a": 1}]
+        assert result.shape == (1, 2)
+        assert [c["b"] for c in result] == [10, 20]
+
+    def test_dict_match_second_dimension(self):
+        tensor = Tensor(
+            [{"a": 1, "b": 10}, {"a": 1, "b": 20}, {"a": 2, "b": 10}, {"a": 2, "b": 20}],
+            shape=(2, 2),
+        )
+        result = tensor[{"b": 10}]
+        assert result.shape == (2, 1)
+        assert [c["a"] for c in result] == [1, 2]
+
+    def test_dict_match_multiple_keys(self):
+        tensor = Tensor(
+            [{"a": 1, "b": 10}, {"a": 1, "b": 20}, {"a": 2, "b": 10}, {"a": 2, "b": 20}],
+            shape=(2, 2),
+        )
+        result = tensor[{"a": 1, "b": 20}]
+        assert result == {"a": 1, "b": 20}
+
+    def test_dict_match_dot_notation(self):
+        tensor = Tensor([
+            {"mlp": {"width": 32}},
+            {"mlp": {"width": 64}},
+        ])
+        result = tensor[{"mlp.width": 64}]
+        assert result == {"mlp": {"width": 64}}
+
+    def test_dict_match_nested_dict(self):
+        tensor = Tensor([
+            {"mlp": {"width": 32, "depth": 2}},
+            {"mlp": {"width": 64, "depth": 2}},
+        ])
+        result = tensor[{"mlp": {"width": 32}}]
+        assert result["mlp"]["width"] == 32
+
+    def test_dict_match_no_results_raises(self):
+        tensor = Tensor([{"x": 1}, {"x": 2}])
+        with pytest.raises(IndexError, match="No configs match query"):
+            _ = tensor[{"x": 99}]
+
+    def test_dict_match_preserves_structure(self):
+        tensor = Tensor(
+            [
+                {"a": 0, "b": 0, "c": 0}, {"a": 0, "b": 0, "c": 1},
+                {"a": 0, "b": 1, "c": 0}, {"a": 0, "b": 1, "c": 1},
+                {"a": 1, "b": 0, "c": 0}, {"a": 1, "b": 0, "c": 1},
+                {"a": 1, "b": 1, "c": 0}, {"a": 1, "b": 1, "c": 1},
+            ],
+            shape=(2, 2, 2),
+        )
+        result = tensor[{"b": 0}]
+        assert result.shape == (2, 1, 2)
+
+    def test_dict_match_missing_key_no_match(self):
+        tensor = Tensor([{"x": 1}, {"y": 2}])
+        with pytest.raises(IndexError, match="No configs match query"):
+            _ = tensor[{"z": 1}]
+
+    def test_dict_match_deep_dot_notation(self):
+        tensor = Tensor([
+            {"a": {"b": {"c": 1}}},
+            {"a": {"b": {"c": 2}}},
+        ])
+        result = tensor[{"a.b.c": 1}]
+        assert result["a"]["b"]["c"] == 1
