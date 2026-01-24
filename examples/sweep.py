@@ -1,7 +1,7 @@
 """Basic example demonstrating pyexp usage."""
 
 import pyexp
-from pyexp import Config, sweep
+from pyexp import Config, Tensor, sweep
 
 
 @pyexp.experiment
@@ -18,7 +18,21 @@ def experiment(config: Config):
 @experiment.configs
 def configs() -> list[dict]:
     """Generate experiment configurations."""
-    cfgs = [{"name": "exp"}]
+    cfgs = [
+        {
+            "name": "exp",
+            "learning_rate": 0.01,
+            "mlp": {
+                "type": "MLP",
+                "width": 32,
+                "n_hidden": 2,
+                "encoding": {
+                    "type": "Sin",
+                    "octaves": 4,
+                },
+            },
+        }
+    ]
     # Single sweep of learning_rate. Generates an array of configs.
     cfgs = sweep(
         cfgs,
@@ -31,8 +45,22 @@ def configs() -> list[dict]:
     cfgs = sweep(
         cfgs,
         [
-            {"epochs": 10, "batch_size": 32},
-            {"epochs": 20, "batch_size": 16},
+            {
+                "epochs": 10,
+                "batch_size": 32,
+                "mlp.width": 32,  # Dot notation to access individual elements
+                "mlp.encoding": None,
+            },
+            {
+                "epochs": 20,
+                "batch_size": 16,
+                "mlp.width": 64,
+                "mlp.encoding": {
+                    # Overwrites the dictionary i.e. this one should not have "octaves"
+                    "type": "Tri",
+                    "n_funcs": 4,
+                },
+            },
         ],
     )
     # Should be 4 configs now (2 x 2).
@@ -40,7 +68,7 @@ def configs() -> list[dict]:
 
 
 @experiment.report
-def report(configs: list[dict], results: list):
+def report(configs: Tensor, results: Tensor):
     """Generate report from all experiment results."""
     print("\n=== Experiment Report ===")
     for config, result in zip(configs, results):
