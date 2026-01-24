@@ -43,11 +43,11 @@ def configs() -> list[dict]:
 
 
 @experiment.report
-def report(configs: list[dict], results: list):
+def report(results):
     """Print summary report."""
     print("\n=== Results ===")
-    for config, result in zip(configs, results):
-        print(f"{config['name']}: acc={result['accuracy']:.3f}, loss={result['loss']:.3f}")
+    for r in results:
+        print(f"{r['name']}: acc={r['accuracy']:.3f}, loss={r['loss']:.3f}")
 
 
 if __name__ == "__main__":

@@ -77,15 +77,25 @@ def configs() -> list[dict]:
 
 
 @experiment.report
-def report(configs: Tensor, results: Tensor):
-    """Generate report from all experiment results."""
+def report(results: Tensor):
+    """Generate report from all experiment results.
+
+    Each result contains:
+    - 'name': the combined config name
+    - 'config': the full config dict
+    - experiment outputs (e.g., 'accuracy')
+    """
     print("\n=== Experiment Report ===")
-    for config, result in zip(configs, results):
-        print(f"Config: {config['name']} -> Accuracy: {result['accuracy']:.4f}")
+    for r in results:
+        print(f"Config: {r['name']} -> Accuracy: {r['accuracy']:.4f}")
+
+    # Filter results by config values
+    lr01_results = results[{"config.learning_rate": 0.1}]
+    print(f"\nResults with lr=0.1: {lr01_results.shape}")
+
+    # Find best result
     best_idx = max(range(len(results)), key=lambda i: results[i]["accuracy"])
-    print(
-        f"\nBest: {configs[best_idx]['name']} with accuracy {results[best_idx]['accuracy']:.4f}"
-    )
+    print(f"\nBest: {results[best_idx]['name']} with accuracy {results[best_idx]['accuracy']:.4f}")
 
 
 if __name__ == "__main__":

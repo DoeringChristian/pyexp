@@ -1,6 +1,6 @@
 # pyexp
 
-A lightweight Python library for running experiments with automatic caching, configuration management, and reporting.
+A lightweight Python library for running experiments with automatic caching, configuration management, parameter sweeps, and reporting.
 
 ## Installation
 
@@ -29,9 +29,13 @@ def configs():
     ]
 
 @experiment.report
-def report(configs, results):
-    for config, result in zip(configs, results):
-        print(f"{config['name']}: {result['accuracy']}")
+def report(results):
+    # Each result contains 'name', 'config', and experiment outputs
+    for r in results:
+        print(f"{r['name']}: {r['accuracy']}")
+
+    # Filter by config values
+    fast_results = results[{"config.learning_rate": 0.01}]
 
 if __name__ == "__main__":
     experiment.run()
@@ -72,6 +76,90 @@ def experiment(config: Config):
     return {"accuracy": 0.95}
 ```
 
+### Parameter Sweeps
+
+Use `sweep()` to generate cartesian products of configurations:
+
+```python
+from pyexp import sweep
+
+@experiment.configs
+def configs():
+    cfgs = [{"name": "exp", "base_lr": 0.01}]
+
+    # Sweep over learning rates
+    cfgs = sweep(cfgs, [
+        {"name": "lr0.1", "learning_rate": 0.1},
+        {"name": "lr0.01", "learning_rate": 0.01},
+    ])
+
+    # Sweep over epochs (creates 2x2 = 4 configs)
+    cfgs = sweep(cfgs, [
+        {"name": "e10", "epochs": 10},
+        {"name": "e100", "epochs": 100},
+    ])
+
+    return cfgs  # Shape: (1, 2, 2), names: exp_lr0.1_e10, exp_lr0.1_e100, ...
+```
+
+Names are automatically combined with underscores across sweeps.
+
+### Dot Notation in Sweeps
+
+Use dot notation to update nested config values without replacing the entire dict:
+
+```python
+cfgs = [{"name": "exp", "mlp": {"width": 32, "depth": 2}}]
+cfgs = sweep(cfgs, [
+    {"name": "w64", "mlp.width": 64},   # Only updates width, keeps depth
+    {"name": "w128", "mlp.width": 128},
+])
+```
+
+### Result Filtering
+
+The report function receives a `Tensor` of results. Each result contains:
+- `name`: the combined config name
+- `config`: the full config dict
+- All experiment outputs
+
+Filter results using pattern matching or dict queries:
+
+```python
+@experiment.report
+def report(results):
+    # Pattern matching on name (glob-style)
+    lr01_results = results["exp_lr0.1_*"]  # All with lr0.1
+    epoch10_results = results["*_e10"]      # All with e10
+
+    # Dict matching on config values
+    lr01_results = results[{"config.learning_rate": 0.1}]
+
+    # Multiple constraints
+    specific = results[{"config.learning_rate": 0.1, "config.epochs": 10}]
+
+    # Nested config access
+    wide_results = results[{"config.mlp.width": 128}]
+```
+
+### Tensor Indexing
+
+Results preserve the shape from sweep operations:
+
+```python
+@experiment.report
+def report(results):
+    # Shape is (1, 2, 2) from sweeps
+    print(results.shape)
+
+    # Index by position
+    first_lr = results[:, 0, :]  # All configs with first lr value
+
+    # Access individual result
+    r = results[0, 1, 0]
+    print(r["name"], r["accuracy"])
+```
+
 ### Alternative API
 
 You can also pass configs and report functions directly:
@@ -94,3 +182,22 @@ The output directory defaults to `out/` but can be customized:
 ```python
 experiment.run(output_dir="results/")
 ```
+
+## API Reference
+
+### Functions
+
+- `sweep(configs, variations)` - Generate cartesian product of configs with variations
+- `merge(base, update)` - Merge dicts with dot-notation support
+
+### Classes
+
+- `Config` - Dict subclass with dot notation access
+- `Tensor` - Shape-preserving container with advanced indexing
+- `Experiment` - Experiment runner with caching
+
+### Decorators
+
+- `@pyexp.experiment` - Define an experiment function
+- `@experiment.configs` - Register configs generator
+- `@experiment.report` - Register report function

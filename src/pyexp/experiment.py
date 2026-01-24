@@ -47,7 +47,7 @@ class Experiment:
     def __init__(self, fn: Callable[[dict], Any]):
         self._fn = fn
         self._configs_fn: Callable[[], list[dict]] | None = None
-        self._report_fn: Callable[[list[dict], list[Any]], Any] | None = None
+        self._report_fn: Callable[[Tensor], Any] | None = None
         wraps(fn)(self)
 
     def __call__(self, config: dict) -> Any:
@@ -59,15 +59,19 @@ class Experiment:
         self._configs_fn = fn
         return fn
 
-    def report(self, fn: Callable[[list[dict], list[Any]], Any]) -> Callable[[list[dict], list[Any]], Any]:
-        """Decorator to register the report function."""
+    def report(self, fn: Callable[[Tensor], Any]) -> Callable[[Tensor], Any]:
+        """Decorator to register the report function.
+
+        The report function receives a single Tensor of results. Each result
+        contains the experiment output plus 'config' and 'name' keys for filtering.
+        """
         self._report_fn = fn
         return fn
 
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
-        report: Callable[[list[dict], list[Any]], Any] | None = None,
+        report: Callable[[Tensor], Any] | None = None,
         output_dir: str | Path = "out",
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
@@ -75,6 +79,7 @@ class Experiment:
         Args:
             configs: Optional configs function. If not provided, uses @experiment.configs decorated function.
             report: Optional report function. If not provided, uses @experiment.report decorated function.
+                    Receives a Tensor where each result has 'config' and 'name' keys.
             output_dir: Directory for caching experiment results. Defaults to "out".
         """
         configs_fn = configs or self._configs_fn
@@ -117,14 +122,25 @@ class Experiment:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
 
-            results.append(result)
+            # Wrap result with config and name for filtering
+            config_without_out = {k: v for k, v in config.items() if k != "out"}
+            if isinstance(result, dict):
+                wrapped_result = {
+                    "name": config.get("name", ""),
+                    "config": config_without_out,
+                    **result,
+                }
+            else:
+                wrapped_result = {
+                    "name": config.get("name", ""),
+                    "config": config_without_out,
+                    "value": result,
+                }
+            results.append(wrapped_result)
 
-        # Wrap configs and results in Tensors with matching shapes
-        if not isinstance(config_list, Tensor):
-            config_list = Tensor(list(config_list), shape)
         results = Tensor(results, shape)
 
-        return report_fn(config_list, results)
+        return report_fn(results)
 
 
 def experiment(fn: Callable[[dict], Any]) -> Experiment:
@@ -135,15 +151,20 @@ def experiment(fn: Callable[[dict], Any]) -> Experiment:
         @pyexp.experiment
         def my_experiment(config):
             ...
+            return {"accuracy": 0.95}
 
-        # Option 1: Use decorators
         @my_experiment.configs
         def configs():
-            return [{"lr": 0.01}, {"lr": 0.001}]
+            return [{"name": "exp", "lr": 0.01}, {"name": "exp2", "lr": 0.001}]
 
         @my_experiment.report
-        def report(configs, results):
-            ...
+        def report(results):
+            # Each result has 'name', 'config', and experiment outputs
+            # Filter by config values:
+            lr_001 = results[{"config.lr": 0.001}]
+            # Access fields:
+            for r in results:
+                print(f"{r['name']}: {r['accuracy']}")
 
         my_experiment.run()
 
