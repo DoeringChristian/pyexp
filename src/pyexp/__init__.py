@@ -42,6 +42,31 @@ class Config(dict):
             raise AttributeError(f"Config has no attribute '{name}'")
 
 
+def sweep(configs: list[dict], variations: list[dict]) -> list[dict]:
+    """Generate cartesian product of configs and parameter variations.
+
+    Each config is combined with each variation, with variation values
+    overriding config values.
+
+    Args:
+        configs: Base configurations to expand.
+        variations: List of parameter variations to sweep over.
+
+    Returns:
+        List of configs, one for each (config, variation) combination.
+
+    Example:
+        configs = [{"name": "exp", "lr": 0.01}]
+        configs = sweep(configs, [{"lr": 0.1}, {"lr": 0.01}])
+        # Returns: [{"name": "exp", "lr": 0.1}, {"name": "exp", "lr": 0.01}]
+    """
+    result = []
+    for config in configs:
+        for variation in variations:
+            result.append({**config, **variation})
+    return result
+
+
 def _config_hash(config: dict) -> str:
     """Generate a short hash of the config for cache identification."""
     config_without_name = {k: v for k, v in config.items() if k != "name"}
