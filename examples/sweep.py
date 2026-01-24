@@ -37,8 +37,8 @@ def configs() -> list[dict]:
     cfgs = sweep(
         cfgs,
         [
-            {"learning_rate": 0.1},
-            {"learning_rate": 0.01},
+            {"learning_rate": 0.1, "name": "lr0.1"},
+            {"learning_rate": 0.01, "name": "lr0.2"},
         ],
     )
     # Sweep combination of multiple parameters.
@@ -46,12 +46,14 @@ def configs() -> list[dict]:
         cfgs,
         [
             {
+                "name": "epochs10",
                 "epochs": 10,
                 "batch_size": 32,
                 "mlp.width": 32,  # Dot notation to access individual elements
                 "mlp.encoding": None,
             },
             {
+                "name": "epochs20",
                 "epochs": 20,
                 "batch_size": 16,
                 "mlp.width": 64,
@@ -64,6 +66,10 @@ def configs() -> list[dict]:
         ],
     )
     # Should be 4 configs now (2 x 2).
+    # Names should be "exp_lr0.1_epochs10" etc
+
+    # Should be able to access
+    cfgs["exp", "lr0.1", "epochs10"]
     return cfgs
 
 

@@ -123,3 +123,77 @@ class TestSweep:
         assert result[0]["mlp"]["encoding"] is None
         assert result[1]["mlp"]["encoding"] == {"type": "Tri", "n_funcs": 4}
         assert "octaves" not in result[1]["mlp"]["encoding"]  # Not merged!
+
+
+class TestSweepNames:
+    """Tests for sweep name tracking and combination."""
+
+    def test_sweep_extracts_names_from_base(self):
+        configs = [{"name": "exp1"}, {"name": "exp2"}]
+        result = sweep(configs, [{"x": 1}])
+        assert result.names is not None
+        assert result.names[0] == ["exp1", "exp2"]
+
+    def test_sweep_extracts_names_from_variations(self):
+        configs = [{"name": "exp"}]
+        result = sweep(configs, [{"name": "lr0.1"}, {"name": "lr0.2"}])
+        assert result.names is not None
+        assert result.names[1] == ["lr0.1", "lr0.2"]
+
+    def test_sweep_combines_names(self):
+        configs = [{"name": "exp"}]
+        result = sweep(configs, [{"name": "lr0.1"}, {"name": "lr0.2"}])
+        assert result[0]["name"] == "exp_lr0.1"
+        assert result[1]["name"] == "exp_lr0.2"
+
+    def test_sweep_chained_combines_all_names(self):
+        configs = [{"name": "exp"}]
+        configs = sweep(configs, [{"name": "lr0.1"}, {"name": "lr0.2"}])
+        configs = sweep(configs, [{"name": "e10"}, {"name": "e20"}])
+
+        # All 4 configs have combined names
+        assert configs[0]["name"] == "exp_lr0.1_e10"
+        assert configs[1]["name"] == "exp_lr0.1_e20"
+        assert configs[2]["name"] == "exp_lr0.2_e10"
+        assert configs[3]["name"] == "exp_lr0.2_e20"
+
+    def test_sweep_name_based_indexing(self):
+        configs = [{"name": "exp"}]
+        configs = sweep(configs, [{"name": "lr0.1", "lr": 0.1}, {"name": "lr0.2", "lr": 0.2}])
+        configs = sweep(configs, [{"name": "e10", "epochs": 10}, {"name": "e20", "epochs": 20}])
+
+        # Index by name
+        cfg = configs["exp", "lr0.1", "e10"]
+        assert cfg["lr"] == 0.1
+        assert cfg["epochs"] == 10
+
+        cfg = configs["exp", "lr0.2", "e20"]
+        assert cfg["lr"] == 0.2
+        assert cfg["epochs"] == 20
+
+    def test_sweep_generates_default_names(self):
+        """Configs without names get default names like cfg0, cfg1."""
+        configs = [{"a": 1}, {"a": 2}]
+        result = sweep(configs, [{"name": "x"}])
+        assert result.names[0] == ["cfg0", "cfg1"]
+
+    def test_sweep_variations_without_names(self):
+        """Variations without names get default names like var0, var1."""
+        configs = [{"name": "exp"}]
+        result = sweep(configs, [{"lr": 0.1}, {"lr": 0.2}])
+        assert result.names[1] == ["var0", "var1"]
+
+    def test_sweep_multidim_tensor_no_names(self):
+        """Multi-dim Tensor without names doesn't add name tracking."""
+        configs = Tensor([{"a": i} for i in range(6)], shape=(2, 3))
+        result = sweep(configs, [{"b": 1}, {"b": 2}])
+        assert result.names is None  # No name tracking for multi-dim tensors
+
+    def test_sweep_slicing_preserves_names(self):
+        configs = [{"name": "exp"}]
+        configs = sweep(configs, [{"name": "a", "x": 1}, {"name": "b", "x": 2}])
+        configs = sweep(configs, [{"name": "c", "y": 10}, {"name": "d", "y": 20}])
+
+        # Slice and check names preserved
+        sliced = configs[:, :, 0]
+        assert sliced.names == [["exp"], ["a", "b"]]
