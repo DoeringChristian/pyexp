@@ -2,6 +2,14 @@
 
 from .config import Config, Tensor, merge, sweep
 from .experiment import Experiment, experiment
+from .executors import (
+    Executor,
+    ExecutorName,
+    InlineExecutor,
+    SubprocessExecutor,
+    ForkExecutor,
+    get_executor,
+)
 
 __all__ = [
     "Config",
@@ -10,4 +18,10 @@ __all__ = [
     "sweep",
     "Experiment",
     "experiment",
+    "Executor",
+    "ExecutorName",
+    "InlineExecutor",
+    "SubprocessExecutor",
+    "ForkExecutor",
+    "get_executor",
 ]

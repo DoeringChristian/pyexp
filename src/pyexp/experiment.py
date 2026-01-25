@@ -7,13 +7,9 @@ import argparse
 import hashlib
 import json
 import pickle
-import subprocess
-import sys
-import tempfile
-
-import cloudpickle
 
 from .config import Config, Tensor
+from .executors import Executor, ExecutorName, get_executor
 
 
 def _config_hash(config: dict) -> str:
@@ -46,12 +42,27 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _resolve_executor(
+    executor: ExecutorName | Executor | None,
+    default: ExecutorName | Executor,
+) -> Executor:
+    """Resolve executor parameter to an Executor instance."""
+    if executor is None:
+        return get_executor(default)
+    return get_executor(executor)
+
+
 class Experiment:
     """An experiment that can be run with configs and report functions."""
 
-    def __init__(self, fn: Callable[[dict], Any], *, isolate: bool = True):
+    def __init__(
+        self,
+        fn: Callable[[dict], Any],
+        *,
+        executor: ExecutorName | Executor = "subprocess",
+    ):
         self._fn = fn
-        self._isolate = isolate
+        self._executor_default = executor
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor], Any] | None = None
         wraps(fn)(self)
@@ -74,63 +85,12 @@ class Experiment:
         self._report_fn = fn
         return fn
 
-    def _run_in_subprocess(self, config: dict, experiment_dir: Path, result_path: Path) -> dict:
-        """Run a single experiment in an isolated subprocess.
-
-        Args:
-            config: The experiment config.
-            experiment_dir: Directory for this experiment's outputs.
-            result_path: Path where result should be written.
-
-        Returns:
-            The experiment result (may contain __error__ key if failed).
-        """
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-        config_with_out = Config({**config, "out": experiment_dir})
-
-        # Create payload with serialized function
-        payload = {
-            "fn": self._fn,
-            "config": config_with_out,
-            "result_path": str(result_path),
-        }
-
-        # Write payload to temp file
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pkl", delete=False) as f:
-            payload_path = f.name
-            cloudpickle.dump(payload, f)
-
-        try:
-            # Run worker subprocess
-            proc = subprocess.run(
-                [sys.executable, "-m", "pyexp.worker", payload_path],
-                capture_output=True,
-                text=True,
-            )
-
-            # Check if result was written
-            if result_path.exists():
-                with open(result_path, "rb") as f:
-                    return pickle.load(f)
-            else:
-                # Subprocess crashed before writing result
-                return {
-                    "__error__": True,
-                    "type": "SubprocessError",
-                    "message": f"Subprocess exited with code {proc.returncode}",
-                    "stdout": proc.stdout,
-                    "stderr": proc.stderr,
-                }
-        finally:
-            # Clean up payload file
-            Path(payload_path).unlink(missing_ok=True)
-
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
         report: Callable[[Tensor], Any] | None = None,
         output_dir: str | Path = "out",
-        isolate: bool | None = None,
+        executor: ExecutorName | Executor | None = None,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -139,10 +99,14 @@ class Experiment:
             report: Optional report function. If not provided, uses @experiment.report decorated function.
                     Receives a Tensor where each result has 'config' and 'name' keys.
             output_dir: Directory for caching experiment results. Defaults to "out".
-            isolate: If True, run each experiment in a separate subprocess for robustness
-                     against crashes (including segfaults). Defaults to the value set in @experiment decorator (True if not specified).
+            executor: Execution strategy for running experiments. Can be:
+                - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
+                - "fork": Run in forked process (Unix only, guarantees same module state)
+                - "inline": Run in same process (no isolation, useful for debugging)
+                - An Executor instance: Use custom executor
+                Defaults to the value set in @experiment decorator ("subprocess" if not specified).
         """
-        isolate = isolate if isolate is not None else self._isolate
+        exec_instance = _resolve_executor(executor, self._executor_default)
         configs_fn = configs or self._configs_fn
         report_fn = report or self._report_fn
 
@@ -174,14 +138,9 @@ class Experiment:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
             elif args.rerun or not result_path.exists():
-                if isolate:
-                    result = self._run_in_subprocess(config, experiment_dir, result_path)
-                else:
-                    experiment_dir.mkdir(parents=True, exist_ok=True)
-                    config_with_out = Config({**config, "out": experiment_dir})
-                    result = self._fn(config_with_out)
-                    with open(result_path, "wb") as f:
-                        pickle.dump(result, f)
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                config_with_out = Config({**config, "out": experiment_dir})
+                result = exec_instance.run(self._fn, config_with_out, result_path)
             else:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
@@ -217,14 +176,17 @@ class Experiment:
 def experiment(
     fn: Callable[[dict], Any] | None = None,
     *,
-    isolate: bool = True,
+    executor: ExecutorName | Executor = "subprocess",
 ) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
     """Decorator to create an Experiment from a function.
 
     Args:
-        isolate: Default value for subprocess isolation. If True, experiments run in
-                 separate subprocesses for robustness against crashes. Can be overridden
-                 in run(). Defaults to True.
+        executor: Default execution strategy for running experiments. Can be:
+            - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
+            - "fork": Run in forked process (Unix only, guarantees same module state)
+            - "inline": Run in same process (no isolation, useful for debugging)
+            - An Executor instance: Use custom executor
+            Can be overridden in run().
 
     Example usage:
 
@@ -234,7 +196,7 @@ def experiment(
             return {"accuracy": 0.95}
 
         # Or with arguments:
-        @pyexp.experiment(isolate=False)
+        @pyexp.experiment(executor="fork")
         def my_experiment(config):
             ...
 
@@ -255,13 +217,16 @@ def experiment(
 
         # Option 2: Pass functions directly
         my_experiment.run(configs=configs_fn, report=report_fn)
+
+        # Option 3: Override executor at runtime
+        my_experiment.run(executor="inline")  # Run without isolation for debugging
     """
     def decorator(f: Callable[[dict], Any]) -> Experiment:
-        return Experiment(f, isolate=isolate)
+        return Experiment(f, executor=executor)
 
     if fn is not None:
         # Called without arguments: @experiment
-        return Experiment(fn, isolate=isolate)
+        return Experiment(fn, executor=executor)
     else:
-        # Called with arguments: @experiment(isolate=False)
+        # Called with arguments: @experiment(executor="fork")
         return decorator
