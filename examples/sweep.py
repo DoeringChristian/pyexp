@@ -95,7 +95,9 @@ def report(results: Tensor):
 
     # Find best result
     best_idx = max(range(len(results)), key=lambda i: results[i]["accuracy"])
-    print(f"\nBest: {results[best_idx]['name']} with accuracy {results[best_idx]['accuracy']:.4f}")
+    print(
+        f"\nBest: {results[best_idx]['name']} with accuracy {results[best_idx]['accuracy']:.4f}"
+    )
 
 
 if __name__ == "__main__":

@@ -7,6 +7,11 @@ import argparse
 import hashlib
 import json
 import pickle
+import subprocess
+import sys
+import tempfile
+
+import cloudpickle
 
 from .config import Config, Tensor
 
@@ -68,11 +73,63 @@ class Experiment:
         self._report_fn = fn
         return fn
 
+    def _run_in_subprocess(self, config: dict, experiment_dir: Path, result_path: Path) -> dict:
+        """Run a single experiment in an isolated subprocess.
+
+        Args:
+            config: The experiment config.
+            experiment_dir: Directory for this experiment's outputs.
+            result_path: Path where result should be written.
+
+        Returns:
+            The experiment result (may contain __error__ key if failed).
+        """
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        config_with_out = Config({**config, "out": experiment_dir})
+
+        # Create payload with serialized function
+        payload = {
+            "fn": self._fn,
+            "config": config_with_out,
+            "result_path": str(result_path),
+        }
+
+        # Write payload to temp file
+        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pkl", delete=False) as f:
+            payload_path = f.name
+            cloudpickle.dump(payload, f)
+
+        try:
+            # Run worker subprocess
+            proc = subprocess.run(
+                [sys.executable, "-m", "pyexp.worker", payload_path],
+                capture_output=True,
+                text=True,
+            )
+
+            # Check if result was written
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    return pickle.load(f)
+            else:
+                # Subprocess crashed before writing result
+                return {
+                    "__error__": True,
+                    "type": "SubprocessError",
+                    "message": f"Subprocess exited with code {proc.returncode}",
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                }
+        finally:
+            # Clean up payload file
+            Path(payload_path).unlink(missing_ok=True)
+
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
         report: Callable[[Tensor], Any] | None = None,
         output_dir: str | Path = "out",
+        isolate: bool = True,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -81,6 +138,8 @@ class Experiment:
             report: Optional report function. If not provided, uses @experiment.report decorated function.
                     Receives a Tensor where each result has 'config' and 'name' keys.
             output_dir: Directory for caching experiment results. Defaults to "out".
+            isolate: If True, run each experiment in a separate subprocess for robustness
+                     against crashes (including segfaults). Defaults to True.
         """
         configs_fn = configs or self._configs_fn
         report_fn = report or self._report_fn
@@ -113,18 +172,28 @@ class Experiment:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
             elif args.rerun or not result_path.exists():
-                experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = Config({**config, "out": experiment_dir})
-                result = self._fn(config_with_out)
-                with open(result_path, "wb") as f:
-                    pickle.dump(result, f)
+                if isolate:
+                    result = self._run_in_subprocess(config, experiment_dir, result_path)
+                else:
+                    experiment_dir.mkdir(parents=True, exist_ok=True)
+                    config_with_out = Config({**config, "out": experiment_dir})
+                    result = self._fn(config_with_out)
+                    with open(result_path, "wb") as f:
+                        pickle.dump(result, f)
             else:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
 
             # Wrap result with config and name for filtering
             config_without_out = {k: v for k, v in config.items() if k != "out"}
-            if isinstance(result, dict):
+            if isinstance(result, dict) and not result.get("__error__"):
+                wrapped_result = {
+                    "name": config.get("name", ""),
+                    "config": config_without_out,
+                    **result,
+                }
+            elif isinstance(result, dict) and result.get("__error__"):
+                # Keep error info but add config context
                 wrapped_result = {
                     "name": config.get("name", ""),
                     "config": config_without_out,

@@ -107,8 +107,9 @@ class TestExperimentRun:
             return results[0]["result"]
 
         with patch.object(sys, "argv", ["test"]):
-            result1 = my_exp.run(output_dir=tmp_path)
-            result2 = my_exp.run(output_dir=tmp_path)
+            # Use isolate=False to track call_count in same process
+            result1 = my_exp.run(output_dir=tmp_path, isolate=False)
+            result2 = my_exp.run(output_dir=tmp_path, isolate=False)
 
         assert result1 == 42
         assert result2 == 42
@@ -132,10 +133,11 @@ class TestExperimentRun:
             return results[0]["result"]
 
         with patch.object(sys, "argv", ["test"]):
-            my_exp.run(output_dir=tmp_path)
+            # Use isolate=False to track call_count in same process
+            my_exp.run(output_dir=tmp_path, isolate=False)
 
         with patch.object(sys, "argv", ["test", "--rerun"]):
-            result = my_exp.run(output_dir=tmp_path)
+            result = my_exp.run(output_dir=tmp_path, isolate=False)
 
         assert call_count == 2
         assert result == 2
@@ -218,7 +220,8 @@ class TestExperimentRun:
             return results
 
         with patch.object(sys, "argv", ["test"]):
-            my_exp.run(output_dir=tmp_path)
+            # Use isolate=False to capture received_out in same process
+            my_exp.run(output_dir=tmp_path, isolate=False)
 
         assert received_out is not None
         assert isinstance(received_out, Path)
@@ -242,7 +245,8 @@ class TestExperimentRun:
             return results
 
         with patch.object(sys, "argv", ["test"]):
-            my_exp.run(output_dir=tmp_path)
+            # Use isolate=False to capture received_config in same process
+            my_exp.run(output_dir=tmp_path, isolate=False)
 
         assert isinstance(received_config, Config)
         assert received_config.nested.a == 1
@@ -452,3 +456,126 @@ class TestExperimentRun:
         assert result["name"] == "test"
         assert result["config"]["x"] == 5
         assert result["value"] == 10
+
+
+class TestSubprocessExecution:
+    """Tests for subprocess-based experiment execution."""
+
+    def test_isolate_runs_in_subprocess(self, tmp_path):
+        """Experiments run in subprocess by default (isolate=True)."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        assert result == 10
+
+    def test_isolate_handles_exception(self, tmp_path):
+        """Exceptions in subprocess are captured and returned as error results."""
+        @experiment
+        def my_exp(config):
+            raise ValueError("Test error")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "failing", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        assert result["__error__"] is True
+        assert result["type"] == "ValueError"
+        assert "Test error" in result["message"]
+        assert result["name"] == "failing"
+
+    def test_isolate_continues_after_failure(self, tmp_path):
+        """Other experiments continue even if one fails."""
+        @experiment
+        def my_exp(config):
+            if config["x"] == 2:
+                raise ValueError("Fail on x=2")
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "a", "x": 1},
+                {"name": "b", "x": 2},  # This will fail
+                {"name": "c", "x": 3},
+            ]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            results = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        # First and third succeed
+        assert results[0]["result"] == 1
+        assert results[2]["result"] == 3
+
+        # Second failed
+        assert results[1]["__error__"] is True
+        assert results[1]["type"] == "ValueError"
+
+    def test_isolate_multiple_configs(self, tmp_path):
+        """Multiple configs all run in separate subprocesses."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"] ** 2}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "a", "x": 2},
+                {"name": "b", "x": 3},
+                {"name": "c", "x": 4},
+            ]
+
+        @my_exp.report
+        def report(results):
+            return [r["result"] for r in results]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        assert result == [4, 9, 16]
+
+    def test_isolate_with_sweep(self, tmp_path):
+        """Subprocess execution works with sweep configurations."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"] + config["y"]}
+
+        @my_exp.configs
+        def configs():
+            cfgs = [{"name": "exp"}]
+            cfgs = sweep(cfgs, [{"name": "a", "x": 1}, {"name": "b", "x": 2}])
+            cfgs = sweep(cfgs, [{"name": "c", "y": 10}, {"name": "d", "y": 20}])
+            return cfgs
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            results = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        assert results.shape == (1, 2, 2)
+        assert results[0, 0, 0]["result"] == 11  # x=1, y=10
+        assert results[0, 1, 1]["result"] == 22  # x=2, y=20
