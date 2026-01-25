@@ -8,6 +8,7 @@ from .executors import (
     InlineExecutor,
     SubprocessExecutor,
     ForkExecutor,
+    RayExecutor,
     get_executor,
 )
 
@@ -23,5 +24,6 @@ __all__ = [
     "InlineExecutor",
     "SubprocessExecutor",
     "ForkExecutor",
+    "RayExecutor",
     "get_executor",
 ]

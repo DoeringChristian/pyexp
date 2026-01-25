@@ -103,6 +103,7 @@ class Experiment:
                 - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
                 - "fork": Run in forked process (Unix only, guarantees same module state)
                 - "inline": Run in same process (no isolation, useful for debugging)
+                - "ray": Run using Ray for distributed execution (requires `pip install pyexp[ray]`)
                 - An Executor instance: Use custom executor
                 Defaults to the value set in @experiment decorator ("subprocess" if not specified).
         """
@@ -185,6 +186,7 @@ def experiment(
             - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
             - "fork": Run in forked process (Unix only, guarantees same module state)
             - "inline": Run in same process (no isolation, useful for debugging)
+            - "ray": Run using Ray for distributed execution (requires `pip install pyexp[ray]`)
             - An Executor instance: Use custom executor
             Can be overridden in run().
 

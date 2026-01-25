@@ -8,6 +8,7 @@ dependencies = ["cloudpickle>=3.0"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+ray = ["ray>=2.0"]
 
 [build-system]
 requires = ["hatchling"]

@@ -790,6 +790,136 @@ class TestForkExecution:
         assert results[0, 1, 1]["result"] == 22  # x=2, y=20
 
 
+def ray_available():
+    """Check if Ray is installed."""
+    try:
+        import ray
+        return True
+    except ImportError:
+        return False
+
+
+@pytest.mark.skipif(not ray_available(), reason="Ray not installed")
+class TestRayExecution:
+    """Tests for Ray-based experiment execution."""
+
+    def test_ray_executor_with_options(self):
+        """RayExecutor accepts configuration options."""
+        from pyexp import RayExecutor
+
+        # Should not raise - just testing initialization
+        executor = RayExecutor(num_cpus=2)
+        assert executor._ray.is_initialized()
+
+    def test_ray_executor_with_runtime_env(self, tmp_path):
+        """RayExecutor works with runtime_env configuration."""
+        from pyexp import RayExecutor
+
+        executor = RayExecutor(
+            runtime_env={"working_dir": str(tmp_path)}
+        )
+
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 42}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor=executor)
+
+        assert result == 42
+
+    def test_ray_runs_experiment(self, tmp_path):
+        """Experiments run correctly with ray executor."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="ray")
+
+        assert result == 10
+
+    def test_ray_handles_exception(self, tmp_path):
+        """Exceptions in Ray task are captured and returned as error results."""
+        @experiment
+        def my_exp(config):
+            raise ValueError("Test error in ray")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "failing", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="ray")
+
+        assert result["__error__"] is True
+        assert result["type"] == "ValueError"
+        assert "Test error in ray" in result["message"]
+        assert result["name"] == "failing"
+
+    def test_ray_multiple_configs(self, tmp_path):
+        """Multiple configs run with Ray executor."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"] ** 2}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "a", "x": 2},
+                {"name": "b", "x": 3},
+                {"name": "c", "x": 4},
+            ]
+
+        @my_exp.report
+        def report(results):
+            return [r["result"] for r in results]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="ray")
+
+        assert result == [4, 9, 16]
+
+    def test_ray_decorator_default(self, tmp_path):
+        """Can set ray as default executor in decorator."""
+        @experiment(executor="ray")
+        def my_exp(config):
+            return {"result": config["x"] * 3}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 7}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path)
+
+        assert result == 21
+
+
 class TestCustomExecutor:
     """Tests for custom executor support."""
 
