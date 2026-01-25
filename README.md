@@ -130,17 +130,29 @@ experiment.run(executor="inline")  # Debug mode
 
 ### Distributed Execution with Ray
 
-For cluster execution, use `RayExecutor` with configuration:
+Use `executor="ray"` for Ray-based execution:
+
+```python
+# Local Ray execution
+experiment.run(executor="ray")
+
+# Remote cluster execution (syncs working directory automatically)
+experiment.run(executor="ray://cluster:10001")
+experiment.run(executor="ray:auto")  # Connect to existing cluster
+
+# Set defaults in decorator
+@pyexp.experiment(executor="ray://cluster:10001")
+def my_experiment(config):
+    ...
+```
+
+For advanced configuration, pass a `RayExecutor` instance:
 
 ```python
 from pyexp import RayExecutor
 
-# Local Ray execution
-experiment.run(executor="ray")
-
-# Connect to cluster with code sync
 executor = RayExecutor(
-    address="auto",  # Or "ray://cluster-head:10001"
+    address="ray://cluster:10001",
     runtime_env={
         "working_dir": ".",            # Sync current directory to workers
         "excludes": ["data/", "*.pt"], # Don't upload large files

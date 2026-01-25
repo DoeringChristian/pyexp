@@ -73,7 +73,7 @@ class Experiment:
         fn: Callable[[dict], Any],
         *,
         name: str | None = None,
-        executor: ExecutorName | Executor = "subprocess",
+        executor: ExecutorName | Executor | str = "subprocess",
         timestamp: bool = True,
     ):
         self._fn = fn
@@ -107,7 +107,7 @@ class Experiment:
         configs: Callable[[], list[dict]] | None = None,
         report: Callable[[Tensor], Any] | None = None,
         output_dir: str | Path = "out",
-        executor: ExecutorName | Executor | None = None,
+        executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
         timestamp: bool | None = None,
     ) -> Any:
@@ -122,7 +122,8 @@ class Experiment:
                 - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
                 - "fork": Run in forked process (Unix only, guarantees same module state)
                 - "inline": Run in same process (no isolation, useful for debugging)
-                - "ray": Run using Ray for distributed execution (requires `pip install pyexp[ray]`)
+                - "ray": Run using Ray locally (requires `pip install pyexp[ray]`)
+                - "ray:<address>" or "ray://host:port": Run on Ray cluster (e.g., "ray:auto", "ray://cluster:10001")
                 - An Executor instance: Use custom executor
                 Defaults to the value set in @experiment decorator ("subprocess" if not specified).
             name: Experiment name for the output folder. Defaults to function name.
@@ -133,7 +134,28 @@ class Experiment:
             - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
             - timestamp=False: out/<name>/<config_name>-<hash>/
         """
-        exec_instance = _resolve_executor(executor, self._executor_default)
+        # Resolve executor
+        resolved_executor = executor if executor is not None else self._executor_default
+
+        # If executor is already an Executor instance, use it directly
+        if isinstance(resolved_executor, Executor):
+            exec_instance = resolved_executor
+        # Parse "ray://..." (Ray URI) or "ray:<address>" format for remote Ray execution
+        elif isinstance(resolved_executor, str) and (
+            resolved_executor.startswith("ray://") or
+            (resolved_executor.startswith("ray:") and not resolved_executor.startswith("ray://"))
+        ):
+            from .executors import RayExecutor
+            if resolved_executor.startswith("ray://"):
+                address = resolved_executor  # Use full URI as address
+            else:
+                address = resolved_executor[4:]  # Remove "ray:" prefix
+            exec_instance = RayExecutor(
+                address=address,
+                runtime_env={"working_dir": "."},
+            )
+        else:
+            exec_instance = get_executor(resolved_executor)
         configs_fn = configs or self._configs_fn
         report_fn = report or self._report_fn
         exp_name = name or self._name
@@ -218,7 +240,7 @@ def experiment(
     fn: Callable[[dict], Any] | None = None,
     *,
     name: str | None = None,
-    executor: ExecutorName | Executor = "subprocess",
+    executor: ExecutorName | Executor | str = "subprocess",
     timestamp: bool = True,
 ) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
     """Decorator to create an Experiment from a function.
@@ -229,7 +251,8 @@ def experiment(
             - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
             - "fork": Run in forked process (Unix only, guarantees same module state)
             - "inline": Run in same process (no isolation, useful for debugging)
-            - "ray": Run using Ray for distributed execution (requires `pip install pyexp[ray]`)
+            - "ray": Run using Ray locally (requires `pip install pyexp[ray]`)
+            - "ray:<address>" or "ray://host:port": Run on Ray cluster (e.g., "ray:auto", "ray://cluster:10001")
             - An Executor instance: Use custom executor
             Can be overridden in run().
         timestamp: If True (default), create a timestamped subfolder for each run.
@@ -248,6 +271,11 @@ def experiment(
 
         # Or with arguments:
         @pyexp.experiment(name="mnist", executor="fork", timestamp=False)
+        def my_experiment(config):
+            ...
+
+        # Ray on remote cluster:
+        @pyexp.experiment(executor="ray://cluster:10001")
         def my_experiment(config):
             ...
 
@@ -270,7 +298,7 @@ def experiment(
         my_experiment.run(configs=configs_fn, report=report_fn)
 
         # Option 3: Override settings at runtime
-        my_experiment.run(executor="inline", timestamp=False)
+        my_experiment.run(executor="ray:auto")
 
     CLI arguments:
         --report              Only generate report from cached results

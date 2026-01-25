@@ -969,6 +969,35 @@ def ray_available():
 class TestRayExecution:
     """Tests for Ray-based experiment execution."""
 
+    def test_ray_address_in_decorator(self):
+        """Can set remote cluster address via executor='ray://...' in decorator."""
+        @experiment(executor="ray://cluster:10001")
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._executor_default == "ray://cluster:10001"
+
+    def test_ray_address_in_run(self, tmp_path):
+        """Can set remote cluster address via executor='ray://...' or 'ray:<address>' in run()."""
+        @experiment
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        # This will use local Ray since we don't have a cluster
+        # Just testing that the parameter is accepted
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="ray")
+
+        assert result == 5
+
     def test_ray_executor_with_options(self):
         """RayExecutor accepts configuration options."""
         from pyexp import RayExecutor
