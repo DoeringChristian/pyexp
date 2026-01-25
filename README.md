@@ -1,11 +1,14 @@
 # pyexp
 
-A lightweight Python library for running experiments with automatic caching, configuration management, parameter sweeps, and reporting.
+A lightweight Python library for running experiments with automatic caching, configuration management, parameter sweeps, robust execution, and reporting.
 
 ## Installation
 
 ```bash
 pip install git+https://github.com/username/pyexp.git
+
+# With Ray support for distributed execution
+pip install "git+https://github.com/username/pyexp.git#egg=pyexp[ray]"
 ```
 
 ## Quick Start
@@ -52,6 +55,67 @@ python main.py          # Runs all experiments
 python main.py          # Skips experiments, loads from cache
 python main.py --rerun  # Forces re-run, ignores cache
 python main.py --report # Only runs report from cached results
+```
+
+### Robust Execution
+
+By default, each experiment runs in an isolated subprocess, protecting against crashes (including segfaults). Failed experiments return error information without stopping other experiments:
+
+```python
+@experiment.report
+def report(results):
+    for r in results:
+        if r.get("__error__"):
+            print(f"{r['name']} failed: {r['type']}: {r['message']}")
+        else:
+            print(f"{r['name']}: {r['accuracy']}")
+```
+
+### Execution Modes
+
+Choose how experiments are executed using the `executor` parameter:
+
+```python
+# In decorator (sets default)
+@pyexp.experiment(executor="subprocess")  # Default: isolated subprocess
+@pyexp.experiment(executor="fork")        # Unix only: fast, same module state
+@pyexp.experiment(executor="inline")      # No isolation, useful for debugging
+@pyexp.experiment(executor="ray")         # Distributed execution with Ray
+
+# Or override at runtime
+experiment.run(executor="inline")  # Debug mode
+```
+
+| Executor | Platform | Isolation | Use Case |
+|----------|----------|-----------|----------|
+| `"subprocess"` | All | Strong | Default, crash-safe, cross-platform |
+| `"fork"` | Unix | Strong | Fast startup, identical module state |
+| `"inline"` | All | None | Debugging, quick iteration |
+| `"ray"` | All | Strong | Distributed/multi-machine execution |
+
+### Distributed Execution with Ray
+
+For cluster execution, use `RayExecutor` with configuration:
+
+```python
+from pyexp import RayExecutor
+
+# Local Ray execution
+experiment.run(executor="ray")
+
+# Connect to cluster with code sync
+executor = RayExecutor(
+    address="auto",  # Or "ray://cluster-head:10001"
+    runtime_env={
+        "working_dir": ".",            # Sync current directory to workers
+        "excludes": ["data/", "*.pt"], # Don't upload large files
+        "pip": ["pandas", "numpy"],    # Install packages on workers
+    },
+    num_cpus=4,
+    num_gpus=1,
+)
+
+experiment.run(executor=executor)
 ```
 
 ### Config Class
@@ -160,6 +224,24 @@ def report(results):
     print(r["name"], r["accuracy"])
 ```
 
+### Custom Executors
+
+Create custom execution strategies by subclassing `Executor`:
+
+```python
+from pyexp import Executor
+
+class MyExecutor(Executor):
+    def run(self, fn, config, result_path):
+        # Custom execution logic
+        result = fn(config)
+        with open(result_path, "wb") as f:
+            pickle.dump(result, f)
+        return result
+
+experiment.run(executor=MyExecutor())
+```
+
 ### Alternative API
 
 You can also pass configs and report functions directly:
@@ -189,15 +271,26 @@ experiment.run(output_dir="results/")
 
 - `sweep(configs, variations)` - Generate cartesian product of configs with variations
 - `merge(base, update)` - Merge dicts with dot-notation support
+- `get_executor(name)` - Get executor by name or return instance
 
 ### Classes
 
 - `Config` - Dict subclass with dot notation access
 - `Tensor` - Shape-preserving container with advanced indexing
 - `Experiment` - Experiment runner with caching
+- `Executor` - Abstract base class for custom executors
+- `InlineExecutor` - Runs in same process (no isolation)
+- `SubprocessExecutor` - Runs in isolated subprocess (default)
+- `ForkExecutor` - Runs in forked process (Unix only)
+- `RayExecutor` - Runs with Ray for distributed execution
 
 ### Decorators
 
 - `@pyexp.experiment` - Define an experiment function
+- `@pyexp.experiment(executor="...")` - Define with specific executor
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
+
+### Types
+
+- `ExecutorName` - Literal type: `"inline" | "subprocess" | "fork" | "ray"`
