@@ -231,6 +231,53 @@ def configs():
     ])
 ```
 
+### Registry and Build
+
+Use `@register` and `build()` to instantiate classes from config:
+
+```python
+from pyexp import register, build
+
+@register
+class MLP:
+    def __init__(self, hidden_size: int = 256, num_layers: int = 2):
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+
+@register
+class Transformer:
+    def __init__(self, d_model: int = 512, num_heads: int = 8):
+        self.d_model = d_model
+        self.num_heads = num_heads
+```
+
+```yaml
+# config.yaml
+model:
+  type: MLP
+  hidden_size: 512
+  num_layers: 4
+```
+
+```python
+config = load_config("config.yaml")
+model = build(MLP, config["model"])  # Creates MLP(hidden_size=512, num_layers=4)
+
+# Or use base class for polymorphism
+from abc import ABC
+class Model(ABC): pass
+
+@register
+class MLP(Model): ...
+
+model = build(Model, config["model"])  # Type-checked against Model
+```
+
+**Features:**
+- Pass existing instance (returned as-is with type check)
+- Override config with kwargs: `build(MLP, cfg, hidden_size=1024)`
+- Works with `Config` objects from `load_config()`
+
 ### Output Directory
 
 Each experiment receives an `out` in its config pointing to its cache directory. Use this to save artifacts:

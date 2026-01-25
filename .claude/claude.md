@@ -98,3 +98,29 @@ def configs():
     base = load_config("configs/base.yaml")
     return sweep([base], variations)
 ```
+
+## Registry System
+
+Classes can be registered and instantiated from config using `@register` and `build()`.
+
+### Pattern
+
+```python
+from pyexp import register, build
+
+@register
+class MyModel:
+    def __init__(self, size: int = 256):
+        self.size = size
+
+# In config: {"type": "MyModel", "size": 512}
+model = build(MyModel, config["model"])
+```
+
+### Rules
+
+- `@register` uses class name as registry key
+- Duplicate registration raises `RuntimeError`
+- `build()` requires `type` key in dict config
+- Passing existing instance returns it unchanged (with type check)
+- kwargs override config values

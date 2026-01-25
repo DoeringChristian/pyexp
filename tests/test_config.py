@@ -1,7 +1,8 @@
-"""Tests for the Config class and load_config."""
+"""Tests for the Config class, load_config, and registry."""
 
 import pytest
-from pyexp import Config, load_config
+from pyexp import Config, build, load_config, register
+from pyexp.config import _registry
 
 
 class TestConfig:
@@ -211,3 +212,133 @@ class TestLoadConfig:
         config = load_config(experiment)
         assert config.value == 1
         assert config.name == "test"
+
+
+class TestRegistry:
+    """Tests for register decorator and build function."""
+
+    def setup_method(self):
+        """Clear registry before each test."""
+        _registry.clear()
+
+    def test_register_class(self):
+        """Register decorator adds class to registry."""
+        @register
+        class TestClass:
+            pass
+
+        assert "TestClass" in _registry
+        assert _registry["TestClass"] is TestClass
+
+    def test_register_returns_class(self):
+        """Register decorator returns the original class."""
+        @register
+        class TestClass:
+            pass
+
+        assert TestClass.__name__ == "TestClass"
+
+    def test_register_duplicate_raises(self):
+        """Registering same name twice raises error."""
+        @register
+        class DuplicateClass:
+            pass
+
+        with pytest.raises(RuntimeError, match="already exists in registry"):
+            @register
+            class DuplicateClass:  # noqa: F811
+                pass
+
+    def test_build_from_dict(self):
+        """Build instance from dict config."""
+        @register
+        class Model:
+            def __init__(self, size: int = 10):
+                self.size = size
+
+        obj = build(Model, {"type": "Model", "size": 256})
+        assert isinstance(obj, Model)
+        assert obj.size == 256
+
+    def test_build_with_defaults(self):
+        """Build uses default values when not specified."""
+        @register
+        class Model:
+            def __init__(self, size: int = 10):
+                self.size = size
+
+        obj = build(Model, {"type": "Model"})
+        assert obj.size == 10
+
+    def test_build_kwargs_override_config(self):
+        """Kwargs override config values."""
+        @register
+        class Model:
+            def __init__(self, size: int = 10):
+                self.size = size
+
+        obj = build(Model, {"type": "Model", "size": 100}, size=256)
+        assert obj.size == 256
+
+    def test_build_passthrough_instance(self):
+        """Build returns existing instance unchanged."""
+        @register
+        class Model:
+            def __init__(self, size: int = 10):
+                self.size = size
+
+        existing = Model(size=42)
+        obj = build(Model, existing)
+        assert obj is existing
+
+    def test_build_type_mismatch_raises(self):
+        """Build raises when type doesn't match."""
+        @register
+        class Model:
+            pass
+
+        @register
+        class Other:
+            pass
+
+        obj = Other()
+        with pytest.raises(TypeError, match="Expected type Model"):
+            build(Model, obj)
+
+    def test_build_missing_type_key_raises(self):
+        """Build raises when dict has no 'type' key."""
+        with pytest.raises(KeyError, match="must have a 'type' key"):
+            build(object, {"size": 10})
+
+    def test_build_unknown_type_raises(self):
+        """Build raises when type not in registry."""
+        with pytest.raises(KeyError, match="not in registry"):
+            build(object, {"type": "UnknownClass"})
+
+    def test_build_none_raises(self):
+        """Build raises when cfg is None."""
+        with pytest.raises(ValueError, match="Cannot build from None"):
+            build(object, None)
+
+    def test_build_with_config_object(self):
+        """Build works with Config objects."""
+        @register
+        class Model:
+            def __init__(self, lr: float = 0.001):
+                self.lr = lr
+
+        cfg = Config({"type": "Model", "lr": 0.01})
+        obj = build(Model, cfg)
+        assert obj.lr == 0.01
+
+    def test_build_with_positional_args(self):
+        """Build passes positional args to constructor."""
+        @register
+        class Model:
+            def __init__(self, name: str, size: int = 10):
+                self.name = name
+                self.size = size
+
+        obj = build(Model, {"type": "Model", "size": 256}, "my_model")
+        assert obj.name == "my_model"
+        assert obj.size == 256

@@ -1,6 +1,6 @@
 """pyexp - A library for running Python experiments."""
 
-from .config import Config, Tensor, load_config, merge, sweep
+from .config import Config, Tensor, build, load_config, merge, register, sweep
 from .experiment import Experiment, experiment
 from .executors import (
     Executor,
@@ -15,8 +15,10 @@ from .executors import (
 __all__ = [
     "Config",
     "Tensor",
+    "build",
     "load_config",
     "merge",
+    "register",
     "sweep",
     "Experiment",
     "experiment",
