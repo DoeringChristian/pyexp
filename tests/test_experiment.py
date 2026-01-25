@@ -458,6 +458,172 @@ class TestExperimentRun:
         assert result["value"] == 10
 
 
+class TestOutputFolderStructure:
+    """Tests for output folder naming and timestamp features."""
+
+    def test_default_name_is_function_name(self):
+        """Experiment name defaults to function name."""
+        @experiment
+        def my_custom_experiment(config):
+            return config["x"]
+
+        assert my_custom_experiment._name == "my_custom_experiment"
+
+    def test_custom_name_in_decorator(self):
+        """Can set custom name in decorator."""
+        @experiment(name="mnist_classifier")
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._name == "mnist_classifier"
+
+    def test_timestamp_default_true(self):
+        """Timestamp defaults to True."""
+        @experiment
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._timestamp_default is True
+
+    def test_timestamp_false_in_decorator(self):
+        """Can disable timestamp in decorator."""
+        @experiment(timestamp=False)
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._timestamp_default is False
+
+    def test_output_structure_with_timestamp(self, tmp_path):
+        """Output folder includes timestamp when timestamp=True."""
+        @experiment(name="test_exp", timestamp=True)
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Check structure: tmp_path/test_exp/<timestamp>/cfg-<hash>/
+        exp_dir = tmp_path / "test_exp"
+        assert exp_dir.exists()
+
+        # Should have one timestamp folder
+        timestamp_dirs = list(exp_dir.iterdir())
+        assert len(timestamp_dirs) == 1
+        assert timestamp_dirs[0].is_dir()
+
+        # Timestamp folder should contain config folder
+        config_dirs = list(timestamp_dirs[0].iterdir())
+        assert len(config_dirs) == 1
+        assert config_dirs[0].name.startswith("cfg-")
+
+    def test_output_structure_without_timestamp(self, tmp_path):
+        """Output folder has no timestamp when timestamp=False."""
+        @experiment(name="test_exp", timestamp=False)
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Check structure: tmp_path/test_exp/cfg-<hash>/
+        exp_dir = tmp_path / "test_exp"
+        assert exp_dir.exists()
+
+        # Should directly contain config folder (no timestamp)
+        config_dirs = list(exp_dir.iterdir())
+        assert len(config_dirs) == 1
+        assert config_dirs[0].name.startswith("cfg-")
+
+    def test_cli_timestamp_continues_run(self, tmp_path):
+        """--timestamp CLI arg continues a specific run."""
+        @experiment(name="test_exp", timestamp=True)
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        # First run with specific timestamp
+        with patch.object(sys, "argv", ["test", "--timestamp", "2024-01-01_12-00-00"]):
+            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Second run with same timestamp should use cache
+        with patch.object(sys, "argv", ["test", "--timestamp", "2024-01-01_12-00-00"]):
+            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert result1 == 1
+        assert result2 == 1
+
+        # Check folder exists
+        timestamp_dir = tmp_path / "test_exp" / "2024-01-01_12-00-00"
+        assert timestamp_dir.exists()
+
+    def test_name_override_in_run(self, tmp_path):
+        """Can override name in run()."""
+        @experiment(name="default_name", timestamp=False)
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, name="override_name", executor="inline")
+
+        # Should use overridden name
+        assert (tmp_path / "override_name").exists()
+        assert not (tmp_path / "default_name").exists()
+
+    def test_timestamp_override_in_run(self, tmp_path):
+        """Can override timestamp in run()."""
+        @experiment(name="test_exp", timestamp=True)
+        def my_exp(config):
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, timestamp=False, executor="inline")
+
+        # Should have no timestamp folder
+        exp_dir = tmp_path / "test_exp"
+        config_dirs = list(exp_dir.iterdir())
+        assert len(config_dirs) == 1
+        assert config_dirs[0].name.startswith("cfg-")
+
+
 class TestExecutorSystem:
     """Tests for the modular executor system."""
 

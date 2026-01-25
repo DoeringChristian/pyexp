@@ -17,7 +17,7 @@ pip install "git+https://github.com/username/pyexp.git#egg=pyexp[ray]"
 import pyexp
 from pyexp import Config
 
-@pyexp.experiment
+@pyexp.experiment(name="mnist")
 def experiment(config: Config):
     lr = config.learning_rate
     epochs = config.epochs
@@ -48,13 +48,48 @@ if __name__ == "__main__":
 
 ### Automatic Caching
 
-Experiment results are cached in `out/<name>-<hash>/result.pkl`. Re-running the script skips completed experiments:
+Experiment results are automatically cached. Re-running the script skips completed experiments:
 
 ```bash
-python main.py          # Runs all experiments
-python main.py          # Skips experiments, loads from cache
-python main.py --rerun  # Forces re-run, ignores cache
-python main.py --report # Only runs report from cached results
+python main.py                              # Runs all experiments (new timestamp)
+python main.py                              # New run (different timestamp)
+python main.py --timestamp 2024-01-25_14-30-00  # Continue specific run
+python main.py --timestamp 2024-01-25_14-30-00 --rerun  # Rerun specific run
+python main.py --timestamp 2024-01-25_14-30-00 --report # Report from specific run
+```
+
+### Output Folder Structure
+
+Results are organized by experiment name and optional timestamp:
+
+```
+out/
+  <experiment_name>/
+    <timestamp>/                    # When timestamp=True (default)
+      <config_name>-<hash>/
+        result.pkl
+        model.pt                    # Your saved artifacts
+      <config_name>-<hash>/
+        ...
+    <timestamp>/                    # Another run
+      ...
+```
+
+Control the structure with `name` and `timestamp` parameters:
+
+```python
+# Default: uses function name, with timestamp
+@pyexp.experiment
+def my_experiment(config): ...
+# -> out/my_experiment/2024-01-25_14-30-00/<config>-<hash>/
+
+# Custom name, no timestamp (overwrites previous runs)
+@pyexp.experiment(name="mnist", timestamp=False)
+def my_experiment(config): ...
+# -> out/mnist/<config>-<hash>/
+
+# Override at runtime
+experiment.run(name="experiment_v2", timestamp=False)
 ```
 
 ### Robust Execution
@@ -256,6 +291,7 @@ experiment.run(configs=my_configs_fn, report=my_report_fn)
 |----------|-------------|
 | `--report` | Skip experiments, only generate report from cache |
 | `--rerun` | Re-run all experiments, ignore cache |
+| `--timestamp TIMESTAMP` | Use specific timestamp folder (e.g., `2024-01-25_14-30-00`) to continue or rerun a previous run |
 
 ## Configuration
 
@@ -287,7 +323,7 @@ experiment.run(output_dir="results/")
 ### Decorators
 
 - `@pyexp.experiment` - Define an experiment function
-- `@pyexp.experiment(executor="...")` - Define with specific executor
+- `@pyexp.experiment(name="...", executor="...", timestamp=True/False)` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
 
