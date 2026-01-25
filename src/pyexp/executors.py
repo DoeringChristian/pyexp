@@ -41,6 +41,7 @@ class Executor(ABC):
         fn: Callable[[Config], Any],
         config: Config,
         result_path: Path,
+        capture: bool = True,
     ) -> dict:
         """Run a single experiment and return the result.
 
@@ -48,6 +49,7 @@ class Executor(ABC):
             fn: The experiment function to execute.
             config: The experiment config (already has 'out' set).
             result_path: Path where result should be cached.
+            capture: If True (default), capture output. If False, show output live.
 
         Returns:
             The experiment result dict. If execution failed, should contain
@@ -68,8 +70,11 @@ class InlineExecutor(Executor):
         fn: Callable[[Config], Any],
         config: Config,
         result_path: Path,
+        capture: bool = True,
     ) -> dict:
         """Run experiment inline and cache result."""
+        # Note: capture has no effect for inline execution since output
+        # goes directly to the parent process stdout/stderr
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result = fn(config)
         with open(result_path, "wb") as f:
@@ -93,6 +98,7 @@ class SubprocessExecutor(Executor):
         fn: Callable[[Config], Any],
         config: Config,
         result_path: Path,
+        capture: bool = True,
     ) -> dict:
         """Run experiment in subprocess via cloudpickle serialization."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,11 +117,19 @@ class SubprocessExecutor(Executor):
 
         try:
             # Run worker subprocess
-            proc = subprocess.run(
-                [sys.executable, "-m", "pyexp.worker", payload_path],
-                capture_output=True,
-                text=True,
-            )
+            if capture:
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pyexp.worker", payload_path],
+                    capture_output=True,
+                    text=True,
+                )
+                stdout, stderr = proc.stdout, proc.stderr
+            else:
+                # Show output live
+                proc = subprocess.run(
+                    [sys.executable, "-m", "pyexp.worker", payload_path],
+                )
+                stdout, stderr = "", ""
 
             # Check if result was written
             if result_path.exists():
@@ -127,8 +141,8 @@ class SubprocessExecutor(Executor):
                     "__error__": True,
                     "type": "SubprocessError",
                     "message": f"Subprocess exited with code {proc.returncode}",
-                    "stdout": proc.stdout,
-                    "stderr": proc.stderr,
+                    "stdout": stdout,
+                    "stderr": stderr,
                 }
         finally:
             # Clean up payload file
@@ -162,6 +176,7 @@ class ForkExecutor(Executor):
         fn: Callable[[Config], Any],
         config: Config,
         result_path: Path,
+        capture: bool = True,
     ) -> dict:
         """Run experiment in a forked process."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -171,6 +186,13 @@ class ForkExecutor(Executor):
         if pid == 0:
             # Child process
             try:
+                # Suppress output if capturing
+                if capture:
+                    devnull = os.open(os.devnull, os.O_WRONLY)
+                    os.dup2(devnull, 1)  # stdout
+                    os.dup2(devnull, 2)  # stderr
+                    os.close(devnull)
+
                 result = fn(config)
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
@@ -289,20 +311,35 @@ class RayExecutor(Executor):
         fn: Callable[[Config], Any],
         config: Config,
         result_path: Path,
+        capture: bool = True,
     ) -> dict:
         """Run experiment as a Ray task."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         @self._ray.remote
-        def _run_experiment(fn, config, result_path_str):
+        def _run_experiment(fn, config, result_path_str, capture):
             """Ray remote function to execute experiment."""
+            import os
             import pickle
+            import sys
             import traceback
             from pathlib import Path
 
             result_path = Path(result_path_str)
             try:
-                result = fn(config)
+                # Suppress output if capturing
+                if capture:
+                    devnull = open(os.devnull, "w")
+                    old_stdout, old_stderr = sys.stdout, sys.stderr
+                    sys.stdout, sys.stderr = devnull, devnull
+
+                try:
+                    result = fn(config)
+                finally:
+                    if capture:
+                        sys.stdout, sys.stderr = old_stdout, old_stderr
+                        devnull.close()
+
                 with open(result_path, "wb") as f:
                     pickle.dump(result, f)
                 return result
@@ -318,7 +355,7 @@ class RayExecutor(Executor):
                 return error_result
 
         # Submit task and wait for result
-        future = _run_experiment.remote(fn, config, str(result_path))
+        future = _run_experiment.remote(fn, config, str(result_path), capture)
         try:
             result = self._ray.get(future)
             return result

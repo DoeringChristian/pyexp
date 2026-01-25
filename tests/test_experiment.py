@@ -1126,7 +1126,7 @@ class TestCustomExecutor:
             def __init__(self):
                 self.call_count = 0
 
-            def run(self, fn, config, result_path):
+            def run(self, fn, config, result_path, capture=True):
                 self.call_count += 1
                 result_path.parent.mkdir(parents=True, exist_ok=True)
                 result = fn(config)

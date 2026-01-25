@@ -52,7 +52,99 @@ def _parse_args() -> argparse.Namespace:
         metavar="TIMESTAMP",
         help="Use specific timestamp folder (e.g., 2024-01-25_14-30-00) to continue or rerun a previous run",
     )
+    parser.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        help="Disable timestamp folders (overrides decorator/run settings)",
+    )
+    parser.add_argument(
+        "-s",
+        "--capture=no",
+        dest="no_capture",
+        action="store_true",
+        help="Show subprocess output instead of progress bar",
+    )
+    # Override arguments for decorator/run() settings
+    parser.add_argument(
+        "--name",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="Override experiment name",
+    )
+    parser.add_argument(
+        "--executor",
+        type=str,
+        default=None,
+        metavar="EXECUTOR",
+        help="Override executor (subprocess, fork, inline, ray, ray:<address>)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Override output directory (default: out)",
+    )
     return parser.parse_args()
+
+
+class _ProgressBar:
+    """Simple progress bar for experiment execution."""
+
+    def __init__(self, total: int, width: int = 40):
+        self.total = total
+        self.width = width
+        self.current = 0
+        self.passed = 0
+        self.failed = 0
+        self.cached = 0
+
+    def update(self, status: str, name: str = ""):
+        """Update progress with status: 'passed', 'failed', or 'cached'."""
+        self.current += 1
+        if status == "passed":
+            self.passed += 1
+        elif status == "failed":
+            self.failed += 1
+        elif status == "cached":
+            self.cached += 1
+        self._render(name)
+
+    def _render(self, name: str = ""):
+        """Render the progress bar."""
+        import sys
+        pct = self.current / self.total if self.total > 0 else 1
+        filled = int(self.width * pct)
+        bar = "█" * filled + "░" * (self.width - filled)
+
+        # Build status string
+        parts = []
+        if self.passed:
+            parts.append(f"\033[32m{self.passed} passed\033[0m")
+        if self.failed:
+            parts.append(f"\033[31m{self.failed} failed\033[0m")
+        if self.cached:
+            parts.append(f"\033[33m{self.cached} cached\033[0m")
+        status = ", ".join(parts) if parts else ""
+
+        # Truncate name if too long
+        max_name_len = 30
+        display_name = name[:max_name_len] + "..." if len(name) > max_name_len else name
+
+        line = f"\r{bar} {self.current}/{self.total} {status}"
+        if display_name:
+            line += f" [{display_name}]"
+
+        # Clear to end of line and print
+        sys.stderr.write(f"{line}\033[K")
+        sys.stderr.flush()
+
+    def finish(self):
+        """Print final summary."""
+        import sys
+        sys.stderr.write("\n")
+        sys.stderr.flush()
 
 
 def _resolve_executor(
@@ -134,8 +226,25 @@ class Experiment:
             - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
             - timestamp=False: out/<name>/<config_name>-<hash>/
         """
-        # Resolve executor
-        resolved_executor = executor if executor is not None else self._executor_default
+        args = _parse_args()
+
+        # Resolve parameters with CLI override priority:
+        # CLI args > run() args > decorator args
+        resolved_executor = args.executor or executor or self._executor_default
+        configs_fn = configs or self._configs_fn
+        report_fn = report or self._report_fn
+        exp_name = args.name or name or self._name
+        resolved_output_dir = args.output_dir or output_dir
+
+        # Timestamp: --no-timestamp > --timestamp > run() arg > decorator arg
+        if args.no_timestamp:
+            use_timestamp = False
+        elif args.timestamp:
+            use_timestamp = True  # Specific timestamp implies using timestamps
+        elif timestamp is not None:
+            use_timestamp = timestamp
+        else:
+            use_timestamp = self._timestamp_default
 
         # If executor is already an Executor instance, use it directly
         if isinstance(resolved_executor, Executor):
@@ -156,18 +265,13 @@ class Experiment:
             )
         else:
             exec_instance = get_executor(resolved_executor)
-        configs_fn = configs or self._configs_fn
-        report_fn = report or self._report_fn
-        exp_name = name or self._name
-        use_timestamp = timestamp if timestamp is not None else self._timestamp_default
 
         if configs_fn is None:
             raise RuntimeError("No configs function provided. Use @experiment.configs or pass configs= argument.")
         if report_fn is None:
             raise RuntimeError("No report function provided. Use @experiment.report or pass report= argument.")
 
-        args = _parse_args()
-        base_dir = Path(output_dir) / exp_name
+        base_dir = Path(resolved_output_dir) / exp_name
 
         # Determine the run directory (with or without timestamp)
         if args.timestamp:
@@ -188,25 +292,46 @@ class Experiment:
         else:
             shape = (len(config_list),)
 
+        # Flatten config_list for iteration
+        flat_configs = list(config_list)
+
+        # Initialize progress bar if capturing output
+        show_progress = not args.no_capture and not args.report
+        progress = _ProgressBar(len(flat_configs)) if show_progress else None
+
         results = []
 
-        for config in config_list:
+        for config in flat_configs:
             assert "out" not in config, "Config cannot contain 'out' key; it is reserved"
             experiment_dir = _get_experiment_dir(config, run_dir)
             result_path = experiment_dir / "result.pkl"
+            config_name = config.get("name", "")
 
             if args.report:
                 if not result_path.exists():
                     raise RuntimeError(f"No cached result for config {config}. Run experiments first.")
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
+                status = "cached"
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = Config({**config, "out": experiment_dir})
-                result = exec_instance.run(self._fn, config_with_out, result_path)
+                result = exec_instance.run(
+                    self._fn, config_with_out, result_path, capture=not args.no_capture
+                )
+                # Determine status based on result
+                if isinstance(result, dict) and result.get("__error__"):
+                    status = "failed"
+                else:
+                    status = "passed"
             else:
                 with open(result_path, "rb") as f:
                     result = pickle.load(f)
+                status = "cached"
+
+            # Update progress bar
+            if progress:
+                progress.update(status, config_name)
 
             # Wrap result with config and name for filtering
             config_without_out = {k: v for k, v in config.items() if k != "out"}
@@ -230,6 +355,10 @@ class Experiment:
                     "value": result,
                 }
             results.append(wrapped_result)
+
+        # Finish progress bar
+        if progress:
+            progress.finish()
 
         results = Tensor(results, shape)
 
@@ -300,10 +429,17 @@ def experiment(
         # Option 3: Override settings at runtime
         my_experiment.run(executor="ray:auto")
 
-    CLI arguments:
+    CLI arguments (override decorator/run settings):
+        --name NAME           Override experiment name
+        --executor EXECUTOR   Override executor (subprocess, fork, inline, ray, ray:<address>)
+        --output-dir DIR      Override output directory
+        --no-timestamp        Disable timestamp folders
+        --timestamp TIMESTAMP Use specific timestamp to continue/rerun a previous run
         --report              Only generate report from cached results
         --rerun               Re-run all experiments, ignore cache
-        --timestamp TIMESTAMP Use specific timestamp to continue/rerun a previous run
+        -s, --capture=no      Show subprocess output instead of progress bar
+
+    Priority: CLI args > run() args > decorator args
     """
     def decorator(f: Callable[[dict], Any]) -> Experiment:
         return Experiment(f, name=name, executor=executor, timestamp=timestamp)

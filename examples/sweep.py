@@ -4,7 +4,7 @@ import pyexp
 from pyexp import Config, Tensor, sweep
 
 
-@pyexp.experiment()
+@pyexp.experiment(name="")
 def experiment(config: Config):
     """Run a single experiment with the given config."""
     lr = config.learning_rate

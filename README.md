@@ -299,11 +299,33 @@ experiment.run(configs=my_configs_fn, report=my_report_fn)
 
 ## CLI Arguments
 
+CLI arguments can override settings from the decorator or `run()` function.
+
+**Priority:** CLI args > `run()` args > decorator args
+
 | Argument | Description |
 |----------|-------------|
+| `--name NAME` | Override experiment name |
+| `--executor EXECUTOR` | Override executor (`subprocess`, `fork`, `inline`, `ray`, `ray:<address>`) |
+| `--output-dir DIR` | Override output directory |
+| `--no-timestamp` | Disable timestamp folders |
+| `--timestamp TIMESTAMP` | Use specific timestamp folder (e.g., `2024-01-25_14-30-00`) to continue or rerun a previous run |
 | `--report` | Skip experiments, only generate report from cache |
 | `--rerun` | Re-run all experiments, ignore cache |
-| `--timestamp TIMESTAMP` | Use specific timestamp folder (e.g., `2024-01-25_14-30-00`) to continue or rerun a previous run |
+| `-s`, `--capture=no` | Show subprocess output instead of progress bar |
+
+By default, experiment output is captured and a progress bar is shown. Use `-s` to see live output from each experiment (similar to pytest).
+
+```bash
+# Override executor from command line
+python main.py --executor inline
+
+# Run without timestamps
+python main.py --no-timestamp
+
+# Change output directory
+python main.py --output-dir results/
+```
 
 ## Configuration
 
