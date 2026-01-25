@@ -2,7 +2,7 @@
 
 import fnmatch
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Generic, Iterator, TypeVar, overload
 
 import yaml
 
@@ -10,6 +10,7 @@ import yaml
 _registry: dict[str, type] = {}
 
 T = TypeVar("T")
+_T = TypeVar("_T")
 
 
 def register(cls: type[T]) -> type[T]:
@@ -256,7 +257,7 @@ def merge(base: dict, update: dict) -> dict:
     return result
 
 
-class Tensor:
+class Tensor(Generic[_T]):
     """A tensor-like container that tracks shape across sweeps.
 
     Stores data in a flattened list while tracking the shape from successive
@@ -282,7 +283,7 @@ class Tensor:
         configs[{"mlp.width": 32}]  # Dot notation for nested keys
     """
 
-    def __init__(self, data: list, shape: tuple[int, ...] | None = None):
+    def __init__(self, data: list[_T], shape: tuple[int, ...] | None = None):
         """Create a Tensor.
 
         Args:
@@ -308,7 +309,7 @@ class Tensor:
         """Return total number of configs."""
         return len(self._data)
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[_T]:
         """Iterate over all configs (flattened)."""
         return iter(self._data)
 
@@ -329,7 +330,16 @@ class Tensor:
             stride *= self._shape[i]
         return flat
 
-    def __getitem__(self, key):
+    @overload
+    def __getitem__(self, key: int) -> _T: ...
+    @overload
+    def __getitem__(self, key: str) -> "Tensor[_T]": ...
+    @overload
+    def __getitem__(self, key: dict) -> "Tensor[_T]": ...
+    @overload
+    def __getitem__(self, key: tuple) -> "_T | Tensor[_T]": ...
+
+    def __getitem__(self, key: int | str | dict | tuple) -> "_T | Tensor[_T]":
         """Advanced indexing to select elements along dimensions.
 
         Supports integers, slices, and tuples of these, plus pattern matching.
@@ -506,7 +516,7 @@ class Tensor:
         for idx in index_lists[dim]:
             self._select_recursive(index_lists, dim + 1, current + [idx], result)
 
-    def tolist(self) -> list:
+    def tolist(self) -> list[_T]:
         """Return data as a flat list."""
         return list(self._data)
 
@@ -633,3 +643,8 @@ def load_config(paths: list[Path] | Path | str | list[str]) -> Config:
         result = merge(result, cfg)
 
     return Config(result)
+
+
+# Type aliases for common Tensor types
+ConfigTensor = Tensor[Config]
+ResultTensor = Tensor[Result]
