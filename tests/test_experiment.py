@@ -458,6 +458,79 @@ class TestExperimentRun:
         assert result["value"] == 10
 
 
+class TestIsolateDefault:
+    """Tests for configuring isolate default in decorator."""
+
+    def test_decorator_default_isolate_true(self):
+        """Default isolate is True when not specified."""
+        @experiment
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._isolate is True
+
+    def test_decorator_isolate_false(self):
+        """Can set isolate=False in decorator."""
+        @experiment(isolate=False)
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._isolate is False
+
+    def test_decorator_isolate_true_explicit(self):
+        """Can explicitly set isolate=True in decorator."""
+        @experiment(isolate=True)
+        def my_exp(config):
+            return config["x"]
+
+        assert my_exp._isolate is True
+
+    def test_run_uses_decorator_default(self, tmp_path):
+        """run() uses the decorator's isolate default."""
+        call_count = 0
+
+        @experiment(isolate=False)
+        def my_exp(config):
+            nonlocal call_count
+            call_count += 1
+            return {"result": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path)
+
+        # If isolate=False was used, call_count would be updated
+        assert call_count == 1
+        assert result == 5
+
+    def test_run_can_override_decorator_default(self, tmp_path):
+        """run(isolate=...) can override the decorator default."""
+        @experiment(isolate=False)
+        def my_exp(config):
+            return {"result": config["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results):
+            return results[0]["result"]
+
+        with patch.object(sys, "argv", ["test"]):
+            # Override isolate=False with isolate=True
+            result = my_exp.run(output_dir=tmp_path, isolate=True)
+
+        assert result == 10
+
+
 class TestSubprocessExecution:
     """Tests for subprocess-based experiment execution."""
 

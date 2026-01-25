@@ -49,8 +49,9 @@ def _parse_args() -> argparse.Namespace:
 class Experiment:
     """An experiment that can be run with configs and report functions."""
 
-    def __init__(self, fn: Callable[[dict], Any]):
+    def __init__(self, fn: Callable[[dict], Any], *, isolate: bool = True):
         self._fn = fn
+        self._isolate = isolate
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor], Any] | None = None
         wraps(fn)(self)
@@ -129,7 +130,7 @@ class Experiment:
         configs: Callable[[], list[dict]] | None = None,
         report: Callable[[Tensor], Any] | None = None,
         output_dir: str | Path = "out",
-        isolate: bool = True,
+        isolate: bool | None = None,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -139,8 +140,9 @@ class Experiment:
                     Receives a Tensor where each result has 'config' and 'name' keys.
             output_dir: Directory for caching experiment results. Defaults to "out".
             isolate: If True, run each experiment in a separate subprocess for robustness
-                     against crashes (including segfaults). Defaults to True.
+                     against crashes (including segfaults). Defaults to the value set in @experiment decorator (True if not specified).
         """
+        isolate = isolate if isolate is not None else self._isolate
         configs_fn = configs or self._configs_fn
         report_fn = report or self._report_fn
 
@@ -212,8 +214,17 @@ class Experiment:
         return report_fn(results)
 
 
-def experiment(fn: Callable[[dict], Any]) -> Experiment:
+def experiment(
+    fn: Callable[[dict], Any] | None = None,
+    *,
+    isolate: bool = True,
+) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
     """Decorator to create an Experiment from a function.
+
+    Args:
+        isolate: Default value for subprocess isolation. If True, experiments run in
+                 separate subprocesses for robustness against crashes. Can be overridden
+                 in run(). Defaults to True.
 
     Example usage:
 
@@ -221,6 +232,11 @@ def experiment(fn: Callable[[dict], Any]) -> Experiment:
         def my_experiment(config):
             ...
             return {"accuracy": 0.95}
+
+        # Or with arguments:
+        @pyexp.experiment(isolate=False)
+        def my_experiment(config):
+            ...
 
         @my_experiment.configs
         def configs():
@@ -240,4 +256,12 @@ def experiment(fn: Callable[[dict], Any]) -> Experiment:
         # Option 2: Pass functions directly
         my_experiment.run(configs=configs_fn, report=report_fn)
     """
-    return Experiment(fn)
+    def decorator(f: Callable[[dict], Any]) -> Experiment:
+        return Experiment(f, isolate=isolate)
+
+    if fn is not None:
+        # Called without arguments: @experiment
+        return Experiment(fn, isolate=isolate)
+    else:
+        # Called with arguments: @experiment(isolate=False)
+        return decorator
