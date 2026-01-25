@@ -93,7 +93,9 @@ def build(tp: type[T], cfg: dict | T | None, *args, **kwargs) -> T:
         type_name = cfg["type"]
         if type_name not in _registry:
             available = ", ".join(_registry.keys()) if _registry else "(none)"
-            raise KeyError(f"Type '{type_name}' not in registry. Available: {available}")
+            raise KeyError(
+                f"Type '{type_name}' not in registry. Available: {available}"
+            )
         cls = _registry[type_name]
         # Merge config values with kwargs (kwargs take precedence)
         for k, v in cfg.items():
@@ -293,7 +295,9 @@ class Tensor:
         for dim in self._shape:
             expected_size *= dim
         if expected_size != len(self._data):
-            raise ValueError(f"Shape {self._shape} does not match data length {len(self._data)}")
+            raise ValueError(
+                f"Shape {self._shape} does not match data length {len(self._data)}"
+            )
 
     @property
     def shape(self) -> tuple[int, ...]:
@@ -356,7 +360,9 @@ class Tensor:
         key = key + (slice(None),) * (len(self._shape) - len(key))
 
         if len(key) != len(self._shape):
-            raise IndexError(f"Too many indices: got {len(key)}, shape has {len(self._shape)} dimensions")
+            raise IndexError(
+                f"Too many indices: got {len(key)}, shape has {len(self._shape)} dimensions"
+            )
 
         # Convert each key element to a list of indices
         index_lists = []
@@ -366,7 +372,9 @@ class Tensor:
                 if k < 0:
                     k = dim_size + k
                 if k < 0 or k >= dim_size:
-                    raise IndexError(f"Index {k} out of range for dimension of size {dim_size}")
+                    raise IndexError(
+                        f"Index {k} out of range for dimension of size {dim_size}"
+                    )
                 index_lists.append([k])
                 # Integer index collapses dimension (not added to new_shape)
             elif isinstance(k, slice):
@@ -488,7 +496,9 @@ class Tensor:
 
         return True
 
-    def _select_recursive(self, index_lists: list[list[int]], dim: int, current: list[int], result: list):
+    def _select_recursive(
+        self, index_lists: list[list[int]], dim: int, current: list[int], result: list
+    ):
         """Recursively select configs based on index lists."""
         if dim == len(index_lists):
             result.append(self._data[self._flat_index(tuple(current))])
