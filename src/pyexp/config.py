@@ -1,7 +1,10 @@
-"""Configuration utilities: Config, Tensor, merge, sweep."""
+"""Configuration utilities: Config, Tensor, merge, sweep, load_config."""
 
 import fnmatch
+from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 class Config(dict):
@@ -391,3 +394,72 @@ def sweep(configs: list[dict] | Tensor, variations: list[dict]) -> Tensor:
 
     new_shape = old_shape + (len(variations),)
     return Tensor(result, new_shape)
+
+
+def load_config(paths: list[Path] | Path | str | list[str]) -> Config:
+    """Load configuration files with support for imports (composition).
+
+    Uses merge() for all merging, which supports:
+    - Regular keys: complete replacement
+    - Dotted keys: nested update preserving siblings
+
+    Equivalent to a config file with `imports: [*paths]`. Each path is loaded
+    recursively (processing its own imports field), then merged in order.
+
+    Args:
+        paths: Single path or list of paths to load and merge in order.
+               Can be Path objects or strings.
+
+    Returns:
+        Merged configuration as a Config object.
+
+    Example:
+        # base.yaml
+        model:
+          hidden_size: 256
+          num_layers: 4
+
+        # experiment.yaml
+        imports:
+          - base.yaml
+        model.hidden_size: 512  # Override using dot notation
+        learning_rate: 0.001
+
+        # Load single file (with imports resolved)
+        config = load_config("experiment.yaml")
+
+        # Load and merge multiple files
+        config = load_config(["base.yaml", "overrides.yaml"])
+    """
+    # Handle single path for convenience
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+
+    # Convert strings to Paths
+    paths = [Path(p) if isinstance(p, str) else p for p in paths]
+
+    if not paths:
+        return Config()
+
+    # Start with empty result
+    result: dict = {}
+
+    # Process each path in order (like imports: [*paths])
+    for path in paths:
+        with open(path) as f:
+            cfg = yaml.safe_load(f) or {}
+
+        # Recursively process imports field in this config
+        if "imports" in cfg:
+            import_paths = cfg.pop("imports")
+            if isinstance(import_paths, str):
+                import_paths = [import_paths]
+            # Resolve paths relative to the config file's directory
+            resolved_paths = [path.parent / p for p in import_paths]
+            imported = load_config(resolved_paths)
+            result = merge(result, dict(imported))
+
+        # Merge this config (without imports key)
+        result = merge(result, cfg)
+
+    return Config(result)

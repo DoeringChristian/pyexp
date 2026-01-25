@@ -244,6 +244,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -258,6 +259,7 @@ ray = [
 requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
     { name = "ray", marker = "extra == 'ray'", specifier = ">=2.0" },
 ]
 provides-extras = ["dev", "ray"]

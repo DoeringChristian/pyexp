@@ -56,3 +56,45 @@ def run(self, ..., my_param=None):
 - All executors must implement `run(fn, config, result_path, capture=True)`
 - The `capture` parameter controls output suppression
 - Custom executors should accept `**kwargs` for forward compatibility
+
+## YAML Config Loading
+
+Configs can be loaded from YAML files with composition support via `load_config()`.
+
+### Import Resolution
+
+- Configs can import other configs using the `imports` field
+- Imports are resolved relative to the importing file's directory
+- Import order: imports are merged first, then the current file's values override
+- Dot notation in YAML keys updates nested values without replacing siblings
+
+### Example Config Structure
+
+```yaml
+# base.yaml
+model:
+  hidden_size: 256
+  num_layers: 4
+
+# experiment.yaml
+imports:
+  - base.yaml
+model.hidden_size: 512  # Updates only hidden_size, keeps num_layers
+```
+
+### Merge Semantics
+
+Uses `merge()` function which supports:
+- Regular keys: complete replacement
+- Dotted keys (e.g., `model.hidden_size`): nested update preserving siblings
+
+### Usage Pattern
+
+```python
+from pyexp import load_config, sweep
+
+@experiment.configs
+def configs():
+    base = load_config("configs/base.yaml")
+    return sweep([base], variations)
+```

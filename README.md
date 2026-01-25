@@ -175,6 +175,62 @@ config.learning_rate     # dot notation
 config.optimizer.lr      # nested access
 ```
 
+### Loading Configs from YAML
+
+Use `load_config()` to load configurations from YAML files with composition support:
+
+```python
+from pyexp import load_config
+
+# Load a single config file
+config = load_config("config.yaml")
+
+# Load and merge multiple files (later files override earlier ones)
+config = load_config(["base.yaml", "experiment.yaml", "overrides.yaml"])
+```
+
+**Composable configs with imports:**
+
+Config files can import other configs using the `imports` field:
+
+```yaml
+# base.yaml
+model:
+  hidden_size: 256
+  num_layers: 4
+learning_rate: 0.001
+```
+
+```yaml
+# experiment.yaml
+imports:
+  - base.yaml
+
+# Override specific values (dot notation supported)
+model.hidden_size: 512
+batch_size: 32
+```
+
+```python
+# Loading experiment.yaml automatically resolves imports
+config = load_config("experiment.yaml")
+# Result: {model: {hidden_size: 512, num_layers: 4}, learning_rate: 0.001, batch_size: 32}
+```
+
+**Using with experiments:**
+
+```python
+from pyexp import load_config, sweep
+
+@experiment.configs
+def configs():
+    base = load_config("configs/base.yaml")
+    return sweep([base], [
+        {"name": "small", "model.hidden_size": 128},
+        {"name": "large", "model.hidden_size": 1024},
+    ])
+```
+
 ### Output Directory
 
 Each experiment receives an `out` in its config pointing to its cache directory. Use this to save artifacts:
