@@ -31,6 +31,9 @@ def run_worker(payload_path: str) -> int:
 
     Returns:
         Exit code: 0 for success, 1 for failure.
+
+    The worker saves a structured result dict:
+        {"result": <return value or None>, "error": <error string or None>}
     """
     try:
         # Load the payload
@@ -44,26 +47,23 @@ def run_worker(payload_path: str) -> int:
         # Run the experiment
         result = fn(config)
 
-        # Write result
+        # Write structured result
+        structured = {"result": result, "error": None}
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(result_path, "wb") as f:
-            pickle.dump(result, f)
+            pickle.dump(structured, f)
 
         return 0
 
     except Exception as e:
         # Write error information to result path if possible
         try:
-            error_result = {
-                "__error__": True,
-                "type": type(e).__name__,
-                "message": str(e),
-                "traceback": traceback.format_exc(),
-            }
+            error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            structured = {"result": None, "error": error_msg}
             result_path = Path(payload["result_path"])
             result_path.parent.mkdir(parents=True, exist_ok=True)
             with open(result_path, "wb") as f:
-                pickle.dump(error_result, f)
+                pickle.dump(structured, f)
         except Exception:
             # If we can't even write the error, just print it
             traceback.print_exc()

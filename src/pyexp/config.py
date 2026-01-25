@@ -150,6 +150,62 @@ class Config(dict):
             raise AttributeError(f"Config has no attribute '{name}'")
 
 
+class Result(dict):
+    """Structured experiment result with dot notation access.
+
+    Inherits from dict with keys: config, result, error, log.
+    Also provides attribute access for convenience.
+
+    Example:
+        results = experiment.run()
+        r = results[0, 0, 0]
+        print(r.config.learning_rate)
+        print(r.result["accuracy"])
+        if r.error:
+            print(f"Failed: {r.error}")
+        print(r.log)  # stdout/stderr
+    """
+
+    def __init__(
+        self,
+        config: dict,
+        result: Any = None,
+        error: str | None = None,
+        log: str = "",
+    ):
+        super().__init__()
+        self["config"] = Config(config) if not isinstance(config, Config) else config
+        self["result"] = result
+        self["error"] = error
+        self["log"] = log
+        self["name"] = self["config"].get("name", "")
+
+    @property
+    def config(self) -> Config:
+        return self["config"]
+
+    @property
+    def result(self) -> Any:
+        return self["result"]
+
+    @property
+    def error(self) -> str | None:
+        return self["error"]
+
+    @property
+    def log(self) -> str:
+        return self["log"]
+
+    @property
+    def name(self) -> str:
+        return self["name"]
+
+    def __repr__(self) -> str:
+        status = "error" if self.error else "ok"
+        name = self.config.get("name", "unnamed")
+        return f"Result({name!r}, {status})"
+
+
 def _deep_copy_dict(d: dict) -> dict:
     """Create a deep copy of a dict, recursively copying nested dicts."""
     result = {}
@@ -376,6 +432,7 @@ class Tensor:
 
         Returns configs where all query key-value pairs match.
         Supports dot-notation keys (e.g., "mlp.width": 32) and nested dicts.
+        For Result objects, use "config.x" to match result["config"]["x"].
         """
         matching_multi_indices: list[tuple[int, ...]] = []
         for flat_idx, item in enumerate(self._data):

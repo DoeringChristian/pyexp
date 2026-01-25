@@ -72,14 +72,38 @@ class InlineExecutor(Executor):
         result_path: Path,
         capture: bool = True,
     ) -> dict:
-        """Run experiment inline and cache result."""
-        # Note: capture has no effect for inline execution since output
-        # goes directly to the parent process stdout/stderr
+        """Run experiment inline and cache result.
+
+        Returns:
+            Structured dict with keys: result, error, log
+        """
+        import io
+        import sys
+
         result_path.parent.mkdir(parents=True, exist_ok=True)
-        result = fn(config)
+
+        # Capture output if requested
+        log = ""
+        if capture:
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = io.StringIO()
+            sys.stderr = io.StringIO()
+
+        try:
+            result = fn(config)
+            structured = {"result": result, "error": None}
+        except Exception as e:
+            error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+            structured = {"result": None, "error": error_msg}
+        finally:
+            if capture:
+                log = sys.stdout.getvalue() + sys.stderr.getvalue()
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+
+        structured["log"] = log
         with open(result_path, "wb") as f:
-            pickle.dump(result, f)
-        return result
+            pickle.dump(structured, f)
+        return structured
 
 
 class SubprocessExecutor(Executor):
@@ -100,7 +124,11 @@ class SubprocessExecutor(Executor):
         result_path: Path,
         capture: bool = True,
     ) -> dict:
-        """Run experiment in subprocess via cloudpickle serialization."""
+        """Run experiment in subprocess via cloudpickle serialization.
+
+        Returns:
+            Structured dict with keys: result, error, log
+        """
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create payload with serialized function
@@ -123,27 +151,31 @@ class SubprocessExecutor(Executor):
                     capture_output=True,
                     text=True,
                 )
-                stdout, stderr = proc.stdout, proc.stderr
+                log = proc.stdout + proc.stderr
             else:
                 # Show output live
                 proc = subprocess.run(
                     [sys.executable, "-m", "pyexp.worker", payload_path],
                 )
-                stdout, stderr = "", ""
+                log = ""
 
             # Check if result was written
             if result_path.exists():
                 with open(result_path, "rb") as f:
-                    return pickle.load(f)
+                    structured = pickle.load(f)
+                # Add log to structured result
+                structured["log"] = log
+                # Re-save with log included
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
             else:
                 # Subprocess crashed before writing result
-                return {
-                    "__error__": True,
-                    "type": "SubprocessError",
-                    "message": f"Subprocess exited with code {proc.returncode}",
-                    "stdout": stdout,
-                    "stderr": stderr,
-                }
+                error_msg = f"SubprocessError: exited with code {proc.returncode}"
+                structured = {"result": None, "error": error_msg, "log": log}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
         finally:
             # Clean up payload file
             Path(payload_path).unlink(missing_ok=True)
@@ -178,54 +210,76 @@ class ForkExecutor(Executor):
         result_path: Path,
         capture: bool = True,
     ) -> dict:
-        """Run experiment in a forked process."""
+        """Run experiment in a forked process.
+
+        Returns:
+            Structured dict with keys: result, error, log
+        """
         result_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create pipe for capturing output
+        if capture:
+            read_fd, write_fd = os.pipe()
 
         pid = os.fork()
 
         if pid == 0:
             # Child process
             try:
-                # Suppress output if capturing
                 if capture:
-                    devnull = os.open(os.devnull, os.O_WRONLY)
-                    os.dup2(devnull, 1)  # stdout
-                    os.dup2(devnull, 2)  # stderr
-                    os.close(devnull)
+                    os.close(read_fd)
+                    os.dup2(write_fd, 1)  # stdout
+                    os.dup2(write_fd, 2)  # stderr
+                    os.close(write_fd)
 
                 result = fn(config)
+                structured = {"result": result, "error": None}
                 with open(result_path, "wb") as f:
-                    pickle.dump(result, f)
+                    pickle.dump(structured, f)
                 os._exit(0)
             except Exception as e:
                 # Write error information
-                error_result = {
-                    "__error__": True,
-                    "type": type(e).__name__,
-                    "message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
+                error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                structured = {"result": None, "error": error_msg}
                 try:
                     with open(result_path, "wb") as f:
-                        pickle.dump(error_result, f)
+                        pickle.dump(structured, f)
                 except Exception:
                     pass
                 os._exit(1)
         else:
-            # Parent process - wait for child
+            # Parent process
+            log = ""
+            if capture:
+                os.close(write_fd)
+                # Read all output from pipe
+                log_bytes = b""
+                while True:
+                    chunk = os.read(read_fd, 4096)
+                    if not chunk:
+                        break
+                    log_bytes += chunk
+                os.close(read_fd)
+                log = log_bytes.decode("utf-8", errors="replace")
+
+            # Wait for child
             _, status = os.waitpid(pid, 0)
             exit_code = os.waitstatus_to_exitcode(status)
 
             if result_path.exists():
                 with open(result_path, "rb") as f:
-                    return pickle.load(f)
+                    structured = pickle.load(f)
+                structured["log"] = log
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
             else:
                 # Child crashed before writing result
-                return {
-                    "__error__": True,
-                    "type": "ForkError",
-                    "message": f"Forked process exited with code {exit_code}",
-                }
+                error_msg = f"ForkError: exited with code {exit_code}"
+                structured = {"result": None, "error": error_msg, "log": log}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
 
 
 class RayExecutor(Executor):
@@ -313,46 +367,46 @@ class RayExecutor(Executor):
         result_path: Path,
         capture: bool = True,
     ) -> dict:
-        """Run experiment as a Ray task."""
+        """Run experiment as a Ray task.
+
+        Returns:
+            Structured dict with keys: result, error, log
+        """
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         @self._ray.remote
         def _run_experiment(fn, config, result_path_str, capture):
             """Ray remote function to execute experiment."""
-            import os
+            import io
             import pickle
             import sys
             import traceback
             from pathlib import Path
 
             result_path = Path(result_path_str)
+            log = ""
+
+            # Capture output
+            if capture:
+                old_stdout, old_stderr = sys.stdout, sys.stderr
+                sys.stdout = io.StringIO()
+                sys.stderr = io.StringIO()
+
             try:
-                # Suppress output if capturing
-                if capture:
-                    devnull = open(os.devnull, "w")
-                    old_stdout, old_stderr = sys.stdout, sys.stderr
-                    sys.stdout, sys.stderr = devnull, devnull
-
-                try:
-                    result = fn(config)
-                finally:
-                    if capture:
-                        sys.stdout, sys.stderr = old_stdout, old_stderr
-                        devnull.close()
-
-                with open(result_path, "wb") as f:
-                    pickle.dump(result, f)
-                return result
+                result = fn(config)
+                structured = {"result": result, "error": None}
             except Exception as e:
-                error_result = {
-                    "__error__": True,
-                    "type": type(e).__name__,
-                    "message": str(e),
-                    "traceback": traceback.format_exc(),
-                }
-                with open(result_path, "wb") as f:
-                    pickle.dump(error_result, f)
-                return error_result
+                error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                structured = {"result": None, "error": error_msg}
+            finally:
+                if capture:
+                    log = sys.stdout.getvalue() + sys.stderr.getvalue()
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
+
+            structured["log"] = log
+            with open(result_path, "wb") as f:
+                pickle.dump(structured, f)
+            return structured
 
         # Submit task and wait for result
         future = _run_experiment.remote(fn, config, str(result_path), capture)
@@ -360,12 +414,11 @@ class RayExecutor(Executor):
             result = self._ray.get(future)
             return result
         except Exception as e:
-            return {
-                "__error__": True,
-                "type": "RayError",
-                "message": str(e),
-                "traceback": traceback.format_exc(),
-            }
+            error_msg = f"RayError: {e}\n{traceback.format_exc()}"
+            structured = {"result": None, "error": error_msg, "log": ""}
+            with open(result_path, "wb") as f:
+                pickle.dump(structured, f)
+            return structured
 
 
 # Registry of built-in executors

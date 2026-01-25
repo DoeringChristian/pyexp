@@ -9,7 +9,7 @@ import hashlib
 import json
 import pickle
 
-from .config import Config, Tensor
+from .config import Config, Result, Tensor
 from .executors import Executor, ExecutorName, get_executor
 
 
@@ -311,50 +311,37 @@ class Experiment:
                 if not result_path.exists():
                     raise RuntimeError(f"No cached result for config {config}. Run experiments first.")
                 with open(result_path, "rb") as f:
-                    result = pickle.load(f)
+                    structured = pickle.load(f)
                 status = "cached"
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = Config({**config, "out": experiment_dir})
-                result = exec_instance.run(
+                structured = exec_instance.run(
                     self._fn, config_with_out, result_path, capture=not args.no_capture
                 )
-                # Determine status based on result
-                if isinstance(result, dict) and result.get("__error__"):
+                # Determine status based on error field
+                if structured.get("error"):
                     status = "failed"
                 else:
                     status = "passed"
             else:
                 with open(result_path, "rb") as f:
-                    result = pickle.load(f)
+                    structured = pickle.load(f)
                 status = "cached"
 
             # Update progress bar
             if progress:
                 progress.update(status, config_name)
 
-            # Wrap result with config and name for filtering
+            # Create Result object with config (without 'out' key)
             config_without_out = {k: v for k, v in config.items() if k != "out"}
-            if isinstance(result, dict) and not result.get("__error__"):
-                wrapped_result = {
-                    "name": config.get("name", ""),
-                    "config": config_without_out,
-                    **result,
-                }
-            elif isinstance(result, dict) and result.get("__error__"):
-                # Keep error info but add config context
-                wrapped_result = {
-                    "name": config.get("name", ""),
-                    "config": config_without_out,
-                    **result,
-                }
-            else:
-                wrapped_result = {
-                    "name": config.get("name", ""),
-                    "config": config_without_out,
-                    "value": result,
-                }
-            results.append(wrapped_result)
+            result_obj = Result(
+                config=config_without_out,
+                result=structured.get("result"),
+                error=structured.get("error"),
+                log=structured.get("log", ""),
+            )
+            results.append(result_obj)
 
         # Finish progress bar
         if progress:

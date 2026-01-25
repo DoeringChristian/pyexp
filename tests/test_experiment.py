@@ -58,7 +58,7 @@ class TestExperimentRun:
     def test_run_executes_pipeline(self, tmp_path):
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -66,7 +66,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path)
@@ -76,13 +76,13 @@ class TestExperimentRun:
     def test_run_with_passed_functions(self, tmp_path):
         @experiment
         def my_exp(config):
-            return {"result": config["x"] + 1}
+            return {"value": config["x"] + 1}
 
         def my_configs():
             return [{"name": "t", "x": 10}]
 
         def my_report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(configs=my_configs, report=my_report, output_dir=tmp_path)
@@ -96,7 +96,7 @@ class TestExperimentRun:
         def my_exp(config):
             nonlocal call_count
             call_count += 1
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -104,7 +104,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             # Use executor="inline" to track call_count in same process
@@ -122,7 +122,7 @@ class TestExperimentRun:
         def my_exp(config):
             nonlocal call_count
             call_count += 1
-            return {"result": call_count}
+            return {"value": call_count}
 
         @my_exp.configs
         def configs():
@@ -130,7 +130,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             # Use executor="inline" to track call_count in same process
@@ -145,7 +145,7 @@ class TestExperimentRun:
     def test_run_report_flag(self, tmp_path):
         @experiment
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -153,7 +153,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         # First run to create cache
         with patch.object(sys, "argv", ["test"]):
@@ -297,7 +297,7 @@ class TestExperimentRun:
     def test_multiple_configs(self, tmp_path):
         @experiment
         def my_exp(config):
-            return {"result": config["x"] ** 2}
+            return {"value": config["x"] ** 2}
 
         @my_exp.configs
         def configs():
@@ -309,7 +309,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path)
@@ -322,7 +322,7 @@ class TestExperimentRun:
 
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -362,12 +362,12 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path)
 
         result = received_results[0]
-        assert result["name"] == "test"
-        assert result["config"]["lr"] == 0.01
-        assert result["config"]["epochs"] == 10
-        assert result["accuracy"] == 0.95
+        assert result.config["name"] == "test"
+        assert result.config["lr"] == 0.01
+        assert result.config["epochs"] == 10
+        assert result.result["accuracy"] == 0.95
         # out should not be in config
-        assert "out" not in result["config"]
+        assert "out" not in result.config
 
     def test_results_filterable_by_config(self, tmp_path):
         """Results should be filterable by config values."""
@@ -375,7 +375,7 @@ class TestExperimentRun:
 
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * config["y"]}
+            return {"value": config["x"] * config["y"]}
 
         @my_exp.configs
         def configs():
@@ -396,12 +396,12 @@ class TestExperimentRun:
         # Filter by config.x
         x1_results = received_results[{"config.x": 1}]
         assert x1_results.shape == (1, 1, 2)
-        assert all(r["config"]["x"] == 1 for r in x1_results)
+        assert all(r.config["x"] == 1 for r in x1_results)
 
         # Filter by config.y
         y10_results = received_results[{"config.y": 10}]
         assert y10_results.shape == (1, 2, 1)
-        assert all(r["config"]["y"] == 10 for r in y10_results)
+        assert all(r.config["y"] == 10 for r in y10_results)
 
     def test_report_tensors_preserve_sweep_shape(self, tmp_path):
         """Tensors should preserve shape from sweep operations."""
@@ -428,8 +428,8 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path)
 
         assert received_results.shape == (1, 2, 2)
-        assert received_results[0, 0, 0]["config"]["x"] == 1
-        assert received_results[0, 0, 0]["val"] == 11
+        assert received_results[0, 0, 0].config["x"] == 1
+        assert received_results[0, 0, 0].result["val"] == 11
 
     def test_non_dict_result_wrapped_in_value(self, tmp_path):
         """Non-dict results should be wrapped with 'value' key."""
@@ -453,9 +453,9 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path)
 
         result = received_results[0]
-        assert result["name"] == "test"
-        assert result["config"]["x"] == 5
-        assert result["value"] == 10
+        assert result.config["name"] == "test"
+        assert result.config["x"] == 5
+        assert result.result == 10
 
 
 class TestOutputFolderStructure:
@@ -497,7 +497,7 @@ class TestOutputFolderStructure:
         """Output folder includes timestamp when timestamp=True."""
         @experiment(name="test_exp", timestamp=True)
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -528,7 +528,7 @@ class TestOutputFolderStructure:
         """Output folder has no timestamp when timestamp=False."""
         @experiment(name="test_exp", timestamp=False)
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -554,7 +554,7 @@ class TestOutputFolderStructure:
         """--timestamp CLI arg continues a specific run."""
         @experiment(name="test_exp", timestamp=True)
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -562,7 +562,7 @@ class TestOutputFolderStructure:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         # First run with specific timestamp
         with patch.object(sys, "argv", ["test", "--timestamp", "2024-01-01_12-00-00"]):
@@ -583,7 +583,7 @@ class TestOutputFolderStructure:
         """Can override name in run()."""
         @experiment(name="default_name", timestamp=False)
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -604,7 +604,7 @@ class TestOutputFolderStructure:
         """Can override timestamp in run()."""
         @experiment(name="test_exp", timestamp=True)
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -651,7 +651,7 @@ class TestExecutorSystem:
         def my_exp(config):
             nonlocal call_count
             call_count += 1
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -659,7 +659,7 @@ class TestExecutorSystem:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path)
@@ -672,7 +672,7 @@ class TestExecutorSystem:
         """run(executor=...) can override the decorator default."""
         @experiment(executor="inline")
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -680,7 +680,7 @@ class TestExecutorSystem:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             # Override executor="inline" with executor="subprocess"
@@ -695,7 +695,7 @@ class TestSubprocessExecution:
         """Experiments run in subprocess with executor='subprocess'."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -703,7 +703,7 @@ class TestSubprocessExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="subprocess")
@@ -727,10 +727,10 @@ class TestSubprocessExecution:
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        assert result["__error__"] is True
-        assert result["type"] == "ValueError"
-        assert "Test error" in result["message"]
-        assert result["name"] == "failing"
+        assert result.error is not None
+        assert "ValueError" in result.error
+        assert "Test error" in result.error
+        assert result.config["name"] == "failing"
 
     def test_subprocess_continues_after_failure(self, tmp_path):
         """Other experiments continue even if one fails."""
@@ -738,7 +738,7 @@ class TestSubprocessExecution:
         def my_exp(config):
             if config["x"] == 2:
                 raise ValueError("Fail on x=2")
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -756,18 +756,18 @@ class TestSubprocessExecution:
             results = my_exp.run(output_dir=tmp_path, executor="subprocess")
 
         # First and third succeed
-        assert results[0]["result"] == 1
-        assert results[2]["result"] == 3
+        assert results[0].result["value"] == 1
+        assert results[2].result["value"] == 3
 
         # Second failed
-        assert results[1]["__error__"] is True
-        assert results[1]["type"] == "ValueError"
+        assert results[1].error is not None
+        assert "ValueError" in results[1].error
 
     def test_subprocess_multiple_configs(self, tmp_path):
         """Multiple configs all run in separate subprocesses."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] ** 2}
+            return {"value": config["x"] ** 2}
 
         @my_exp.configs
         def configs():
@@ -779,7 +779,7 @@ class TestSubprocessExecution:
 
         @my_exp.report
         def report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="subprocess")
@@ -790,7 +790,7 @@ class TestSubprocessExecution:
         """Subprocess execution works with sweep configurations."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] + config["y"]}
+            return {"value": config["x"] + config["y"]}
 
         @my_exp.configs
         def configs():
@@ -807,8 +807,8 @@ class TestSubprocessExecution:
             results = my_exp.run(output_dir=tmp_path, executor="subprocess")
 
         assert results.shape == (1, 2, 2)
-        assert results[0, 0, 0]["result"] == 11  # x=1, y=10
-        assert results[0, 1, 1]["result"] == 22  # x=2, y=20
+        assert results[0, 0, 0].result["value"] == 11  # x=1, y=10
+        assert results[0, 1, 1].result["value"] == 22  # x=2, y=20
 
 
 import os
@@ -821,7 +821,7 @@ class TestForkExecution:
         """Experiments run correctly with fork executor."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -829,7 +829,7 @@ class TestForkExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="fork")
@@ -853,10 +853,10 @@ class TestForkExecution:
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="fork")
 
-        assert result["__error__"] is True
-        assert result["type"] == "ValueError"
-        assert "Test error in fork" in result["message"]
-        assert result["name"] == "failing"
+        assert result.error is not None
+        assert "ValueError" in result.error
+        assert "Test error in fork" in result.error
+        assert result.config["name"] == "failing"
 
     def test_fork_continues_after_failure(self, tmp_path):
         """Other experiments continue even if one fails in fork."""
@@ -864,7 +864,7 @@ class TestForkExecution:
         def my_exp(config):
             if config["x"] == 2:
                 raise ValueError("Fail on x=2")
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -882,18 +882,18 @@ class TestForkExecution:
             results = my_exp.run(output_dir=tmp_path, executor="fork")
 
         # First and third succeed
-        assert results[0]["result"] == 1
-        assert results[2]["result"] == 3
+        assert results[0].result["value"] == 1
+        assert results[2].result["value"] == 3
 
         # Second failed
-        assert results[1]["__error__"] is True
-        assert results[1]["type"] == "ValueError"
+        assert results[1].error is not None
+        assert "ValueError" in results[1].error
 
     def test_fork_multiple_configs(self, tmp_path):
         """Multiple configs all run in separate forked processes."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] ** 2}
+            return {"value": config["x"] ** 2}
 
         @my_exp.configs
         def configs():
@@ -905,7 +905,7 @@ class TestForkExecution:
 
         @my_exp.report
         def report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="fork")
@@ -916,7 +916,7 @@ class TestForkExecution:
         """Can set fork as default executor in decorator."""
         @experiment(executor="fork")
         def my_exp(config):
-            return {"result": config["x"] * 3}
+            return {"value": config["x"] * 3}
 
         @my_exp.configs
         def configs():
@@ -924,7 +924,7 @@ class TestForkExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path)
@@ -935,7 +935,7 @@ class TestForkExecution:
         """Fork execution works with sweep configurations."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] + config["y"]}
+            return {"value": config["x"] + config["y"]}
 
         @my_exp.configs
         def configs():
@@ -952,8 +952,8 @@ class TestForkExecution:
             results = my_exp.run(output_dir=tmp_path, executor="fork")
 
         assert results.shape == (1, 2, 2)
-        assert results[0, 0, 0]["result"] == 11  # x=1, y=10
-        assert results[0, 1, 1]["result"] == 22  # x=2, y=20
+        assert results[0, 0, 0].result["value"] == 11  # x=1, y=10
+        assert results[0, 1, 1].result["value"] == 22  # x=2, y=20
 
 
 def ray_available():
@@ -981,7 +981,7 @@ class TestRayExecution:
         """Can set remote cluster address via executor='ray://...' or 'ray:<address>' in run()."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -989,7 +989,7 @@ class TestRayExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         # This will use local Ray since we don't have a cluster
         # Just testing that the parameter is accepted
@@ -1016,7 +1016,7 @@ class TestRayExecution:
 
         @experiment
         def my_exp(config):
-            return {"result": config["x"]}
+            return {"value": config["x"]}
 
         @my_exp.configs
         def configs():
@@ -1024,7 +1024,7 @@ class TestRayExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor=executor)
@@ -1035,7 +1035,7 @@ class TestRayExecution:
         """Experiments run correctly with ray executor."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -1043,7 +1043,7 @@ class TestRayExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="ray")
@@ -1067,16 +1067,16 @@ class TestRayExecution:
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="ray")
 
-        assert result["__error__"] is True
-        assert result["type"] == "ValueError"
-        assert "Test error in ray" in result["message"]
-        assert result["name"] == "failing"
+        assert result.error is not None
+        assert "ValueError" in result.error
+        assert "Test error in ray" in result.error
+        assert result.config["name"] == "failing"
 
     def test_ray_multiple_configs(self, tmp_path):
         """Multiple configs run with Ray executor."""
         @experiment
         def my_exp(config):
-            return {"result": config["x"] ** 2}
+            return {"value": config["x"] ** 2}
 
         @my_exp.configs
         def configs():
@@ -1088,7 +1088,7 @@ class TestRayExecution:
 
         @my_exp.report
         def report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor="ray")
@@ -1099,7 +1099,7 @@ class TestRayExecution:
         """Can set ray as default executor in decorator."""
         @experiment(executor="ray")
         def my_exp(config):
-            return {"result": config["x"] * 3}
+            return {"value": config["x"] * 3}
 
         @my_exp.configs
         def configs():
@@ -1107,7 +1107,7 @@ class TestRayExecution:
 
         @my_exp.report
         def report(results):
-            return results[0]["result"]
+            return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path)
@@ -1130,15 +1130,16 @@ class TestCustomExecutor:
                 self.call_count += 1
                 result_path.parent.mkdir(parents=True, exist_ok=True)
                 result = fn(config)
+                structured = {"result": result, "error": None, "log": ""}
                 with open(result_path, "wb") as f:
-                    pickle.dump(result, f)
-                return result
+                    pickle.dump(structured, f)
+                return structured
 
         custom_executor = CountingExecutor()
 
         @experiment
         def my_exp(config):
-            return {"result": config["x"] * 2}
+            return {"value": config["x"] * 2}
 
         @my_exp.configs
         def configs():
@@ -1146,7 +1147,7 @@ class TestCustomExecutor:
 
         @my_exp.report
         def report(results):
-            return [r["result"] for r in results]
+            return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
             result = my_exp.run(output_dir=tmp_path, executor=custom_executor)

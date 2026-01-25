@@ -342,3 +342,60 @@ class TestRegistry:
         obj = build(Model, {"type": "Model", "size": 256}, "my_model")
         assert obj.name == "my_model"
         assert obj.size == 256
+
+
+class TestResult:
+    """Tests for Result class for structured experiment results."""
+
+    def test_result_dot_notation_access(self):
+        """Result provides dot notation access to config, result, error, log."""
+        from pyexp import Result
+
+        r = Result(
+            config={"name": "test", "lr": 0.01},
+            result={"accuracy": 0.95},
+            error=None,
+            log="output logs",
+        )
+
+        assert r.config["name"] == "test"
+        assert r.config["lr"] == 0.01
+        assert r.result["accuracy"] == 0.95
+        assert r.error is None
+        assert r.log == "output logs"
+
+    def test_result_config_is_config_type(self):
+        """Result.config is a Config object with dot notation."""
+        from pyexp import Result
+
+        r = Result(config={"name": "test", "nested": {"a": 1}}, result=None)
+
+        assert isinstance(r.config, Config)
+        assert r.config.name == "test"
+        assert r.config.nested.a == 1
+
+    def test_result_with_error(self):
+        """Result can store error information."""
+        from pyexp import Result
+
+        r = Result(
+            config={"name": "failing"},
+            result=None,
+            error="ValueError: something went wrong",
+            log="traceback output",
+        )
+
+        assert r.result is None
+        assert r.error is not None
+        assert "ValueError" in r.error
+        assert r.log == "traceback output"
+
+    def test_result_default_values(self):
+        """Result has sensible defaults."""
+        from pyexp import Result
+
+        r = Result(config={"name": "test"})
+
+        assert r.result is None
+        assert r.error is None
+        assert r.log == ""
