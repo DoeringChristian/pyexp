@@ -1,17 +1,17 @@
 """Solara-based viewer for pyexp logs."""
 
 import json
+import pickle
 from pathlib import Path
 from typing import Any
 
-from pyexp.log import MARKER_FILE
+from pyexp.log import MARKER_FILE, SCALARS_FILE, TEXT_FILE
 
 
 def is_run_directory(path: Path) -> bool:
     """Check if a directory is a pyexp run (contains marker file)."""
     if not path.is_dir():
         return False
-    # A run directory contains the .pyexp marker file
     return (path / MARKER_FILE).exists()
 
 
@@ -37,64 +37,92 @@ def discover_runs(root_path: Path) -> list[Path]:
     return sorted(runs)
 
 
-def load_iterations(log_path: Path) -> list[int]:
-    """Load all iteration numbers from log directory."""
-    if not log_path.exists():
-        return []
-    iterations = []
-    for d in log_path.iterdir():
-        if d.is_dir() and d.name.isdigit():
-            iterations.append(int(d.name))
-    return sorted(iterations)
-
-
 def load_scalars_timeseries(log_path: Path) -> dict[str, list[tuple[int, float]]]:
-    """Load all scalars across iterations as time series."""
+    """Load all scalars from JSONL file as time series."""
     timeseries: dict[str, list[tuple[int, float]]] = {}
-    for it in load_iterations(log_path):
-        scalars_path = log_path / str(it) / "scalars.json"
-        if scalars_path.exists():
-            try:
-                data = json.loads(scalars_path.read_text())
-                for tag, value in data.items():
-                    if tag not in timeseries:
-                        timeseries[tag] = []
-                    timeseries[tag].append((it, value))
-            except (json.JSONDecodeError, ValueError):
-                # File is being written to, skip this iteration
-                pass
+    scalars_path = log_path / SCALARS_FILE
+
+    if scalars_path.exists():
+        try:
+            with open(scalars_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        tag = entry["tag"]
+                        if tag not in timeseries:
+                            timeseries[tag] = []
+                        timeseries[tag].append((entry["it"], entry["value"]))
+                    except (json.JSONDecodeError, KeyError):
+                        continue  # Skip malformed lines
+        except (IOError, OSError):
+            pass  # File is being written to
+
     # Sort by iteration
     for tag in timeseries:
         timeseries[tag].sort(key=lambda x: x[0])
+
     return timeseries
 
 
-def load_iteration_data(log_path: Path, iteration: int) -> dict[str, Any]:
-    """Load all data for a specific iteration."""
-    it_dir = log_path / str(iteration)
-    data: dict[str, Any] = {"scalars": {}, "text": {}, "figures": {}}
+def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
+    """Load all text from JSONL file as time series."""
+    timeseries: dict[str, list[tuple[int, str]]] = {}
+    text_path = log_path / TEXT_FILE
 
-    scalars_path = it_dir / "scalars.json"
-    if scalars_path.exists():
-        try:
-            data["scalars"] = json.loads(scalars_path.read_text())
-        except (json.JSONDecodeError, ValueError):
-            pass  # File is being written to
-
-    text_path = it_dir / "text.json"
     if text_path.exists():
         try:
-            data["text"] = json.loads(text_path.read_text())
-        except (json.JSONDecodeError, ValueError):
+            with open(text_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        tag = entry["tag"]
+                        if tag not in timeseries:
+                            timeseries[tag] = []
+                        timeseries[tag].append((entry["it"], entry["text"]))
+                    except (json.JSONDecodeError, KeyError):
+                        continue  # Skip malformed lines
+        except (IOError, OSError):
             pass  # File is being written to
 
-    figures_dir = it_dir / "figures"
-    if figures_dir.exists():
-        for fig_path in figures_dir.glob("*.cpkl"):
-            tag = fig_path.stem
-            data["figures"][tag] = fig_path  # Store path, load on demand
+    # Sort by iteration
+    for tag in timeseries:
+        timeseries[tag].sort(key=lambda x: x[0])
 
-    return data
+    return timeseries
+
+
+def load_iterations(log_path: Path) -> list[int]:
+    """Load all iteration numbers from log directory.
+
+    Combines iterations from JSONL files and iteration directories.
+    """
+    if not log_path.exists():
+        return []
+
+    iterations = set()
+
+    # Get iterations from scalars JSONL
+    for values in load_scalars_timeseries(log_path).values():
+        for it, _ in values:
+            iterations.add(it)
+
+    # Get iterations from text JSONL
+    for values in load_text_timeseries(log_path).values():
+        for it, _ in values:
+            iterations.add(it)
+
+    # Get iterations from directories (figures, checkpoints)
+    for d in log_path.iterdir():
+        if d.is_dir() and d.name.isdigit():
+            iterations.add(int(d.name))
+
+    return sorted(iterations)
 
 
 def load_figure(fig_path: Path) -> Any:
@@ -106,27 +134,6 @@ def load_figure(fig_path: Path) -> Any:
         except (EOFError, pickle.UnpicklingError):
             # File is being written to
             return None
-
-
-def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
-    """Load all text across iterations as time series."""
-    timeseries: dict[str, list[tuple[int, str]]] = {}
-    for it in load_iterations(log_path):
-        text_path = log_path / str(it) / "text.json"
-        if text_path.exists():
-            try:
-                data = json.loads(text_path.read_text())
-                for tag, text in data.items():
-                    if tag not in timeseries:
-                        timeseries[tag] = []
-                    timeseries[tag].append((it, text))
-            except (json.JSONDecodeError, ValueError):
-                # File is being written to, skip this iteration
-                pass
-    # Sort by iteration
-    for tag in timeseries:
-        timeseries[tag].sort(key=lambda x: x[0])
-    return timeseries
 
 
 def load_figure_meta(fig_path: Path) -> dict:
@@ -161,33 +168,6 @@ def load_figures_info(log_path: Path) -> dict[str, list[tuple[int, Path, bool]]]
     for tag in figures:
         figures[tag].sort(key=lambda x: x[0])
     return figures
-
-
-def get_all_scalar_tags(runs: list[Path]) -> set[str]:
-    """Get all unique scalar tags across all runs."""
-    tags = set()
-    for run in runs:
-        timeseries = load_scalars_timeseries(run)
-        tags.update(timeseries.keys())
-    return tags
-
-
-def get_all_text_tags(runs: list[Path]) -> set[str]:
-    """Get all unique text tags across all runs."""
-    tags = set()
-    for run in runs:
-        timeseries = load_text_timeseries(run)
-        tags.update(timeseries.keys())
-    return tags
-
-
-def get_all_figure_tags(runs: list[Path]) -> set[str]:
-    """Get all unique figure tags across all runs."""
-    tags = set()
-    for run in runs:
-        figures = load_figures_info(run)
-        tags.update(figures.keys())
-    return tags
 
 
 def run(log_path: str | Path | None = None, port: int = 8765):

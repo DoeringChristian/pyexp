@@ -472,8 +472,9 @@ class Experiment:
                 else:
                     status = "passed"
             else:
-                # Ensure directory and marker file exist for viewer discovery
+                # Load cached result
                 experiment_dir.mkdir(parents=True, exist_ok=True)
+                # Ensure marker file exists for viewer discovery
                 marker_path = experiment_dir / ".pyexp"
                 marker_path.touch(exist_ok=True)
                 with open(result_path, "rb") as f:

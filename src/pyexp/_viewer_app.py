@@ -10,12 +10,8 @@ import solara
 
 from pyexp._viewer import (
     discover_runs,
-    get_all_figure_tags,
-    get_all_scalar_tags,
-    get_all_text_tags,
     load_figure,
     load_figures_info,
-    load_iterations,
     load_scalars_timeseries,
     load_text_timeseries,
 )
@@ -78,8 +74,14 @@ def RunSelector():
 
 
 @solara.component
-def ScalarPlot(tag: str, runs: list, root_path: Path):
-    """Display a scalar plot for a single tag across multiple runs."""
+def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
+    """Display a scalar plot for a single tag across multiple runs.
+
+    Args:
+        tag: The scalar tag to plot.
+        runs_data: Dict mapping run path to its timeseries data (pre-loaded).
+        root_path: Root directory for computing relative run names.
+    """
     import plotly.graph_objects as go
 
     # Per-tag log scale toggle
@@ -87,8 +89,7 @@ def ScalarPlot(tag: str, runs: list, root_path: Path):
 
     fig = go.Figure()
 
-    for run in runs:
-        timeseries = load_scalars_timeseries(run)
+    for run, timeseries in runs_data.items():
         if tag in timeseries:
             data = timeseries[tag]
             iterations = [d[0] for d in data]
@@ -127,8 +128,13 @@ def ScalarsPanel():
         solara.Text("Select runs from the sidebar to view scalars.")
         return
 
-    # Get all scalar tags across selected runs
-    all_tags = get_all_scalar_tags(selected_runs.value)
+    # Load all scalar data ONCE per run
+    runs_data = {run: load_scalars_timeseries(run) for run in selected_runs.value}
+
+    # Get all tags from the pre-loaded data
+    all_tags = set()
+    for timeseries in runs_data.values():
+        all_tags.update(timeseries.keys())
 
     if not all_tags:
         solara.Text("No scalars logged in selected runs.")
@@ -138,7 +144,7 @@ def ScalarsPanel():
 
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
-            ScalarPlot(tag, selected_runs.value, root_path)
+            ScalarPlot(tag, runs_data, root_path)
 
 
 @solara.component
@@ -174,8 +180,13 @@ def TextPanel():
         solara.Text("Select runs from the sidebar to view text.")
         return
 
-    # Get all text tags across selected runs
-    all_tags = get_all_text_tags(selected_runs.value)
+    # Load all text data ONCE per run
+    runs_data = {run: load_text_timeseries(run) for run in selected_runs.value}
+
+    # Get all tags from the pre-loaded data
+    all_tags = set()
+    for timeseries in runs_data.values():
+        all_tags.update(timeseries.keys())
 
     if not all_tags:
         solara.Text("No text logged in selected runs.")
@@ -186,9 +197,8 @@ def TextPanel():
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
             for run in selected_runs.value:
-                timeseries = load_text_timeseries(run)
-                if tag in timeseries and timeseries[tag]:
-                    TextItem(run, tag, root_path, timeseries[tag])
+                if tag in runs_data[run] and runs_data[run][tag]:
+                    TextItem(run, tag, root_path, runs_data[run][tag])
 
 
 @solara.component
@@ -232,8 +242,13 @@ def FiguresPanel():
         solara.Text("Select runs from the sidebar to view figures.")
         return
 
-    # Get all figure tags across selected runs
-    all_tags = get_all_figure_tags(selected_runs.value)
+    # Load all figure info ONCE per run
+    runs_data = {run: load_figures_info(run) for run in selected_runs.value}
+
+    # Get all tags from the pre-loaded data
+    all_tags = set()
+    for figures_info in runs_data.values():
+        all_tags.update(figures_info.keys())
 
     if not all_tags:
         solara.Text("No figures logged in selected runs.")
@@ -244,9 +259,8 @@ def FiguresPanel():
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
             for run in selected_runs.value:
-                figures_info = load_figures_info(run)
-                if tag in figures_info and figures_info[tag]:
-                    FigureItem(run, tag, root_path, figures_info[tag])
+                if tag in runs_data[run] and runs_data[run][tag]:
+                    FigureItem(run, tag, root_path, runs_data[run][tag])
 
 
 @solara.component

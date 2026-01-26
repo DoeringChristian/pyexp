@@ -10,7 +10,10 @@ from typing import Any
 import cloudpickle
 
 
-MARKER_FILE = ".pyexp"
+# File names for storage
+SCALARS_FILE = "scalars.jsonl"
+TEXT_FILE = "text.jsonl"
+MARKER_FILE = ".pyexp"  # Marker file identifying a pyexp run directory
 
 
 class LogReader:
@@ -41,6 +44,9 @@ class LogReader:
         self._log_dir = Path(log_dir)
         if not self._log_dir.exists():
             raise FileNotFoundError(f"Log directory not found: {log_dir}")
+        # Cache for parsed JSONL data
+        self._scalars_cache: dict[str, list[tuple[int, float]]] | None = None
+        self._text_cache: dict[str, list[tuple[int, str]]] | None = None
 
     @property
     def path(self) -> Path:
@@ -69,15 +75,85 @@ class LogReader:
             return self
         return LogReader(self._log_dir / name)
 
+    def _load_scalars_jsonl(self) -> dict[str, list[tuple[int, float]]]:
+        """Load and cache all scalars from JSONL file."""
+        if self._scalars_cache is not None:
+            return self._scalars_cache
+
+        self._scalars_cache = {}
+        scalars_path = self._log_dir / SCALARS_FILE
+        if scalars_path.exists():
+            with open(scalars_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        tag = entry["tag"]
+                        if tag not in self._scalars_cache:
+                            self._scalars_cache[tag] = []
+                        self._scalars_cache[tag].append((entry["it"], entry["value"]))
+                    except (json.JSONDecodeError, KeyError):
+                        continue  # Skip malformed lines
+
+        # Sort each tag's values by iteration
+        for tag in self._scalars_cache:
+            self._scalars_cache[tag].sort(key=lambda x: x[0])
+
+        return self._scalars_cache
+
+    def _load_text_jsonl(self) -> dict[str, list[tuple[int, str]]]:
+        """Load and cache all text from JSONL file."""
+        if self._text_cache is not None:
+            return self._text_cache
+
+        self._text_cache = {}
+        text_path = self._log_dir / TEXT_FILE
+        if text_path.exists():
+            with open(text_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        tag = entry["tag"]
+                        if tag not in self._text_cache:
+                            self._text_cache[tag] = []
+                        self._text_cache[tag].append((entry["it"], entry["text"]))
+                    except (json.JSONDecodeError, KeyError):
+                        continue  # Skip malformed lines
+
+        # Sort each tag's values by iteration
+        for tag in self._text_cache:
+            self._text_cache[tag].sort(key=lambda x: x[0])
+
+        return self._text_cache
+
     @property
     def iterations(self) -> list[int]:
         """Get all iteration numbers in this run."""
         if not self.is_run:
             raise ValueError("Not a run directory. Use get_run() first.")
-        iterations = []
+
+        iterations = set()
+
+        # Get iterations from scalars
+        for values in self._load_scalars_jsonl().values():
+            for it, _ in values:
+                iterations.add(it)
+
+        # Get iterations from text
+        for values in self._load_text_jsonl().values():
+            for it, _ in values:
+                iterations.add(it)
+
+        # Get iterations from iteration directories (figures, checkpoints)
         for d in self._log_dir.iterdir():
             if d.is_dir() and d.name.isdigit():
-                iterations.append(int(d.name))
+                iterations.add(int(d.name))
+
         return sorted(iterations)
 
     @property
@@ -85,26 +161,14 @@ class LogReader:
         """Get all scalar tags logged in this run."""
         if not self.is_run:
             raise ValueError("Not a run directory. Use get_run() first.")
-        tags = set()
-        for it in self.iterations:
-            scalars_path = self._log_dir / str(it) / "scalars.json"
-            if scalars_path.exists():
-                data = json.loads(scalars_path.read_text())
-                tags.update(data.keys())
-        return tags
+        return set(self._load_scalars_jsonl().keys())
 
     @property
     def text_tags(self) -> set[str]:
         """Get all text tags logged in this run."""
         if not self.is_run:
             raise ValueError("Not a run directory. Use get_run() first.")
-        tags = set()
-        for it in self.iterations:
-            text_path = self._log_dir / str(it) / "text.json"
-            if text_path.exists():
-                data = json.loads(text_path.read_text())
-                tags.update(data.keys())
-        return tags
+        return set(self._load_text_jsonl().keys())
 
     @property
     def figure_tags(self) -> set[str]:
@@ -123,27 +187,13 @@ class LogReader:
         """Load scalar values for a tag as (iteration, value) pairs."""
         if not self.is_run:
             raise ValueError("Not a run directory. Use get_run() first.")
-        values = []
-        for it in self.iterations:
-            scalars_path = self._log_dir / str(it) / "scalars.json"
-            if scalars_path.exists():
-                data = json.loads(scalars_path.read_text())
-                if tag in data:
-                    values.append((it, data[tag]))
-        return values
+        return self._load_scalars_jsonl().get(tag, [])
 
     def load_text(self, tag: str) -> list[tuple[int, str]]:
         """Load text values for a tag as (iteration, text) pairs."""
         if not self.is_run:
             raise ValueError("Not a run directory. Use get_run() first.")
-        values = []
-        for it in self.iterations:
-            text_path = self._log_dir / str(it) / "text.json"
-            if text_path.exists():
-                data = json.loads(text_path.read_text())
-                if tag in data:
-                    values.append((it, data[tag]))
-        return values
+        return self._load_text_jsonl().get(tag, [])
 
     def load_figure(self, tag: str, iteration: int) -> Any:
         """Load a figure object for a specific tag and iteration."""
@@ -264,15 +314,17 @@ class Logger:
     Saving is performed asynchronously in a background thread to avoid
     blocking the main training loop. Use flush() to wait for pending writes.
 
-    Storage structure (organized by iteration):
+    Storage structure:
         log_dir/
         ├── .pyexp              # Marker file identifying this as a pyexp log
+        ├── scalars.jsonl       # {"it": N, "tag": "...", "value": V}
+        ├── text.jsonl          # {"it": N, "tag": "...", "text": "..."}
         └── <iteration>/
-            ├── scalars.json    # {tag: value, ...}
-            ├── text.json       # {tag: text, ...}
-            └── figures/
-                ├── <tag>.cpkl  # Pickled figure
-                └── <tag>.meta  # Metadata (interactive flag)
+            ├── figures/
+            │   ├── <tag>.cpkl  # Pickled figure
+            │   └── <tag>.meta  # Metadata (interactive flag)
+            └── checkpoints/
+                └── <tag>.cpkl  # Pickled checkpoint
 
     Args:
         log_dir: Directory to store log files.
@@ -291,9 +343,13 @@ class Logger:
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._global_it = 0
 
-        # Create marker file to identify this as a pyexp log directory
+        # Create marker file to identify this as a pyexp run directory
         marker_path = self._log_dir / MARKER_FILE
-        marker_path.touch()
+        marker_path.touch(exist_ok=True)
+
+        # File locks for thread-safe JSONL appending
+        self._scalars_lock = threading.Lock()
+        self._text_lock = threading.Lock()
 
         # Async saving infrastructure
         self._queue: queue.Queue = queue.Queue()
@@ -340,14 +396,14 @@ class Logger:
     def add_scalar(self, tag: str, scalar_value: float) -> None:
         """Log a scalar value at the current iteration.
 
-        Scalars are stored in <iteration>/scalars.json as {tag: value, ...}.
+        Scalars are appended to scalars.jsonl as {"it": N, "tag": "...", "value": V}.
         """
         self._queue.put(("scalar", (tag, scalar_value, self._global_it)))
 
     def add_text(self, tag: str, text_string: str) -> None:
         """Log a text string at the current iteration.
 
-        Text is stored in <iteration>/text.json as {tag: text, ...}.
+        Text is appended to text.jsonl as {"it": N, "tag": "...", "text": "..."}.
         """
         self._queue.put(("text", (tag, text_string, self._global_it)))
 
@@ -378,36 +434,20 @@ class Logger:
         self._queue.put(("checkpoint", (tag, obj, self._global_it)))
 
     def _write_scalar(self, tag: str, scalar_value: float, it: int) -> None:
-        """Write a scalar value to disk."""
-        it_dir = self._get_it_dir(it)
-        it_dir.mkdir(parents=True, exist_ok=True)
-
-        scalars_path = it_dir / "scalars.json"
-
-        # Load existing or create new
-        if scalars_path.exists():
-            data = json.loads(scalars_path.read_text())
-        else:
-            data = {}
-
-        data[tag] = scalar_value
-        scalars_path.write_text(json.dumps(data, indent=2))
+        """Append a scalar value to scalars.jsonl."""
+        entry = {"it": it, "tag": tag, "value": scalar_value}
+        scalars_path = self._log_dir / SCALARS_FILE
+        with self._scalars_lock:
+            with open(scalars_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
 
     def _write_text(self, tag: str, text_string: str, it: int) -> None:
-        """Write a text string to disk."""
-        it_dir = self._get_it_dir(it)
-        it_dir.mkdir(parents=True, exist_ok=True)
-
-        text_path = it_dir / "text.json"
-
-        # Load existing or create new
-        if text_path.exists():
-            data = json.loads(text_path.read_text())
-        else:
-            data = {}
-
-        data[tag] = text_string
-        text_path.write_text(json.dumps(data, indent=2))
+        """Append a text string to text.jsonl."""
+        entry = {"it": it, "tag": tag, "text": text_string}
+        text_path = self._log_dir / TEXT_FILE
+        with self._text_lock:
+            with open(text_path, "a") as f:
+                f.write(json.dumps(entry) + "\n")
 
     def _write_figure(self, tag: str, figure: Any, it: int, interactive: bool) -> None:
         """Write a figure to disk."""

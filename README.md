@@ -536,9 +536,9 @@ logger.flush()
 ```
 log_dir/
 ├── .pyexp                  # Marker file identifying this as a pyexp log
+├── scalars.jsonl           # {"it": N, "tag": "...", "value": V} per line
+├── text.jsonl              # {"it": N, "tag": "...", "text": "..."} per line
 └── <iteration>/
-    ├── scalars.json        # {tag: value, ...}
-    ├── text.json           # {tag: text, ...}
     ├── figures/
     │   ├── <tag>.cpkl      # Pickled figure
     │   └── <tag>.meta      # Metadata (interactive flag)
