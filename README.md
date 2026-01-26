@@ -32,10 +32,10 @@ def configs():
     ]
 
 @experiment.report
-def report(results):
-    # Each result contains 'name', 'config', and experiment outputs
+def report(results, report_dir):
+    # Each result has: name, config, result, error, log, logger
     for r in results:
-        print(f"{r['name']}: {r['accuracy']}")
+        print(f"{r.name}: {r.result['accuracy']}")
 
     # Filter by config values
     fast_results = results[{"config.learning_rate": 0.01}]
@@ -98,12 +98,12 @@ By default, each experiment runs in an isolated subprocess, protecting against c
 
 ```python
 @experiment.report
-def report(results):
+def report(results, report_dir):
     for r in results:
-        if r.get("__error__"):
-            print(f"{r['name']} failed: {r['type']}: {r['message']}")
+        if r.error:
+            print(f"{r.name} failed: {r.error}")
         else:
-            print(f"{r['name']}: {r['accuracy']}")
+            print(f"{r.name}: {r.result['accuracy']}")
 ```
 
 ### Execution Modes
@@ -539,14 +539,16 @@ log_dir/
 └── <iteration>/
     ├── scalars.json        # {tag: value, ...}
     ├── text.json           # {tag: text, ...}
-    └── figures/
-        ├── <tag>.cpkl      # Pickled figure (always saved)
-        └── <tag>.meta      # Metadata (interactive flag)
+    ├── figures/
+    │   ├── <tag>.cpkl      # Pickled figure
+    │   └── <tag>.meta      # Metadata (interactive flag)
+    └── checkpoints/
+        └── <tag>.cpkl      # Pickled checkpoint object
 ```
 
 **Automatic logging in experiments:**
 
-When using `@pyexp.experiment`, the framework automatically logs at iteration 0:
+When using `@pyexp.experiment` with a logger parameter, the framework automatically logs at iteration 0:
 - **`config`**: The experiment configuration as YAML text
 - **`git_commit`**: The git stash commit hash (if stash is enabled)
 
@@ -555,19 +557,21 @@ This enables exact reproducibility of experiments. Disable git stash via decorat
 ```python
 # Disable via experiment decorator
 @pyexp.experiment(stash=False)
-def my_experiment(config):
+def my_experiment(config, logger):
     ...
 
 # Or via CLI
 python main.py --no-stash
 ```
 
-View the logged config and commit via `LogReader`:
+View the logged config and commit via the result's LogReader:
 
 ```python
-reader = LogReader("out/my_experiment/run1")
-config_yaml = reader.load_text("config")     # [(0, 'learning_rate: 0.01\n...')]
-commit = reader.load_text("git_commit")      # [(0, 'abc123...')]
+@my_experiment.report
+def report(results, report_dir):
+    for r in results:
+        it, config_yaml = r.logger["config"]
+        it, commit = r.logger["git_commit"]
 ```
 
 ### LogReader
@@ -588,22 +592,27 @@ print(run.is_run)  # True
 print(run.iterations)  # [0, 1, 2, ..., 99]
 
 # Available tags
-print(run.scalar_tags)  # {'loss', 'accuracy'}
-print(run.text_tags)    # {'sample_output'}
-print(run.figure_tags)  # {'training_curve', 'loss_landscape'}
+print(run.scalar_tags)      # {'loss', 'accuracy'}
+print(run.text_tags)        # {'sample_output'}
+print(run.figure_tags)      # {'training_curve', 'loss_landscape'}
+print(run.checkpoint_tags)  # {'model', 'optimizer'}
 
-# Load scalar time series
-loss_data = run.load_scalars("loss")  # [(0, 0.5), (1, 0.45), ...]
+# Quick access to last value via __getitem__
+it, loss = run["loss"]                  # Last scalar value
+it, fig = run["loss_landscape"]         # Last figure
+it, state = run["model"]                # Last checkpoint
 
-# Load text
+# Load full time series
+loss_data = run.load_scalars("loss")    # [(0, 0.5), (1, 0.45), ...]
 texts = run.load_text("sample_output")  # [(0, "Hello..."), ...]
 
-# Load figures
+# Load specific iteration
 fig = run.load_figure("loss_landscape", iteration=50)
-fig.show()  # Display the matplotlib figure
+state = run.load_checkpoint("model", iteration=100)
 
-# Get iterations where a figure was logged
-iters = run.figure_iterations("loss_landscape")  # [0, 25, 50, 75]
+# Get iterations where a tag was logged
+iters = run.figure_iterations("loss_landscape")      # [0, 25, 50, 75]
+iters = run.checkpoint_iterations("model")           # [0, 100, 200, ...]
 ```
 
 ### Viewer
@@ -692,7 +701,7 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Decorators
 
 - `@pyexp.experiment` - Define an experiment function
-- `@pyexp.experiment(name="...", executor="...", timestamp=True/False)` - Define with options
+- `@pyexp.experiment(name="...", executor="...")` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
 
@@ -703,11 +712,13 @@ The viewer starts as a background process before experiments begin, allowing you
 - `add_scalar(tag, value)` - Log a scalar value
 - `add_text(tag, text)` - Log a text string
 - `add_figure(tag, figure, interactive=True)` - Log a matplotlib figure
+- `add_checkpoint(tag, obj)` - Log an arbitrary picklable object
 - `flush()` - Wait for all pending async writes to complete
 
 ### LogReader Properties & Methods
 
 - `LogReader(log_dir)` - Create a reader for the specified directory
+- `reader[tag]` - Get last `(iteration, value)` for any tag type
 - `path` - The log directory path
 - `is_run` - Whether this directory is a pyexp run
 - `runs` - List of run names under this directory
@@ -716,10 +727,14 @@ The viewer starts as a background process before experiments begin, allowing you
 - `scalar_tags` - Set of scalar tag names
 - `text_tags` - Set of text tag names
 - `figure_tags` - Set of figure tag names
+- `checkpoint_tags` - Set of checkpoint tag names
 - `load_scalars(tag)` - Load scalar values as (iteration, value) pairs
 - `load_text(tag)` - Load text values as (iteration, text) pairs
 - `load_figure(tag, iteration)` - Load a figure object
+- `load_checkpoint(tag, iteration)` - Load a checkpoint object
+- `load_checkpoints(tag)` - Load all checkpoints as (iteration, object) pairs
 - `figure_iterations(tag)` - Get iterations where a figure was logged
+- `checkpoint_iterations(tag)` - Get iterations where a checkpoint was logged
 
 ### Types
 
