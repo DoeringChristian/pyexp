@@ -258,6 +258,9 @@ def InteractiveFigure(fig_path: Path):
 
     # Load the pickled figure
     mpl_fig = load_figure(fig_path)
+    if mpl_fig is None:
+        solara.Text("Loading figure...")
+        return
 
     # Create an interactive canvas for the figure
     canvas = Canvas(mpl_fig)
@@ -279,6 +282,9 @@ def StaticFigure(fig_path: Path):
 
     # Load the pickled figure
     mpl_fig = load_figure(fig_path)
+    if mpl_fig is None:
+        solara.Text("Loading figure...")
+        return
 
     # Render to PNG
     buf = io.BytesIO()

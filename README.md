@@ -48,24 +48,24 @@ if __name__ == "__main__":
 
 ### Automatic Caching
 
-Experiment results are automatically cached. Re-running the script skips completed experiments:
+Each run creates a new timestamped folder. Use `--continue` to resume a previous run:
 
 ```bash
-python main.py                              # Runs all experiments (new timestamp)
-python main.py                              # New run (different timestamp)
-python main.py --timestamp 2024-01-25_14-30-00  # Continue specific run
-python main.py --timestamp 2024-01-25_14-30-00 --rerun  # Rerun specific run
-python main.py --timestamp 2024-01-25_14-30-00 --report # Report from specific run
+python main.py                              # New run (new timestamp)
+python main.py --continue                   # Continue most recent run
+python main.py --continue=2024-01-25_14-30-00  # Continue specific run
+python main.py --continue --rerun           # Rerun all experiments in last run
+python main.py --continue --report          # Report from most recent run
 ```
 
 ### Output Folder Structure
 
-Results are organized by experiment name and optional timestamp:
+Results are organized by experiment name and timestamp:
 
 ```
 out/
   <experiment_name>/
-    <timestamp>/                    # When timestamp=True (default)
+    <timestamp>/                    # Each run gets a new timestamp
       <config_name>-<hash>/
         result.pkl
         model.pt                    # Your saved artifacts
@@ -75,21 +75,21 @@ out/
       ...
 ```
 
-Control the structure with `name` and `timestamp` parameters:
+Control the experiment name:
 
 ```python
-# Default: uses function name, with timestamp
+# Default: uses function name
 @pyexp.experiment
 def my_experiment(config): ...
 # -> out/my_experiment/2024-01-25_14-30-00/<config>-<hash>/
 
-# Custom name, no timestamp (overwrites previous runs)
-@pyexp.experiment(name="mnist", timestamp=False)
+# Custom name
+@pyexp.experiment(name="mnist")
 def my_experiment(config): ...
-# -> out/mnist/<config>-<hash>/
+# -> out/mnist/2024-01-25_14-30-00/<config>-<hash>/
 
 # Override at runtime
-experiment.run(name="experiment_v2", timestamp=False)
+experiment.run(name="experiment_v2")
 ```
 
 ### Robust Execution
@@ -411,11 +411,13 @@ CLI arguments can override settings from the decorator or `run()` function.
 | `--name NAME` | Override experiment name |
 | `--executor EXECUTOR` | Override executor (`subprocess`, `fork`, `inline`, `ray`, `ray:<address>`) |
 | `--output-dir DIR` | Override output directory |
-| `--no-timestamp` | Disable timestamp folders |
-| `--timestamp TIMESTAMP` | Use specific timestamp folder (e.g., `2024-01-25_14-30-00`) to continue or rerun a previous run |
+| `--continue [TIMESTAMP]` | Continue a previous run. Without argument, continues most recent. With argument, continues that specific timestamp. |
 | `--report` | Skip experiments, only generate report from cache |
 | `--rerun` | Re-run all experiments, ignore cache |
 | `-s`, `--capture=no` | Show subprocess output instead of progress bar |
+| `--viewer` | Start the viewer after experiments complete |
+| `--viewer-port PORT` | Port for the viewer (default: 8765) |
+| `--no-stash` | Disable git stash (don't capture repository state) |
 
 By default, experiment output is captured and a progress bar is shown. Use `-s` to see live output from each experiment (similar to pytest).
 
@@ -423,8 +425,11 @@ By default, experiment output is captured and a progress bar is shown. Use `-s` 
 # Override executor from command line
 python main.py --executor inline
 
-# Run without timestamps
-python main.py --no-timestamp
+# Continue most recent run
+python main.py --continue
+
+# Continue specific run
+python main.py --continue=2024-01-25_14-30-00
 
 # Change output directory
 python main.py --output-dir results/
@@ -449,9 +454,30 @@ pyexp includes a logging system for tracking metrics, text, and figures during e
 pip install "pyexp[viewer]"
 ```
 
-### Logger
+### Automatic Logger in Experiments
 
-Use `Logger` to record scalars, text, and figures during training:
+When using `@pyexp.experiment`, a `Logger` instance is automatically created and passed via `config.logger`. The logger writes to the experiment's output directory:
+
+```python
+@pyexp.experiment
+def my_experiment(config):
+    logger = config.logger  # Automatically provided
+
+    for epoch in range(config.epochs):
+        logger.set_global_it(epoch)
+
+        # Train your model...
+        loss = train_step()
+
+        logger.add_scalar("loss", loss)
+        logger.add_scalar("accuracy", accuracy)
+
+    return {"final_loss": loss}
+```
+
+### Standalone Logger
+
+You can also use `Logger` directly for standalone logging:
 
 ```python
 from pyexp import Logger
@@ -499,6 +525,32 @@ log_dir/
     └── figures/
         ├── <tag>.cpkl      # Pickled figure (always saved)
         └── <tag>.meta      # Metadata (interactive flag)
+```
+
+**Automatic logging in experiments:**
+
+When using `@pyexp.experiment`, the framework automatically logs at iteration 0:
+- **`config`**: The experiment configuration as YAML text
+- **`git_commit`**: The git stash commit hash (if stash is enabled)
+
+This enables exact reproducibility of experiments. Disable git stash via decorator or CLI:
+
+```python
+# Disable via experiment decorator
+@pyexp.experiment(stash=False)
+def my_experiment(config):
+    ...
+
+# Or via CLI
+python main.py --no-stash
+```
+
+View the logged config and commit via `LogReader`:
+
+```python
+reader = LogReader("out/my_experiment/run1")
+config_yaml = reader.load_text("config")     # [(0, 'learning_rate: 0.01\n...')]
+commit = reader.load_text("git_commit")      # [(0, 'abc123...')]
 ```
 
 ### LogReader
@@ -555,6 +607,26 @@ Or from Python:
 from pyexp.viewer import run
 run("out/my_experiment", port=8765)
 ```
+
+**Integrated with experiments:**
+
+Start the viewer automatically alongside experiments for real-time inspection:
+
+```python
+# Via decorator
+@pyexp.experiment(viewer=True)
+def my_experiment(config):
+    ...
+
+# Via run()
+my_experiment.run(viewer=True, viewer_port=8080)
+
+# Via CLI
+python main.py --viewer
+python main.py --viewer --viewer-port 8080
+```
+
+The viewer starts as a background process before experiments begin, allowing you to monitor metrics, text, and figures in real-time as they are logged.
 
 **Viewer features:**
 

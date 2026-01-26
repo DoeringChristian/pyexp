@@ -54,11 +54,15 @@ def load_scalars_timeseries(log_path: Path) -> dict[str, list[tuple[int, float]]
     for it in load_iterations(log_path):
         scalars_path = log_path / str(it) / "scalars.json"
         if scalars_path.exists():
-            data = json.loads(scalars_path.read_text())
-            for tag, value in data.items():
-                if tag not in timeseries:
-                    timeseries[tag] = []
-                timeseries[tag].append((it, value))
+            try:
+                data = json.loads(scalars_path.read_text())
+                for tag, value in data.items():
+                    if tag not in timeseries:
+                        timeseries[tag] = []
+                    timeseries[tag].append((it, value))
+            except (json.JSONDecodeError, ValueError):
+                # File is being written to, skip this iteration
+                pass
     # Sort by iteration
     for tag in timeseries:
         timeseries[tag].sort(key=lambda x: x[0])
@@ -72,11 +76,17 @@ def load_iteration_data(log_path: Path, iteration: int) -> dict[str, Any]:
 
     scalars_path = it_dir / "scalars.json"
     if scalars_path.exists():
-        data["scalars"] = json.loads(scalars_path.read_text())
+        try:
+            data["scalars"] = json.loads(scalars_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            pass  # File is being written to
 
     text_path = it_dir / "text.json"
     if text_path.exists():
-        data["text"] = json.loads(text_path.read_text())
+        try:
+            data["text"] = json.loads(text_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            pass  # File is being written to
 
     figures_dir = it_dir / "figures"
     if figures_dir.exists():
@@ -91,7 +101,11 @@ def load_figure(fig_path: Path) -> Any:
     """Load a figure from cloudpickle file."""
     import cloudpickle
     with open(fig_path, "rb") as f:
-        return cloudpickle.load(f)
+        try:
+            return cloudpickle.load(f)
+        except (EOFError, pickle.UnpicklingError):
+            # File is being written to
+            return None
 
 
 def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
@@ -100,11 +114,15 @@ def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
     for it in load_iterations(log_path):
         text_path = log_path / str(it) / "text.json"
         if text_path.exists():
-            data = json.loads(text_path.read_text())
-            for tag, text in data.items():
-                if tag not in timeseries:
-                    timeseries[tag] = []
-                timeseries[tag].append((it, text))
+            try:
+                data = json.loads(text_path.read_text())
+                for tag, text in data.items():
+                    if tag not in timeseries:
+                        timeseries[tag] = []
+                    timeseries[tag].append((it, text))
+            except (json.JSONDecodeError, ValueError):
+                # File is being written to, skip this iteration
+                pass
     # Sort by iteration
     for tag in timeseries:
         timeseries[tag].sort(key=lambda x: x[0])
@@ -115,7 +133,10 @@ def load_figure_meta(fig_path: Path) -> dict:
     """Load metadata for a figure."""
     meta_path = fig_path.with_suffix(".meta")
     if meta_path.exists():
-        return json.loads(meta_path.read_text())
+        try:
+            return json.loads(meta_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            pass  # File is being written to
     # Default to interactive for backwards compatibility
     return {"interactive": True}
 

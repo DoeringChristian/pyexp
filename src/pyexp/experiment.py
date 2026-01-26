@@ -7,7 +7,9 @@ from typing import Callable, Any
 import argparse
 import hashlib
 import json
+import os
 import pickle
+import sys
 
 from .config import Config, Result, Tensor
 from .executors import Executor, ExecutorName, get_executor
@@ -62,22 +64,14 @@ def _parse_args() -> argparse.Namespace:
         help="Re-run experiments ignoring cache",
     )
     parser.add_argument(
-        "--timestamp",
-        type=str,
+        "--continue",
+        dest="continue_run",
+        nargs="?",
+        const="latest",
         default=None,
         metavar="TIMESTAMP",
-        help="Use specific timestamp folder (e.g., 2024-01-25_14-30-00) to continue or rerun a previous run",
-    )
-    parser.add_argument(
-        "--continue",
-        dest="continue_last",
-        action="store_true",
-        help="Continue from the most recent timestamp folder",
-    )
-    parser.add_argument(
-        "--no-timestamp",
-        action="store_true",
-        help="Disable timestamp folders (overrides decorator/run settings)",
+        help="Continue from a previous run. Without argument, continues the most recent. "
+             "With argument (e.g., --continue=2024-01-25_14-30-00), continues that specific run.",
     )
     parser.add_argument(
         "-s",
@@ -115,6 +109,23 @@ def _parse_args() -> argparse.Namespace:
         metavar="N",
         help="Number of retries on failure (default: 4)",
     )
+    parser.add_argument(
+        "--viewer",
+        action="store_true",
+        help="Start the viewer after experiments complete",
+    )
+    parser.add_argument(
+        "--viewer-port",
+        type=int,
+        default=8765,
+        metavar="PORT",
+        help="Port for the viewer (default: 8765)",
+    )
+    parser.add_argument(
+        "--no-stash",
+        action="store_true",
+        help="Disable git stash (don't capture repository state)",
+    )
     return parser.parse_args()
 
 
@@ -128,6 +139,11 @@ class _ProgressBar:
         self.passed = 0
         self.failed = 0
         self.cached = 0
+        self._render()  # Show initial state
+
+    def start(self, name: str = ""):
+        """Show that an experiment is starting."""
+        self._render(name, running=True)
 
     def update(self, status: str, name: str = ""):
         """Update progress with status: 'passed', 'failed', or 'cached'."""
@@ -140,7 +156,7 @@ class _ProgressBar:
             self.cached += 1
         self._render(name)
 
-    def _render(self, name: str = ""):
+    def _render(self, name: str = "", running: bool = False):
         """Render the progress bar."""
         import sys
         pct = self.current / self.total if self.total > 0 else 1
@@ -161,9 +177,14 @@ class _ProgressBar:
         max_name_len = 30
         display_name = name[:max_name_len] + "..." if len(name) > max_name_len else name
 
-        line = f"\r{bar} {self.current}/{self.total} {status}"
+        line = f"\r{bar} {self.current}/{self.total}"
+        if status:
+            line += f" {status}"
         if display_name:
-            line += f" [{display_name}]"
+            if running:
+                line += f" \033[36m[running: {display_name}]\033[0m"
+            else:
+                line += f" [{display_name}]"
 
         # Clear to end of line and print
         sys.stderr.write(f"{line}\033[K")
@@ -195,14 +216,18 @@ class Experiment:
         *,
         name: str | None = None,
         executor: ExecutorName | Executor | str = "subprocess",
-        timestamp: bool = True,
         retry: int = 4,
+        viewer: bool = False,
+        viewer_port: int = 8765,
+        stash: bool = True,
     ):
         self._fn = fn
         self._name = name or fn.__name__
         self._executor_default = executor
-        self._timestamp_default = timestamp
         self._retry_default = retry
+        self._viewer_default = viewer
+        self._viewer_port_default = viewer_port
+        self._stash_default = stash
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor, Path], Any] | None = None
         wraps(fn)(self)
@@ -233,8 +258,10 @@ class Experiment:
         output_dir: str | Path = "out",
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
-        timestamp: bool | None = None,
         retry: int | None = None,
+        viewer: bool | None = None,
+        viewer_port: int | None = None,
+        stash: bool | None = None,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -253,14 +280,14 @@ class Experiment:
                 - An Executor instance: Use custom executor
                 Defaults to the value set in @experiment decorator ("subprocess" if not specified).
             name: Experiment name for the output folder. Defaults to function name.
-            timestamp: If True, create a timestamped subfolder for each run. If False, no timestamp.
-                       Can be overridden by --timestamp CLI argument. Defaults to decorator value (True).
             retry: Number of times to retry a failed experiment. Defaults to decorator value (4).
+            viewer: If True, start the viewer after experiments complete. Defaults to decorator value (False).
+            viewer_port: Port for the viewer. Defaults to decorator value (8765).
+            stash: If True, capture git repository state and log commit hash. Defaults to decorator value (True).
 
         Output folder structure:
-            - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
-            - timestamp=False: out/<name>/<config_name>-<hash>/
-            - Report directory: out/<name>/<timestamp>/report/
+            out/<name>/<timestamp>/<config_name>-<hash>/
+            Report directory: out/<name>/<timestamp>/report/
         """
         args = _parse_args()
 
@@ -272,16 +299,6 @@ class Experiment:
         exp_name = args.name or name or self._name
         resolved_output_dir = args.output_dir or output_dir
 
-        # Timestamp: --no-timestamp > --timestamp > run() arg > decorator arg
-        if args.no_timestamp:
-            use_timestamp = False
-        elif args.timestamp:
-            use_timestamp = True  # Specific timestamp implies using timestamps
-        elif timestamp is not None:
-            use_timestamp = timestamp
-        else:
-            use_timestamp = self._timestamp_default
-
         # Retry: CLI > run() arg > decorator arg
         if args.retry is not None:
             max_retries = args.retry
@@ -289,6 +306,30 @@ class Experiment:
             max_retries = retry
         else:
             max_retries = self._retry_default
+
+        # Viewer: CLI > run() arg > decorator arg
+        if args.viewer:
+            start_viewer = True
+        elif viewer is not None:
+            start_viewer = viewer
+        else:
+            start_viewer = self._viewer_default
+
+        # Viewer port: CLI > run() arg > decorator arg
+        if args.viewer_port != 8765:  # Non-default means explicitly set
+            resolved_viewer_port = args.viewer_port
+        elif viewer_port is not None:
+            resolved_viewer_port = viewer_port
+        else:
+            resolved_viewer_port = self._viewer_port_default
+
+        # Stash: CLI > run() arg > decorator arg
+        if args.no_stash:
+            enable_stash = False
+        elif stash is not None:
+            enable_stash = stash
+        else:
+            enable_stash = self._stash_default
 
         # If executor is already an Executor instance, use it directly
         if isinstance(resolved_executor, Executor):
@@ -317,22 +358,40 @@ class Experiment:
 
         base_dir = Path(resolved_output_dir) / exp_name
 
-        # Determine the run directory (with or without timestamp)
-        if args.timestamp:
-            # CLI provided timestamp - use it (continue or rerun existing run)
-            run_dir = base_dir / args.timestamp
-        elif args.continue_last:
-            # Continue from the most recent timestamp
-            latest = _get_latest_timestamp(base_dir)
-            if latest is None:
-                raise RuntimeError(f"No previous runs found in {base_dir}")
-            run_dir = base_dir / latest
-        elif use_timestamp:
+        # --report requires --continue (otherwise we'd create an empty new run)
+        if args.report and not args.continue_run:
+            raise RuntimeError("--report requires --continue to specify which run to report from")
+
+        # Determine the run directory (always timestamped)
+        if args.continue_run:
+            if args.continue_run == "latest":
+                # Continue from the most recent timestamp
+                latest = _get_latest_timestamp(base_dir)
+                if latest is None:
+                    raise RuntimeError(f"No previous runs found in {base_dir}")
+                run_dir = base_dir / latest
+            else:
+                # Continue from specified timestamp
+                run_dir = base_dir / args.continue_run
+                if not run_dir.exists():
+                    raise RuntimeError(f"Run not found: {run_dir}")
+        else:
             # Generate new timestamp
             run_dir = base_dir / _generate_timestamp()
-        else:
-            # No timestamp
-            run_dir = base_dir
+
+        # Start viewer in background if requested
+        viewer_process = None
+        if start_viewer:
+            import subprocess as sp
+            run_dir.mkdir(parents=True, exist_ok=True)
+            print(f"Starting viewer at http://localhost:{resolved_viewer_port}")
+            print(f"Viewing: {run_dir}\n")
+            viewer_process = sp.Popen(
+                [sys.executable, "-m", "solara", "run", "pyexp._viewer_app:Page", "--port", str(resolved_viewer_port)],
+                env={**os.environ, "PYEXP_LOG_DIR": str(run_dir.absolute())},
+                stdout=sp.DEVNULL,
+                stderr=sp.DEVNULL,
+            )
 
         config_list = configs_fn()
 
@@ -363,9 +422,16 @@ class Experiment:
                 with open(result_path, "rb") as f:
                     structured = pickle.load(f)
                 status = "cached"
+                # Ensure marker file exists for viewer discovery
+                marker_path = experiment_dir / ".pyexp"
+                marker_path.touch(exist_ok=True)
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = Config({**config, "out": experiment_dir})
+                config_with_out = Config({**config, "out": experiment_dir, "_stash": enable_stash})
+
+                # Show running status
+                if progress:
+                    progress.start(config_name)
 
                 # Retry loop
                 for attempt in range(max_retries + 1):
@@ -387,6 +453,10 @@ class Experiment:
                 else:
                     status = "passed"
             else:
+                # Ensure directory and marker file exist for viewer discovery
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                marker_path = experiment_dir / ".pyexp"
+                marker_path.touch(exist_ok=True)
                 with open(result_path, "rb") as f:
                     structured = pickle.load(f)
                 status = "cached"
@@ -423,8 +493,10 @@ def experiment(
     *,
     name: str | None = None,
     executor: ExecutorName | Executor | str = "subprocess",
-    timestamp: bool = True,
     retry: int = 4,
+    viewer: bool = False,
+    viewer_port: int = 8765,
+    stash: bool = True,
 ) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
     """Decorator to create an Experiment from a function.
 
@@ -438,14 +510,17 @@ def experiment(
             - "ray:<address>" or "ray://host:port": Run on Ray cluster (e.g., "ray:auto", "ray://cluster:10001")
             - An Executor instance: Use custom executor
             Can be overridden in run().
-        timestamp: If True (default), create a timestamped subfolder for each run.
-            Can be overridden in run() or via --timestamp CLI argument.
         retry: Number of times to retry a failed experiment. Defaults to 4.
             Can be overridden in run() or via --retry CLI argument.
+        viewer: If True, start the viewer after experiments complete. Defaults to False.
+            Can be overridden in run() or via --viewer CLI argument.
+        viewer_port: Port for the viewer. Defaults to 8765.
+            Can be overridden in run() or via --viewer-port CLI argument.
+        stash: If True (default), capture git repository state and log commit hash at iteration 0.
+            Can be overridden in run() or via --no-stash CLI argument.
 
     Output folder structure:
-        - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
-        - timestamp=False: out/<name>/<config_name>-<hash>/
+        out/<name>/<timestamp>/<config_name>-<hash>/
 
     Example usage:
 
@@ -455,7 +530,7 @@ def experiment(
             return {"accuracy": 0.95}
 
         # Or with arguments:
-        @pyexp.experiment(name="mnist", executor="fork", timestamp=False)
+        @pyexp.experiment(name="mnist", executor="fork")
         def my_experiment(config):
             ...
 
@@ -489,21 +564,23 @@ def experiment(
         --name NAME           Override experiment name
         --executor EXECUTOR   Override executor (subprocess, fork, inline, ray, ray:<address>)
         --output-dir DIR      Override output directory
-        --no-timestamp        Disable timestamp folders
-        --timestamp TIMESTAMP Use specific timestamp to continue/rerun a previous run
+        --continue [TIMESTAMP] Continue a previous run (latest if no timestamp given)
         --retry N             Number of retries on failure (default: 4)
         --report              Only generate report from cached results
         --rerun               Re-run all experiments, ignore cache
         -s, --capture=no      Show subprocess output instead of progress bar
+        --viewer              Start the viewer after experiments complete
+        --viewer-port PORT    Port for the viewer (default: 8765)
+        --no-stash            Disable git stash (don't capture repository state)
 
     Priority: CLI args > run() args > decorator args
     """
     def decorator(f: Callable[[dict], Any]) -> Experiment:
-        return Experiment(f, name=name, executor=executor, timestamp=timestamp, retry=retry)
+        return Experiment(f, name=name, executor=executor, retry=retry, viewer=viewer, viewer_port=viewer_port, stash=stash)
 
     if fn is not None:
         # Called without arguments: @experiment
-        return Experiment(fn, name=name, executor=executor, timestamp=timestamp, retry=retry)
+        return Experiment(fn, name=name, executor=executor, retry=retry, viewer=viewer, viewer_port=viewer_port, stash=stash)
     else:
         # Called with arguments: @experiment(name="mnist", executor="fork")
         return decorator

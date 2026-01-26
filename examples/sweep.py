@@ -2,10 +2,11 @@
 
 import pyexp
 from pyexp import Config, Tensor, sweep
+from pyexp.log import Logger
 
 
 @pyexp.experiment(name="")
-def experiment(config: Config):
+def experiment(config: Config, logger: Logger):
     """Run a single experiment with the given config."""
     lr = config.learning_rate
     epochs = config.epochs
