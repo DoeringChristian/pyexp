@@ -24,7 +24,6 @@ from pyexp._viewer import (
 root_dir = solara.reactive("")
 selected_runs = solara.reactive([])
 refresh_counter = solara.reactive(0)
-log_scale = solara.reactive(False)
 
 
 @solara.component
@@ -79,6 +78,47 @@ def RunSelector():
 
 
 @solara.component
+def ScalarPlot(tag: str, runs: list, root_path: Path):
+    """Display a scalar plot for a single tag across multiple runs."""
+    import plotly.graph_objects as go
+
+    # Per-tag log scale toggle
+    log_scale = solara.use_reactive(False)
+
+    fig = go.Figure()
+
+    for run in runs:
+        timeseries = load_scalars_timeseries(run)
+        if tag in timeseries:
+            data = timeseries[tag]
+            iterations = [d[0] for d in data]
+            values = [d[1] for d in data]
+
+            run_name = str(run.relative_to(root_path)) if run != root_path else "."
+            fig.add_trace(go.Scatter(
+                x=iterations,
+                y=values,
+                mode='lines+markers',
+                marker=dict(size=4),
+                name=run_name,
+                hovertemplate=f'{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>',
+            ))
+
+    fig.update_layout(
+        title=tag,
+        xaxis_title='Iteration',
+        yaxis_title=tag,
+        yaxis_type='log' if log_scale.value else 'linear',
+        height=350,
+        margin=dict(l=50, r=20, t=40, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+
+    solara.Checkbox(label="Log scale (Y-axis)", value=log_scale)
+    solara.FigurePlotly(fig)
+
+
+@solara.component
 def ScalarsPanel():
     """Panel for viewing scalar time series."""
     _ = refresh_counter.value
@@ -87,8 +127,6 @@ def ScalarsPanel():
         solara.Text("Select runs from the sidebar to view scalars.")
         return
 
-    import plotly.graph_objects as go
-
     # Get all scalar tags across selected runs
     all_tags = get_all_scalar_tags(selected_runs.value)
 
@@ -96,43 +134,11 @@ def ScalarsPanel():
         solara.Text("No scalars logged in selected runs.")
         return
 
-    # Log scale toggle
-    solara.Checkbox(label="Log scale (Y-axis)", value=log_scale)
-
     root_path = Path(root_dir.value)
 
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
-            fig = go.Figure()
-
-            for run in selected_runs.value:
-                timeseries = load_scalars_timeseries(run)
-                if tag in timeseries:
-                    data = timeseries[tag]
-                    iterations = [d[0] for d in data]
-                    values = [d[1] for d in data]
-
-                    run_name = str(run.relative_to(root_path)) if run != root_path else "."
-                    fig.add_trace(go.Scatter(
-                        x=iterations,
-                        y=values,
-                        mode='lines+markers',
-                        marker=dict(size=4),
-                        name=run_name,
-                        hovertemplate=f'{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>',
-                    ))
-
-            fig.update_layout(
-                title=tag,
-                xaxis_title='Iteration',
-                yaxis_title=tag,
-                yaxis_type='log' if log_scale.value else 'linear',
-                height=350,
-                margin=dict(l=50, r=20, t=40, b=40),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-
-            solara.FigurePlotly(fig)
+            ScalarPlot(tag, selected_runs.value, root_path)
 
 
 @solara.component

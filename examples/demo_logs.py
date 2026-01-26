@@ -8,19 +8,20 @@ sys.path.insert(0, "src")
 from pyexp import Logger
 
 
-def main():
-    logger = Logger("out/demo_logs")
+def generate_run(log_dir: str, seed: float = 0.0):
+    """Generate a single run with the given seed for variation."""
+    logger = Logger(log_dir)
 
     # Simulate a training run
     for i in range(100):
         logger.set_global_it(i)
 
-        # Simulated loss curve (decreasing with noise)
-        loss = 1.0 * math.exp(-i / 30) + 0.1 * math.sin(i / 5) * math.exp(-i / 50)
+        # Simulated loss curve (decreasing with noise) - seed affects noise
+        loss = 1.0 * math.exp(-i / (30 + seed * 5)) + 0.1 * math.sin(i / 5 + seed) * math.exp(-i / 50)
         logger.add_scalar("loss", loss)
 
-        # Simulated accuracy (increasing)
-        acc = 1.0 - 0.9 * math.exp(-i / 25)
+        # Simulated accuracy (increasing) - seed affects rate
+        acc = 1.0 - (0.9 + seed * 0.05) * math.exp(-i / (25 + seed * 3))
         logger.add_scalar("accuracy", acc)
 
         # Learning rate schedule
@@ -53,8 +54,8 @@ def main():
                 X, Y = np.meshgrid(x, y)
 
                 # Loss landscape that changes with iteration (optimum moves toward origin)
-                center_x = 1.5 * math.exp(-i / 40)
-                center_y = 1.5 * math.exp(-i / 40)
+                center_x = 1.5 * math.exp(-i / 40) + seed * 0.2
+                center_y = 1.5 * math.exp(-i / 40) - seed * 0.2
                 Z = (
                     (X - center_x) ** 2
                     + (Y - center_y) ** 2
@@ -76,8 +77,18 @@ def main():
                 pass
 
     logger.flush()
-    print("Demo logs written to ./demo_logs")
-    print("Run viewer with: uv run python -m pyexp.viewer demo_logs")
+
+
+def main():
+    # Generate two runs with different seeds
+    print("Generating run1...")
+    generate_run("out/demo_logs/run1", seed=0.0)
+
+    print("Generating run2...")
+    generate_run("out/demo_logs/run2", seed=1.0)
+
+    print("Demo logs written to out/demo_logs/")
+    print("Run viewer with: uv run --extra viewer python -m pyexp.viewer out/demo_logs")
 
 
 if __name__ == "__main__":
