@@ -7,13 +7,12 @@ import time
 sys.path.insert(0, "src")
 
 import pyexp
-from pyexp import Config
+from pyexp import Config, Logger
 
 
 @pyexp.experiment(name="demo_logs")
-def train(config: Config):
+def train(config: Config, logger: Logger):
     """Simulated training run demonstrating logger usage."""
-    logger = config.logger
     seed = config.seed
 
     for i in range(100):

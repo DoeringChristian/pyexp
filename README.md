@@ -456,13 +456,13 @@ pip install "pyexp[viewer]"
 
 ### Automatic Logger in Experiments
 
-When using `@pyexp.experiment`, a `Logger` instance is automatically created and passed via `config.logger`. The logger writes to the experiment's output directory:
+When using `@pyexp.experiment`, add a second `logger` parameter to your function to receive an automatically-created `Logger` instance. If no second parameter is present, no logger is created:
 
 ```python
-@pyexp.experiment
-def my_experiment(config):
-    logger = config.logger  # Automatically provided
+from pyexp import Logger
 
+@pyexp.experiment
+def my_experiment(config, logger: Logger):
     for epoch in range(config.epochs):
         logger.set_global_it(epoch)
 
@@ -473,6 +473,23 @@ def my_experiment(config):
         logger.add_scalar("accuracy", accuracy)
 
     return {"final_loss": loss}
+
+# Without logger (no logging overhead)
+@pyexp.experiment
+def simple_experiment(config):
+    return {"result": compute(config)}
+```
+
+When a logger is used, each result includes a `LogReader` for accessing the logged data:
+
+```python
+@my_experiment.report
+def report(results, report_dir):
+    for r in results:
+        if r.logger:
+            # Access logged data via LogReader
+            loss_data = r.logger.load_scalars("loss")
+            print(f"{r.name}: final_loss={loss_data[-1][1]:.4f}")
 ```
 
 ### Standalone Logger

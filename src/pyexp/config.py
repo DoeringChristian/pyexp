@@ -156,7 +156,7 @@ class Config(dict):
 class Result(dict):
     """Structured experiment result with dot notation access.
 
-    Inherits from dict with keys: config, result, error, log.
+    Inherits from dict with keys: config, result, error, log, logger.
     Also provides attribute access for convenience.
 
     Example:
@@ -167,6 +167,8 @@ class Result(dict):
         if r.error:
             print(f"Failed: {r.error}")
         print(r.log)  # stdout/stderr
+        if r.logger:
+            print(r.logger.scalar_tags)  # LogReader for this run
     """
 
     def __init__(
@@ -175,12 +177,14 @@ class Result(dict):
         result: Any = None,
         error: str | None = None,
         log: str = "",
+        logger: Any = None,
     ):
         super().__init__()
         self["config"] = Config(config) if not isinstance(config, Config) else config
         self["result"] = result
         self["error"] = error
         self["log"] = log
+        self["logger"] = logger
         self["name"] = self["config"].get("name", "")
 
     @property

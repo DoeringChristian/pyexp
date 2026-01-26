@@ -79,29 +79,32 @@ class InlineExecutor(Executor):
         """
         import io
         import sys
-        from pyexp.log import Logger
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create logger for this experiment
-        logger = Logger(config["out"])
+        wants_logger = config.get("_wants_logger", False)
+        logger = None
 
-        # Log config as YAML at iteration 0
-        import yaml
-        config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
-        logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+        if wants_logger:
+            from pyexp.log import Logger
+            import yaml
 
-        # Log git commit hash if stash enabled
-        stash_enabled = config.get("_stash", True)
-        if stash_enabled:
-            try:
-                from pyexp.utils import stash as git_stash
-                commit_hash = git_stash()
-                logger.add_text("git_commit", commit_hash)
-            except Exception:
-                pass  # Silently ignore if not in a git repo
+            # Create logger for this experiment
+            logger = Logger(config["out"])
 
-        config = Config({**config, "logger": logger})
+            # Log config as YAML at iteration 0
+            config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
+            logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+
+            # Log git commit hash if stash enabled
+            stash_enabled = config.get("_stash", True)
+            if stash_enabled:
+                try:
+                    from pyexp.utils import stash as git_stash
+                    commit_hash = git_stash()
+                    logger.add_text("git_commit", commit_hash)
+                except Exception:
+                    pass  # Silently ignore if not in a git repo
 
         # Capture output if requested
         log = ""
@@ -111,14 +114,18 @@ class InlineExecutor(Executor):
             sys.stderr = io.StringIO()
 
         try:
-            result = fn(config)
+            if wants_logger:
+                result = fn(config, logger)
+            else:
+                result = fn(config)
             structured = {"result": result, "error": None}
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             structured = {"result": None, "error": error_msg}
         finally:
-            # Always flush the logger
-            logger.flush()
+            # Always flush the logger if it exists
+            if logger:
+                logger.flush()
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
@@ -256,31 +263,36 @@ class ForkExecutor(Executor):
                     os.dup2(write_fd, 2)  # stderr
                     os.close(write_fd)
 
-                # Create logger for this experiment
-                from pyexp.log import Logger
-                import yaml
-                logger = Logger(config["out"])
+                wants_logger = config.get("_wants_logger", False)
 
-                # Log config as YAML at iteration 0
-                config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
-                logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+                if wants_logger:
+                    # Create logger for this experiment
+                    from pyexp.log import Logger
+                    import yaml
+                    logger = Logger(config["out"])
 
-                # Log git commit hash if stash enabled
-                stash_enabled = config.get("_stash", True)
-                if stash_enabled:
-                    try:
-                        from pyexp.utils import stash as git_stash
-                        commit_hash = git_stash()
-                        logger.add_text("git_commit", commit_hash)
-                    except Exception:
-                        pass  # Silently ignore if not in a git repo
+                    # Log config as YAML at iteration 0
+                    config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
+                    logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
 
-                config = Config({**config, "logger": logger})
+                    # Log git commit hash if stash enabled
+                    stash_enabled = config.get("_stash", True)
+                    if stash_enabled:
+                        try:
+                            from pyexp.utils import stash as git_stash
+                            commit_hash = git_stash()
+                            logger.add_text("git_commit", commit_hash)
+                        except Exception:
+                            pass  # Silently ignore if not in a git repo
 
-                result = fn(config)
+                if wants_logger:
+                    result = fn(config, logger)
+                else:
+                    result = fn(config)
 
                 # Flush logger before writing result
-                logger.flush()
+                if logger:
+                    logger.flush()
 
                 structured = {"result": result, "error": None}
                 with open(result_path, "wb") as f:
@@ -437,31 +449,34 @@ class RayExecutor(Executor):
             import sys
             import traceback
             from pathlib import Path
-            from pyexp.log import Logger
             from pyexp.config import Config
 
             result_path = Path(result_path_str)
             log = ""
+            logger = None
 
-            # Create logger for this experiment
-            import yaml
-            logger = Logger(config["out"])
+            wants_logger = config.get("_wants_logger", False)
 
-            # Log config as YAML at iteration 0
-            config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
-            logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+            if wants_logger:
+                from pyexp.log import Logger
+                import yaml
 
-            # Log git commit hash if stash enabled
-            stash_enabled = config.get("_stash", True)
-            if stash_enabled:
-                try:
-                    from pyexp.utils import stash as git_stash
-                    commit_hash = git_stash()
-                    logger.add_text("git_commit", commit_hash)
-                except Exception:
-                    pass  # Silently ignore if not in a git repo
+                # Create logger for this experiment
+                logger = Logger(config["out"])
 
-            config = Config({**config, "logger": logger})
+                # Log config as YAML at iteration 0
+                config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
+                logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+
+                # Log git commit hash if stash enabled
+                stash_enabled = config.get("_stash", True)
+                if stash_enabled:
+                    try:
+                        from pyexp.utils import stash as git_stash
+                        commit_hash = git_stash()
+                        logger.add_text("git_commit", commit_hash)
+                    except Exception:
+                        pass  # Silently ignore if not in a git repo
 
             # Capture output
             if capture:
@@ -470,14 +485,18 @@ class RayExecutor(Executor):
                 sys.stderr = io.StringIO()
 
             try:
-                result = fn(config)
+                if wants_logger:
+                    result = fn(config, logger)
+                else:
+                    result = fn(config)
                 structured = {"result": result, "error": None}
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                 structured = {"result": None, "error": error_msg}
             finally:
-                # Always flush the logger
-                logger.flush()
+                # Always flush the logger if it exists
+                if logger:
+                    logger.flush()
                 if capture:
                     log = sys.stdout.getvalue() + sys.stderr.getvalue()
                     sys.stdout, sys.stderr = old_stdout, old_stderr

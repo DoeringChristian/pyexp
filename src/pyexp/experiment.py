@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Any
 import argparse
 import hashlib
+import inspect
 import json
 import os
 import pickle
@@ -13,6 +14,15 @@ import sys
 
 from .config import Config, Result, Tensor
 from .executors import Executor, ExecutorName, get_executor
+from .log import LogReader
+
+
+def _wants_logger(fn: Callable) -> bool:
+    """Check if the experiment function wants a logger parameter."""
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    # If function has 2+ parameters, second one is the logger
+    return len(params) >= 2
 
 
 def _config_hash(config: dict) -> str:
@@ -228,6 +238,7 @@ class Experiment:
         self._viewer_default = viewer
         self._viewer_port_default = viewer_port
         self._stash_default = stash
+        self._wants_logger = _wants_logger(fn)
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor, Path], Any] | None = None
         wraps(fn)(self)
@@ -379,13 +390,16 @@ class Experiment:
             # Generate new timestamp
             run_dir = base_dir / _generate_timestamp()
 
+        # Print run info
+        timestamp = run_dir.name
+        print(f"Run: {exp_name}/{timestamp}")
+
         # Start viewer in background if requested
         viewer_process = None
         if start_viewer:
             import subprocess as sp
             run_dir.mkdir(parents=True, exist_ok=True)
-            print(f"Starting viewer at http://localhost:{resolved_viewer_port}")
-            print(f"Viewing: {run_dir}\n")
+            print(f"Viewer: http://localhost:{resolved_viewer_port}")
             viewer_process = sp.Popen(
                 [sys.executable, "-m", "solara", "run", "pyexp._viewer_app:Page", "--port", str(resolved_viewer_port)],
                 env={**os.environ, "PYEXP_LOG_DIR": str(run_dir.absolute())},
@@ -427,7 +441,12 @@ class Experiment:
                 marker_path.touch(exist_ok=True)
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = Config({**config, "out": experiment_dir, "_stash": enable_stash})
+                config_with_out = Config({
+                    **config,
+                    "out": experiment_dir,
+                    "_stash": enable_stash,
+                    "_wants_logger": self._wants_logger,
+                })
 
                 # Show running status
                 if progress:
@@ -467,11 +486,18 @@ class Experiment:
 
             # Create Result object with config (without 'out' key)
             config_without_out = {k: v for k, v in config.items() if k != "out"}
+
+            # Add LogReader if logger was used
+            log_reader = None
+            if self._wants_logger:
+                log_reader = LogReader(experiment_dir)
+
             result_obj = Result(
                 config=config_without_out,
                 result=structured.get("result"),
                 error=structured.get("error"),
                 log=structured.get("log", ""),
+                logger=log_reader,
             )
             results.append(result_obj)
 
