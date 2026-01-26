@@ -1,10 +1,15 @@
 """Configuration utilities: Config, Tensor, merge, sweep, load_config, registry."""
 
+from __future__ import annotations
+
 import fnmatch
 from pathlib import Path
-from typing import Any, Generic, Iterator, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar, overload
 
 import yaml
+
+if TYPE_CHECKING:
+    from .log import LogReader
 
 # Global registry for class instantiation from config
 _registry: dict[str, type] = {}
@@ -202,6 +207,10 @@ class Result(dict):
     @property
     def log(self) -> str:
         return self["log"]
+
+    @property
+    def logger(self) -> LogReader | None:
+        return self["logger"]
 
     @property
     def name(self) -> str:

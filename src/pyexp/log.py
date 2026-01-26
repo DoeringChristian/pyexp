@@ -166,6 +166,92 @@ class LogReader:
                 iterations.append(it)
         return iterations
 
+    def __getitem__(self, tag: str) -> tuple[int, Any]:
+        """Get the last logged value for a tag.
+
+        Searches scalars, text, figures, and checkpoints in that order.
+        Returns (iteration, value) tuple for the most recent entry.
+
+        Example:
+            it, loss = reader["loss"]
+            it, fig = reader["loss_landscape"]
+        """
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+
+        # Check scalars
+        if tag in self.scalar_tags:
+            data = self.load_scalars(tag)
+            if data:
+                return data[-1]
+
+        # Check text
+        if tag in self.text_tags:
+            data = self.load_text(tag)
+            if data:
+                return data[-1]
+
+        # Check figures
+        if tag in self.figure_tags:
+            iterations = self.figure_iterations(tag)
+            if iterations:
+                last_it = iterations[-1]
+                return (last_it, self.load_figure(tag, last_it))
+
+        # Check checkpoints
+        if tag in self.checkpoint_tags:
+            data = self.load_checkpoints(tag)
+            if data:
+                return data[-1]
+
+        raise KeyError(f"Tag not found: {tag}")
+
+    @property
+    def checkpoint_tags(self) -> set[str]:
+        """Get all checkpoint tags logged in this run."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        tags = set()
+        for it in self.iterations:
+            checkpoints_dir = self._log_dir / str(it) / "checkpoints"
+            if checkpoints_dir.exists():
+                for ckpt_path in checkpoints_dir.glob("*.cpkl"):
+                    tags.add(ckpt_path.stem)
+        return tags
+
+    def load_checkpoint(self, tag: str, iteration: int) -> Any:
+        """Load a checkpoint object for a specific tag and iteration."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        ckpt_path = self._log_dir / str(iteration) / "checkpoints" / f"{tag}.cpkl"
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {tag} at iteration {iteration}")
+        with open(ckpt_path, "rb") as f:
+            return cloudpickle.load(f)
+
+    def load_checkpoints(self, tag: str) -> list[tuple[int, Any]]:
+        """Load all checkpoint values for a tag as (iteration, value) pairs."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        values = []
+        for it in self.iterations:
+            ckpt_path = self._log_dir / str(it) / "checkpoints" / f"{tag}.cpkl"
+            if ckpt_path.exists():
+                with open(ckpt_path, "rb") as f:
+                    values.append((it, cloudpickle.load(f)))
+        return values
+
+    def checkpoint_iterations(self, tag: str) -> list[int]:
+        """Get all iterations where a checkpoint tag was logged."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        iterations = []
+        for it in self.iterations:
+            ckpt_path = self._log_dir / str(it) / "checkpoints" / f"{tag}.cpkl"
+            if ckpt_path.exists():
+                iterations.append(it)
+        return iterations
+
     def __repr__(self) -> str:
         if self.is_run:
             return f"LogReader('{self._log_dir}', iterations={len(self.iterations)})"
@@ -238,6 +324,8 @@ class Logger:
                     self._write_text(*args)
                 elif op == "figure":
                     self._write_figure(*args)
+                elif op == "checkpoint":
+                    self._write_checkpoint(*args)
             finally:
                 self._queue.task_done()
 
@@ -276,6 +364,18 @@ class Logger:
                         If False, render as static image (faster loading).
         """
         self._queue.put(("figure", (tag, figure, self._global_it, interactive)))
+
+    def add_checkpoint(self, tag: str, obj: Any) -> None:
+        """Log an arbitrary object as a checkpoint at the current iteration.
+
+        Checkpoints are saved as <iteration>/checkpoints/<tag>.cpkl using cloudpickle.
+        Use this to save model weights, optimizer state, or any serializable object.
+
+        Args:
+            tag: Name/tag for the checkpoint.
+            obj: The object to save (must be picklable).
+        """
+        self._queue.put(("checkpoint", (tag, obj, self._global_it)))
 
     def _write_scalar(self, tag: str, scalar_value: float, it: int) -> None:
         """Write a scalar value to disk."""
@@ -323,3 +423,13 @@ class Logger:
         # Save metadata
         meta_path = fig_dir / f"{tag}.meta"
         meta_path.write_text(json.dumps({"interactive": interactive}))
+
+    def _write_checkpoint(self, tag: str, obj: Any, it: int) -> None:
+        """Write a checkpoint object to disk."""
+        it_dir = self._get_it_dir(it)
+        ckpt_dir = it_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        ckpt_path = ckpt_dir / f"{tag}.cpkl"
+        with open(ckpt_path, "wb") as f:
+            cloudpickle.dump(obj, f)

@@ -7,7 +7,7 @@ import time
 sys.path.insert(0, "src")
 
 import pyexp
-from pyexp import Config, Logger
+from pyexp import Config, Logger, ResultTensor
 
 
 @pyexp.experiment(name="demo_logs")
@@ -96,10 +96,13 @@ def configs():
 
 
 @train.report
-def report(results, report_dir):
+def report(results: ResultTensor, report_dir):
     """Print final results."""
     print("\nResults:")
     for r in results:
+        it, loss = r.logger["loss"]
+        it, fig = r.logger["loss_landscape_3d"]
+        r.logger
         if r.get("error"):
             print(f"  {r['name']}: ERROR - {r['error']}")
         else:
