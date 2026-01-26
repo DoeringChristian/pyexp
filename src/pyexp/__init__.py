@@ -23,7 +23,7 @@ from .executors import (
     get_executor,
 )
 from .utils import stash
-from .log import Logger
+from .log import Logger, LogReader
 
 __all__ = [
     "Config",
@@ -47,4 +47,5 @@ __all__ = [
     "SubprocessExecutor",
     "get_executor",
     "Logger",
+    "LogReader",
 ]

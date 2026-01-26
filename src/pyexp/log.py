@@ -13,6 +13,165 @@ import cloudpickle
 MARKER_FILE = ".pyexp"
 
 
+class LogReader:
+    """Reader for exploring and loading pyexp logs.
+
+    Args:
+        log_dir: Path to a log directory (single run or parent of multiple runs).
+
+    Example:
+        # Load a single run
+        reader = LogReader("/path/to/logs/run1")
+        print(reader.iterations)  # [0, 1, 2, ...]
+        print(reader.scalar_tags)  # ['loss', 'accuracy', ...]
+
+        # Load scalars as time series
+        loss = reader.load_scalars("loss")  # [(0, 0.5), (1, 0.4), ...]
+
+        # Load a figure
+        fig = reader.load_figure("plot", iteration=100)
+
+        # Discover and load multiple runs
+        reader = LogReader("/path/to/logs")
+        print(reader.runs)  # ['run1', 'run2', ...]
+        run1 = reader.get_run("run1")
+    """
+
+    def __init__(self, log_dir: str | Path):
+        self._log_dir = Path(log_dir)
+        if not self._log_dir.exists():
+            raise FileNotFoundError(f"Log directory not found: {log_dir}")
+
+    @property
+    def path(self) -> Path:
+        """Return the log directory path."""
+        return self._log_dir
+
+    @property
+    def is_run(self) -> bool:
+        """Check if this directory is a pyexp run (has marker file)."""
+        return (self._log_dir / MARKER_FILE).exists()
+
+    @property
+    def runs(self) -> list[str]:
+        """Discover all run names under this directory."""
+        if self.is_run:
+            return ["."]
+        runs = []
+        for item in self._log_dir.rglob(MARKER_FILE):
+            run_path = item.parent
+            runs.append(str(run_path.relative_to(self._log_dir)))
+        return sorted(runs)
+
+    def get_run(self, name: str) -> "LogReader":
+        """Get a LogReader for a specific run."""
+        if name == ".":
+            return self
+        return LogReader(self._log_dir / name)
+
+    @property
+    def iterations(self) -> list[int]:
+        """Get all iteration numbers in this run."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        iterations = []
+        for d in self._log_dir.iterdir():
+            if d.is_dir() and d.name.isdigit():
+                iterations.append(int(d.name))
+        return sorted(iterations)
+
+    @property
+    def scalar_tags(self) -> set[str]:
+        """Get all scalar tags logged in this run."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        tags = set()
+        for it in self.iterations:
+            scalars_path = self._log_dir / str(it) / "scalars.json"
+            if scalars_path.exists():
+                data = json.loads(scalars_path.read_text())
+                tags.update(data.keys())
+        return tags
+
+    @property
+    def text_tags(self) -> set[str]:
+        """Get all text tags logged in this run."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        tags = set()
+        for it in self.iterations:
+            text_path = self._log_dir / str(it) / "text.json"
+            if text_path.exists():
+                data = json.loads(text_path.read_text())
+                tags.update(data.keys())
+        return tags
+
+    @property
+    def figure_tags(self) -> set[str]:
+        """Get all figure tags logged in this run."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        tags = set()
+        for it in self.iterations:
+            figures_dir = self._log_dir / str(it) / "figures"
+            if figures_dir.exists():
+                for fig_path in figures_dir.glob("*.cpkl"):
+                    tags.add(fig_path.stem)
+        return tags
+
+    def load_scalars(self, tag: str) -> list[tuple[int, float]]:
+        """Load scalar values for a tag as (iteration, value) pairs."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        values = []
+        for it in self.iterations:
+            scalars_path = self._log_dir / str(it) / "scalars.json"
+            if scalars_path.exists():
+                data = json.loads(scalars_path.read_text())
+                if tag in data:
+                    values.append((it, data[tag]))
+        return values
+
+    def load_text(self, tag: str) -> list[tuple[int, str]]:
+        """Load text values for a tag as (iteration, text) pairs."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        values = []
+        for it in self.iterations:
+            text_path = self._log_dir / str(it) / "text.json"
+            if text_path.exists():
+                data = json.loads(text_path.read_text())
+                if tag in data:
+                    values.append((it, data[tag]))
+        return values
+
+    def load_figure(self, tag: str, iteration: int) -> Any:
+        """Load a figure object for a specific tag and iteration."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        fig_path = self._log_dir / str(iteration) / "figures" / f"{tag}.cpkl"
+        if not fig_path.exists():
+            raise FileNotFoundError(f"Figure not found: {tag} at iteration {iteration}")
+        with open(fig_path, "rb") as f:
+            return cloudpickle.load(f)
+
+    def figure_iterations(self, tag: str) -> list[int]:
+        """Get all iterations where a figure tag was logged."""
+        if not self.is_run:
+            raise ValueError("Not a run directory. Use get_run() first.")
+        iterations = []
+        for it in self.iterations:
+            fig_path = self._log_dir / str(it) / "figures" / f"{tag}.cpkl"
+            if fig_path.exists():
+                iterations.append(it)
+        return iterations
+
+    def __repr__(self) -> str:
+        if self.is_run:
+            return f"LogReader('{self._log_dir}', iterations={len(self.iterations)})"
+        return f"LogReader('{self._log_dir}', runs={self.runs})"
+
+
 class Logger:
     """Logger for tracking scalars, text, and figures during experiments.
 
