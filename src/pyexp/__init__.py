@@ -23,6 +23,7 @@ from .executors import (
     get_executor,
 )
 from .utils import stash
+from .log import Logger
 
 __all__ = [
     "Config",
@@ -45,4 +46,5 @@ __all__ = [
     "RayExecutor",
     "SubprocessExecutor",
     "get_executor",
+    "Logger",
 ]
