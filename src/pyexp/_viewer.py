@@ -4,16 +4,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pyexp.log import MARKER_FILE
+
 
 def is_run_directory(path: Path) -> bool:
-    """Check if a directory is a pyexp run (contains iteration subdirectories)."""
+    """Check if a directory is a pyexp run (contains marker file)."""
     if not path.is_dir():
         return False
-    # A run directory contains numeric subdirectories (iterations)
-    for item in path.iterdir():
-        if item.is_dir() and item.name.isdigit():
-            return True
-    return False
+    # A run directory contains the .pyexp marker file
+    return (path / MARKER_FILE).exists()
 
 
 def discover_runs(root_path: Path) -> list[Path]:
@@ -112,17 +111,31 @@ def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
     return timeseries
 
 
-def load_figures_info(log_path: Path) -> dict[str, list[tuple[int, Path]]]:
-    """Load all figure paths across iterations."""
-    figures: dict[str, list[tuple[int, Path]]] = {}
+def load_figure_meta(fig_path: Path) -> dict:
+    """Load metadata for a figure."""
+    meta_path = fig_path.with_suffix(".meta")
+    if meta_path.exists():
+        return json.loads(meta_path.read_text())
+    # Default to interactive for backwards compatibility
+    return {"interactive": True}
+
+
+def load_figures_info(log_path: Path) -> dict[str, list[tuple[int, Path, bool]]]:
+    """Load all figure paths and metadata across iterations.
+
+    Returns:
+        Dict mapping tag to list of (iteration, path, interactive) tuples.
+    """
+    figures: dict[str, list[tuple[int, Path, bool]]] = {}
     for it in load_iterations(log_path):
         figures_dir = log_path / str(it) / "figures"
         if figures_dir.exists():
             for fig_path in figures_dir.glob("*.cpkl"):
                 tag = fig_path.stem
+                meta = load_figure_meta(fig_path)
                 if tag not in figures:
                     figures[tag] = []
-                figures[tag].append((it, fig_path))
+                figures[tag].append((it, fig_path, meta.get("interactive", True)))
     # Sort by iteration
     for tag in figures:
         figures[tag].sort(key=lambda x: x[0])

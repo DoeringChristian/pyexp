@@ -10,6 +10,9 @@ from typing import Any
 import cloudpickle
 
 
+MARKER_FILE = ".pyexp"
+
+
 class Logger:
     """Logger for tracking scalars, text, and figures during experiments.
 
@@ -18,11 +21,13 @@ class Logger:
 
     Storage structure (organized by iteration):
         log_dir/
+        ├── .pyexp              # Marker file identifying this as a pyexp log
         └── <iteration>/
             ├── scalars.json    # {tag: value, ...}
             ├── text.json       # {tag: text, ...}
             └── figures/
-                └── <tag>.cpkl
+                ├── <tag>.cpkl  # Pickled figure
+                └── <tag>.meta  # Metadata (interactive flag)
 
     Args:
         log_dir: Directory to store log files.
@@ -32,7 +37,7 @@ class Logger:
         logger.set_global_it(100)
         logger.add_scalar("loss", 0.5)
         logger.add_text("info", "Training started")
-        logger.add_figure("plot", fig)
+        logger.add_figure("plot", fig, interactive=True)
         logger.flush()  # Wait for all writes to complete
     """
 
@@ -40,6 +45,10 @@ class Logger:
         self._log_dir = Path(log_dir)
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._global_it = 0
+
+        # Create marker file to identify this as a pyexp log directory
+        marker_path = self._log_dir / MARKER_FILE
+        marker_path.touch()
 
         # Async saving infrastructure
         self._queue: queue.Queue = queue.Queue()
@@ -95,13 +104,19 @@ class Logger:
         """
         self._queue.put(("text", (tag, text_string, self._global_it)))
 
-    def add_figure(self, tag: str, figure: Any) -> None:
+    def add_figure(self, tag: str, figure: Any, interactive: bool = True) -> None:
         """Log a figure object at the current iteration.
 
         Figures are saved as <iteration>/figures/<tag>.cpkl,
         preserving the full object for later loading and modification.
+
+        Args:
+            tag: Name/tag for the figure.
+            figure: The figure object (e.g., matplotlib figure).
+            interactive: If True, render as interactive widget in viewer.
+                        If False, render as static image (faster loading).
         """
-        self._queue.put(("figure", (tag, figure, self._global_it)))
+        self._queue.put(("figure", (tag, figure, self._global_it, interactive)))
 
     def _write_scalar(self, tag: str, scalar_value: float, it: int) -> None:
         """Write a scalar value to disk."""
@@ -135,12 +150,17 @@ class Logger:
         data[tag] = text_string
         text_path.write_text(json.dumps(data, indent=2))
 
-    def _write_figure(self, tag: str, figure: Any, it: int) -> None:
+    def _write_figure(self, tag: str, figure: Any, it: int, interactive: bool) -> None:
         """Write a figure to disk."""
         it_dir = self._get_it_dir(it)
         fig_dir = it_dir / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
 
+        # Save the pickled figure
         fig_path = fig_dir / f"{tag}.cpkl"
         with open(fig_path, "wb") as f:
             cloudpickle.dump(figure, f)
+
+        # Save metadata
+        meta_path = fig_dir / f"{tag}.meta"
+        meta_path.write_text(json.dumps({"interactive": interactive}))

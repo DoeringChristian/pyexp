@@ -210,10 +210,14 @@ def FigureItem(run: Path, tag: str, root_path: Path, data: list):
             )
             solara.Text(f"Iteration: {iterations[iter_idx.value]}")
 
-        # Display figure
+        # Display figure - check if interactive
         fig_path = data[iter_idx.value][1]
+        interactive = data[iter_idx.value][2]
         try:
-            InteractiveFigure(fig_path)
+            if interactive:
+                InteractiveFigure(fig_path)
+            else:
+                StaticFigure(fig_path)
         except Exception as e:
             import traceback
             solara.Error(f"Failed: {e}\n{traceback.format_exc()}")
@@ -261,6 +265,36 @@ def InteractiveFigure(fig_path: Path):
 
     # Display the canvas widget
     solara.display(canvas)
+
+
+@solara.component
+def StaticFigure(fig_path: Path):
+    """Display a matplotlib figure as a static image."""
+    import base64
+    import io
+
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+
+    # Load the pickled figure
+    mpl_fig = load_figure(fig_path)
+
+    # Render to PNG
+    buf = io.BytesIO()
+    mpl_fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    buf.seek(0)
+    img_data = base64.b64encode(buf.read()).decode('utf-8')
+    plt.close(mpl_fig)
+
+    # Display as HTML img tag
+    solara.HTML(
+        tag="img",
+        attributes={
+            "src": f"data:image/png;base64,{img_data}",
+            "style": "max-width: 100%;",
+        },
+    )
 
 
 @solara.component

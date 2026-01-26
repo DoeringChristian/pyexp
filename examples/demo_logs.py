@@ -38,14 +38,14 @@ def generate_run(log_dir: str, seed: float = 0.0):
                 import matplotlib.pyplot as plt
                 import numpy as np
 
-                # 2D bar chart
+                # 2D bar chart - static (faster rendering)
                 fig, ax = plt.subplots()
                 ax.bar(["loss", "acc"], [loss, acc])
                 ax.set_title(f"Metrics at iteration {i}")
-                logger.add_figure("metrics_bar", fig)
+                logger.add_figure("metrics_bar", fig, interactive=False)
                 plt.close(fig)
 
-                # 3D surface plot (simulated loss landscape)
+                # 3D surface plot (simulated loss landscape) - interactive
                 fig = plt.figure(figsize=(8, 6))
                 ax = fig.add_subplot(111, projection="3d")
 
@@ -69,7 +69,7 @@ def generate_run(log_dir: str, seed: float = 0.0):
                 ax.set_zlabel("Loss")
                 ax.set_title(f"Loss Landscape (iteration {i})")
 
-                logger.add_figure("loss_landscape_3d", fig)
+                logger.add_figure("loss_landscape_3d", fig, interactive=True)
                 plt.close(fig)
 
             except ImportError:
