@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 import pyexp
-from pyexp import experiment, Config, Tensor, sweep
+from pyexp import experiment, Config, Tensor, sweep, Executor
 
 
 class TestExperimentDecorator:
@@ -1235,3 +1235,190 @@ class TestCustomExecutor:
 
         with pytest.raises(ValueError, match="Unknown executor"):
             get_executor("nonexistent")
+
+
+class TestRetry:
+    """Tests for the retry functionality."""
+
+    def test_retry_default_is_4(self, tmp_path):
+        """Default retry count should be 4."""
+        @experiment
+        def my_exp(config):
+            return {"value": 1}
+
+        assert my_exp._retry_default == 4
+
+    def test_retry_in_decorator(self, tmp_path):
+        """Retry can be set in decorator."""
+        @experiment(retry=2)
+        def my_exp(config):
+            return {"value": 1}
+
+        assert my_exp._retry_default == 2
+
+    def test_retry_on_failure(self, tmp_path):
+        """Failed experiments should be retried."""
+        attempt_count = 0
+
+        class RetryTestExecutor(Executor):
+            def run(self, fn, config, result_path, capture=True):
+                nonlocal attempt_count
+                attempt_count += 1
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                # Fail on first attempt, succeed on retry
+                if attempt_count == 1:
+                    structured = {"result": None, "error": "First attempt failed", "log": ""}
+                else:
+                    structured = {"result": {"value": 42}, "error": None, "log": ""}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
+
+        @experiment(retry=4)
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor=RetryTestExecutor())
+
+        assert attempt_count == 2  # First attempt failed, second succeeded
+        assert result.result["value"] == 42
+
+    def test_retry_exhausted(self, tmp_path):
+        """When retries exhausted, error should be captured."""
+        attempt_count = 0
+
+        class AlwaysFailExecutor(Executor):
+            def run(self, fn, config, result_path, capture=True):
+                nonlocal attempt_count
+                attempt_count += 1
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                structured = {"result": None, "error": "Always fails", "log": f"Attempt {attempt_count}"}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
+
+        @experiment(retry=2)
+        def my_exp(config):
+            raise RuntimeError("Always fails")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor=AlwaysFailExecutor())
+
+        # 1 initial attempt + 2 retries = 3 total
+        assert attempt_count == 3
+        assert result.error == "Always fails"
+
+    def test_retry_zero_no_retries(self, tmp_path):
+        """With retry=0, no retries should happen."""
+        attempt_count = 0
+
+        class FailOnceExecutor(Executor):
+            def run(self, fn, config, result_path, capture=True):
+                nonlocal attempt_count
+                attempt_count += 1
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                structured = {"result": None, "error": "Failed", "log": ""}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
+
+        @experiment(retry=0)
+        def my_exp(config):
+            raise RuntimeError("Fails")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor=FailOnceExecutor())
+
+        assert attempt_count == 1  # Only 1 attempt, no retries
+        assert result.error == "Failed"
+
+    def test_retry_cli_override(self, tmp_path):
+        """CLI --retry should override decorator setting."""
+        attempt_count = 0
+
+        class AlwaysFailExecutor(Executor):
+            def run(self, fn, config, result_path, capture=True):
+                nonlocal attempt_count
+                attempt_count += 1
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                structured = {"result": None, "error": "Always fails", "log": ""}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
+
+        @experiment(retry=10)  # Decorator says 10 retries
+        def my_exp(config):
+            raise RuntimeError("Always fails")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        # CLI overrides to 1 retry
+        with patch.object(sys, "argv", ["test", "--retry", "1"]):
+            result = my_exp.run(output_dir=tmp_path, executor=AlwaysFailExecutor())
+
+        # 1 initial attempt + 1 retry = 2 total (not 11)
+        assert attempt_count == 2
+
+    def test_retry_run_override(self, tmp_path):
+        """run() retry should override decorator setting."""
+        attempt_count = 0
+
+        class AlwaysFailExecutor(Executor):
+            def run(self, fn, config, result_path, capture=True):
+                nonlocal attempt_count
+                attempt_count += 1
+                result_path.parent.mkdir(parents=True, exist_ok=True)
+                structured = {"result": None, "error": "Always fails", "log": ""}
+                with open(result_path, "wb") as f:
+                    pickle.dump(structured, f)
+                return structured
+
+        @experiment(retry=10)  # Decorator says 10 retries
+        def my_exp(config):
+            raise RuntimeError("Always fails")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        # run() overrides to 1 retry
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor=AlwaysFailExecutor(), retry=1)
+
+        # 1 initial attempt + 1 retry = 2 total
+        assert attempt_count == 2

@@ -108,6 +108,13 @@ def _parse_args() -> argparse.Namespace:
         metavar="DIR",
         help="Override output directory (default: out)",
     )
+    parser.add_argument(
+        "--retry",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Number of retries on failure (default: 4)",
+    )
     return parser.parse_args()
 
 
@@ -189,11 +196,13 @@ class Experiment:
         name: str | None = None,
         executor: ExecutorName | Executor | str = "subprocess",
         timestamp: bool = True,
+        retry: int = 4,
     ):
         self._fn = fn
         self._name = name or fn.__name__
         self._executor_default = executor
         self._timestamp_default = timestamp
+        self._retry_default = retry
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor, Path], Any] | None = None
         wraps(fn)(self)
@@ -225,6 +234,7 @@ class Experiment:
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
         timestamp: bool | None = None,
+        retry: int | None = None,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -245,6 +255,7 @@ class Experiment:
             name: Experiment name for the output folder. Defaults to function name.
             timestamp: If True, create a timestamped subfolder for each run. If False, no timestamp.
                        Can be overridden by --timestamp CLI argument. Defaults to decorator value (True).
+            retry: Number of times to retry a failed experiment. Defaults to decorator value (4).
 
         Output folder structure:
             - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
@@ -270,6 +281,14 @@ class Experiment:
             use_timestamp = timestamp
         else:
             use_timestamp = self._timestamp_default
+
+        # Retry: CLI > run() arg > decorator arg
+        if args.retry is not None:
+            max_retries = args.retry
+        elif retry is not None:
+            max_retries = retry
+        else:
+            max_retries = self._retry_default
 
         # If executor is already an Executor instance, use it directly
         if isinstance(resolved_executor, Executor):
@@ -347,9 +366,18 @@ class Experiment:
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = Config({**config, "out": experiment_dir})
-                structured = exec_instance.run(
-                    self._fn, config_with_out, result_path, capture=not args.no_capture
-                )
+
+                # Retry loop
+                for attempt in range(max_retries + 1):
+                    structured = exec_instance.run(
+                        self._fn, config_with_out, result_path, capture=not args.no_capture
+                    )
+                    if not structured.get("error"):
+                        break  # Success, exit retry loop
+                    if attempt < max_retries:
+                        # Delete result.pkl before retry so executor writes fresh
+                        result_path.unlink(missing_ok=True)
+
                 # Save log to plaintext file
                 log_path = experiment_dir / "log.out"
                 log_path.write_text(structured.get("log", ""))
@@ -396,6 +424,7 @@ def experiment(
     name: str | None = None,
     executor: ExecutorName | Executor | str = "subprocess",
     timestamp: bool = True,
+    retry: int = 4,
 ) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
     """Decorator to create an Experiment from a function.
 
@@ -411,6 +440,8 @@ def experiment(
             Can be overridden in run().
         timestamp: If True (default), create a timestamped subfolder for each run.
             Can be overridden in run() or via --timestamp CLI argument.
+        retry: Number of times to retry a failed experiment. Defaults to 4.
+            Can be overridden in run() or via --retry CLI argument.
 
     Output folder structure:
         - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
@@ -460,6 +491,7 @@ def experiment(
         --output-dir DIR      Override output directory
         --no-timestamp        Disable timestamp folders
         --timestamp TIMESTAMP Use specific timestamp to continue/rerun a previous run
+        --retry N             Number of retries on failure (default: 4)
         --report              Only generate report from cached results
         --rerun               Re-run all experiments, ignore cache
         -s, --capture=no      Show subprocess output instead of progress bar
@@ -467,11 +499,11 @@ def experiment(
     Priority: CLI args > run() args > decorator args
     """
     def decorator(f: Callable[[dict], Any]) -> Experiment:
-        return Experiment(f, name=name, executor=executor, timestamp=timestamp)
+        return Experiment(f, name=name, executor=executor, timestamp=timestamp, retry=retry)
 
     if fn is not None:
         # Called without arguments: @experiment
-        return Experiment(fn, name=name, executor=executor, timestamp=timestamp)
+        return Experiment(fn, name=name, executor=executor, timestamp=timestamp, retry=retry)
     else:
         # Called with arguments: @experiment(name="mnist", executor="fork")
         return decorator
