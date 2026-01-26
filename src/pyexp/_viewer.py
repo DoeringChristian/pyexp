@@ -5,6 +5,39 @@ from pathlib import Path
 from typing import Any
 
 
+def is_run_directory(path: Path) -> bool:
+    """Check if a directory is a pyexp run (contains iteration subdirectories)."""
+    if not path.is_dir():
+        return False
+    # A run directory contains numeric subdirectories (iterations)
+    for item in path.iterdir():
+        if item.is_dir() and item.name.isdigit():
+            return True
+    return False
+
+
+def discover_runs(root_path: Path) -> list[Path]:
+    """Recursively discover all run directories under the given root."""
+    runs = []
+    if not root_path.exists():
+        return runs
+
+    # Check if root itself is a run
+    if is_run_directory(root_path):
+        runs.append(root_path)
+
+    # Recursively search subdirectories
+    for item in root_path.iterdir():
+        if item.is_dir() and not item.name.isdigit():  # Skip iteration directories
+            if is_run_directory(item):
+                runs.append(item)
+            else:
+                # Recurse into non-run directories
+                runs.extend(discover_runs(item))
+
+    return sorted(runs)
+
+
 def load_iterations(log_path: Path) -> list[int]:
     """Load all iteration numbers from log directory."""
     if not log_path.exists():
@@ -60,6 +93,67 @@ def load_figure(fig_path: Path) -> Any:
     import cloudpickle
     with open(fig_path, "rb") as f:
         return cloudpickle.load(f)
+
+
+def load_text_timeseries(log_path: Path) -> dict[str, list[tuple[int, str]]]:
+    """Load all text across iterations as time series."""
+    timeseries: dict[str, list[tuple[int, str]]] = {}
+    for it in load_iterations(log_path):
+        text_path = log_path / str(it) / "text.json"
+        if text_path.exists():
+            data = json.loads(text_path.read_text())
+            for tag, text in data.items():
+                if tag not in timeseries:
+                    timeseries[tag] = []
+                timeseries[tag].append((it, text))
+    # Sort by iteration
+    for tag in timeseries:
+        timeseries[tag].sort(key=lambda x: x[0])
+    return timeseries
+
+
+def load_figures_info(log_path: Path) -> dict[str, list[tuple[int, Path]]]:
+    """Load all figure paths across iterations."""
+    figures: dict[str, list[tuple[int, Path]]] = {}
+    for it in load_iterations(log_path):
+        figures_dir = log_path / str(it) / "figures"
+        if figures_dir.exists():
+            for fig_path in figures_dir.glob("*.cpkl"):
+                tag = fig_path.stem
+                if tag not in figures:
+                    figures[tag] = []
+                figures[tag].append((it, fig_path))
+    # Sort by iteration
+    for tag in figures:
+        figures[tag].sort(key=lambda x: x[0])
+    return figures
+
+
+def get_all_scalar_tags(runs: list[Path]) -> set[str]:
+    """Get all unique scalar tags across all runs."""
+    tags = set()
+    for run in runs:
+        timeseries = load_scalars_timeseries(run)
+        tags.update(timeseries.keys())
+    return tags
+
+
+def get_all_text_tags(runs: list[Path]) -> set[str]:
+    """Get all unique text tags across all runs."""
+    tags = set()
+    for run in runs:
+        timeseries = load_text_timeseries(run)
+        tags.update(timeseries.keys())
+    return tags
+
+
+def get_all_figure_tags(runs: list[Path]) -> set[str]:
+    """Get all unique figure tags across all runs."""
+    tags = set()
+    for run in runs:
+        figures = load_figures_info(run)
+        tags.update(figures.keys())
+    return tags
 
 
 def run(log_path: str | Path | None = None, port: int = 8765):

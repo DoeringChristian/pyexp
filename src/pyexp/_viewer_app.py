@@ -6,20 +6,237 @@ This module is loaded by solara run, so it can import solara at the top level.
 import os
 from pathlib import Path
 
-import cloudpickle
 import solara
 
 from pyexp._viewer import (
+    discover_runs,
+    get_all_figure_tags,
+    get_all_scalar_tags,
+    get_all_text_tags,
     load_figure,
-    load_iteration_data,
+    load_figures_info,
     load_iterations,
     load_scalars_timeseries,
+    load_text_timeseries,
 )
 
 # Reactive state
-log_dir = solara.reactive("")
-selected_iteration = solara.reactive(None)
+root_dir = solara.reactive("")
+selected_runs = solara.reactive([])
 refresh_counter = solara.reactive(0)
+log_scale = solara.reactive(False)
+
+
+@solara.component
+def RunSelector():
+    """Left panel for selecting runs."""
+    _ = refresh_counter.value  # Trigger refresh
+
+    if not root_dir.value:
+        solara.Text("Enter a directory path above.")
+        return
+
+    root_path = Path(root_dir.value)
+    if not root_path.exists():
+        solara.Warning("Directory not found")
+        return
+
+    runs = discover_runs(root_path)
+
+    if not runs:
+        solara.Text("No runs found.")
+        return
+
+    solara.Markdown(f"**{len(runs)} runs found**")
+
+    # Multi-select for runs
+    run_names = [str(r.relative_to(root_path)) if r != root_path else "." for r in runs]
+    run_map = {name: run for name, run in zip(run_names, runs)}
+
+    def on_select(selected_names):
+        selected_runs.set([run_map[name] for name in selected_names])
+
+    # Get currently selected names
+    current_names = []
+    for run in selected_runs.value:
+        for name, r in run_map.items():
+            if r == run:
+                current_names.append(name)
+                break
+
+    for name in run_names:
+        is_selected = name in current_names
+
+        def toggle(checked, n=name):
+            current = list(current_names)
+            if checked and n not in current:
+                current.append(n)
+            elif not checked and n in current:
+                current.remove(n)
+            on_select(current)
+
+        solara.Checkbox(label=name, value=is_selected, on_value=toggle)
+
+
+@solara.component
+def ScalarsPanel():
+    """Panel for viewing scalar time series."""
+    _ = refresh_counter.value
+
+    if not selected_runs.value:
+        solara.Text("Select runs from the sidebar to view scalars.")
+        return
+
+    import plotly.graph_objects as go
+
+    # Get all scalar tags across selected runs
+    all_tags = get_all_scalar_tags(selected_runs.value)
+
+    if not all_tags:
+        solara.Text("No scalars logged in selected runs.")
+        return
+
+    # Log scale toggle
+    solara.Checkbox(label="Log scale (Y-axis)", value=log_scale)
+
+    root_path = Path(root_dir.value)
+
+    for tag in sorted(all_tags):
+        with solara.Details(tag, expand=True):
+            fig = go.Figure()
+
+            for run in selected_runs.value:
+                timeseries = load_scalars_timeseries(run)
+                if tag in timeseries:
+                    data = timeseries[tag]
+                    iterations = [d[0] for d in data]
+                    values = [d[1] for d in data]
+
+                    run_name = str(run.relative_to(root_path)) if run != root_path else "."
+                    fig.add_trace(go.Scatter(
+                        x=iterations,
+                        y=values,
+                        mode='lines+markers',
+                        marker=dict(size=4),
+                        name=run_name,
+                        hovertemplate=f'{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>',
+                    ))
+
+            fig.update_layout(
+                title=tag,
+                xaxis_title='Iteration',
+                yaxis_title=tag,
+                yaxis_type='log' if log_scale.value else 'linear',
+                height=350,
+                margin=dict(l=50, r=20, t=40, b=40),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            )
+
+            solara.FigurePlotly(fig)
+
+
+@solara.component
+def TextItem(run: Path, tag: str, root_path: Path, data: list):
+    """Display text for a single run and tag."""
+    run_name = str(run.relative_to(root_path)) if run != root_path else "."
+    iterations = [d[0] for d in data]
+
+    # Iteration slider - hook at top of component
+    iter_idx = solara.use_reactive(len(iterations) - 1)
+
+    with solara.Card(title=run_name):
+        if len(iterations) > 1:
+            solara.SliderInt(
+                label="Iteration",
+                value=iter_idx,
+                min=0,
+                max=len(iterations) - 1,
+            )
+            solara.Text(f"Iteration: {iterations[iter_idx.value]}")
+
+        # Display text
+        text = data[iter_idx.value][1]
+        solara.Markdown(f"```\n{text}\n```")
+
+
+@solara.component
+def TextPanel():
+    """Panel for viewing text logs."""
+    _ = refresh_counter.value
+
+    if not selected_runs.value:
+        solara.Text("Select runs from the sidebar to view text.")
+        return
+
+    # Get all text tags across selected runs
+    all_tags = get_all_text_tags(selected_runs.value)
+
+    if not all_tags:
+        solara.Text("No text logged in selected runs.")
+        return
+
+    root_path = Path(root_dir.value)
+
+    for tag in sorted(all_tags):
+        with solara.Details(tag, expand=True):
+            for run in selected_runs.value:
+                timeseries = load_text_timeseries(run)
+                if tag in timeseries and timeseries[tag]:
+                    TextItem(run, tag, root_path, timeseries[tag])
+
+
+@solara.component
+def FigureItem(run: Path, tag: str, root_path: Path, data: list):
+    """Display figure for a single run and tag."""
+    run_name = str(run.relative_to(root_path)) if run != root_path else "."
+    iterations = [d[0] for d in data]
+
+    # Iteration slider - hook at top of component
+    iter_idx = solara.use_reactive(len(iterations) - 1)
+
+    with solara.Card(title=run_name):
+        if len(iterations) > 1:
+            solara.SliderInt(
+                label="Iteration",
+                value=iter_idx,
+                min=0,
+                max=len(iterations) - 1,
+            )
+            solara.Text(f"Iteration: {iterations[iter_idx.value]}")
+
+        # Display figure
+        fig_path = data[iter_idx.value][1]
+        try:
+            InteractiveFigure(fig_path)
+        except Exception as e:
+            import traceback
+            solara.Error(f"Failed: {e}\n{traceback.format_exc()}")
+
+
+@solara.component
+def FiguresPanel():
+    """Panel for viewing figures."""
+    _ = refresh_counter.value
+
+    if not selected_runs.value:
+        solara.Text("Select runs from the sidebar to view figures.")
+        return
+
+    # Get all figure tags across selected runs
+    all_tags = get_all_figure_tags(selected_runs.value)
+
+    if not all_tags:
+        solara.Text("No figures logged in selected runs.")
+        return
+
+    root_path = Path(root_dir.value)
+
+    for tag in sorted(all_tags):
+        with solara.Details(tag, expand=True):
+            for run in selected_runs.value:
+                figures_info = load_figures_info(run)
+                if tag in figures_info and figures_info[tag]:
+                    FigureItem(run, tag, root_path, figures_info[tag])
 
 
 @solara.component
@@ -27,7 +244,6 @@ def InteractiveFigure(fig_path: Path):
     """Display a matplotlib figure interactively using ipympl."""
     import matplotlib
     matplotlib.use('module://ipympl.backend_nbagg')
-    import matplotlib.pyplot as plt
     from ipympl.backend_nbagg import Canvas, FigureManager
 
     # Load the pickled figure
@@ -42,100 +258,6 @@ def InteractiveFigure(fig_path: Path):
 
 
 @solara.component
-def ScalarPlots():
-    """Display scalar time series plots."""
-    _ = refresh_counter.value  # Trigger refresh
-
-    if not log_dir.value:
-        return
-
-    log_path = Path(log_dir.value)
-    timeseries = load_scalars_timeseries(log_path)
-
-    if not timeseries:
-        solara.Text("No scalars logged yet.")
-        return
-
-    import plotly.graph_objects as go
-
-    for tag, values in timeseries.items():
-        iterations = [v[0] for v in values]
-        vals = [v[1] for v in values]
-
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=iterations,
-            y=vals,
-            mode='lines+markers',
-            marker=dict(size=4),
-            name=tag,
-            hovertemplate='Iteration: %{x}<br>Value: %{y:.6g}<extra></extra>',
-        ))
-        fig.update_layout(
-            title=tag,
-            xaxis_title='Iteration',
-            yaxis_title=tag,
-            height=300,
-            margin=dict(l=50, r=20, t=40, b=40),
-        )
-
-        solara.FigurePlotly(fig)
-
-
-@solara.component
-def IterationBrowser():
-    """Browse and view individual iterations."""
-    _ = refresh_counter.value  # Trigger refresh
-
-    if not log_dir.value:
-        return
-
-    log_path = Path(log_dir.value)
-    iterations = load_iterations(log_path)
-
-    if not iterations:
-        solara.Text("No iterations logged yet.")
-        return
-
-    # Iteration selector
-    solara.Select(
-        label="Iteration",
-        value=selected_iteration,
-        values=iterations,
-    )
-
-    if selected_iteration.value is None:
-        return
-
-    data = load_iteration_data(log_path, selected_iteration.value)
-
-    # Display scalars
-    if data["scalars"]:
-        solara.Markdown("### Scalars")
-        with solara.Columns([1, 1, 1]):
-            for tag, value in data["scalars"].items():
-                solara.Info(f"**{tag}**: {value}")
-
-    # Display text
-    if data["text"]:
-        solara.Markdown("### Text")
-        for tag, text in data["text"].items():
-            with solara.Card(title=tag):
-                solara.Markdown(f"```\n{text}\n```")
-
-    # Display figures
-    if data["figures"]:
-        solara.Markdown("### Figures")
-        for tag, fig_path in data["figures"].items():
-            solara.Markdown(f"**{tag}**")
-            try:
-                InteractiveFigure(fig_path)
-            except Exception as e:
-                import traceback
-                solara.Error(f"Failed: {e}\n{traceback.format_exc()}")
-
-
-@solara.component
 def RefreshButton():
     """Manual refresh button."""
     def do_refresh():
@@ -147,9 +269,12 @@ def RefreshButton():
 @solara.component
 def Page():
     """Main viewer page."""
+    # Hooks must be called before any early returns
+    tab_index = solara.use_reactive(0)
+
     # Initialize from environment variable if set
-    if not log_dir.value and os.environ.get("PYEXP_LOG_DIR"):
-        log_dir.set(os.environ["PYEXP_LOG_DIR"])
+    if not root_dir.value and os.environ.get("PYEXP_LOG_DIR"):
+        root_dir.set(os.environ["PYEXP_LOG_DIR"])
 
     solara.Title("pyexp Log Viewer")
 
@@ -157,34 +282,31 @@ def Page():
         solara.Text("pyexp Log Viewer")
 
     with solara.Sidebar():
-        solara.Markdown("## Settings")
+        solara.Markdown("## Runs")
         solara.InputText(
-            label="Log Directory",
-            value=log_dir,
+            label="Root Directory",
+            value=root_dir,
         )
-
-        if log_dir.value:
-            log_path = Path(log_dir.value)
-            if log_path.exists():
-                iterations = load_iterations(log_path)
-                solara.Info(f"{len(iterations)} iterations")
-            else:
-                solara.Warning("Directory not found")
-
         RefreshButton()
+        solara.Markdown("---")
+        RunSelector()
 
-    if not log_dir.value:
+    if not root_dir.value:
         solara.Markdown("## Welcome to pyexp Log Viewer")
-        solara.Markdown("Enter a log directory path in the sidebar to get started.")
+        solara.Markdown("Enter a root directory path in the sidebar to discover runs.")
         return
 
-    log_path = Path(log_dir.value)
-    if not log_path.exists():
-        solara.Warning(f"Directory not found: {log_dir.value}")
-        return
+    # Tabs for different views
+    tab_names = ["Scalars", "Text", "Figures"]
 
-    with solara.Card(title="Scalar Plots"):
-        ScalarPlots()
+    with solara.lab.Tabs(value=tab_index):
+        for name in tab_names:
+            solara.lab.Tab(name)
 
-    with solara.Card(title="Iteration Browser"):
-        IterationBrowser()
+    # Content based on active tab
+    if tab_index.value == 0:
+        ScalarsPanel()
+    elif tab_index.value == 1:
+        TextPanel()
+    elif tab_index.value == 2:
+        FiguresPanel()
