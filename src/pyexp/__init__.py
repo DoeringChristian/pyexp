@@ -16,12 +16,13 @@ from .experiment import Experiment, experiment
 from .executors import (
     Executor,
     ExecutorName,
-    InlineExecutor,
-    SubprocessExecutor,
     ForkExecutor,
+    InlineExecutor,
     RayExecutor,
+    SubprocessExecutor,
     get_executor,
 )
+from .utils import stash
 
 __all__ = [
     "Config",
@@ -33,14 +34,15 @@ __all__ = [
     "load_config",
     "merge",
     "register",
+    "stash",
     "sweep",
     "Experiment",
     "experiment",
     "Executor",
     "ExecutorName",
-    "InlineExecutor",
-    "SubprocessExecutor",
     "ForkExecutor",
+    "InlineExecutor",
     "RayExecutor",
+    "SubprocessExecutor",
     "get_executor",
 ]
