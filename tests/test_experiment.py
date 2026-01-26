@@ -143,7 +143,7 @@ class TestExperimentRun:
         assert result == 2
 
     def test_run_report_flag(self, tmp_path):
-        @experiment
+        @experiment(timestamp=False)
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -201,6 +201,30 @@ class TestExperimentRun:
             my_exp.run(output_dir=out_dir)
 
         assert out_dir.exists()
+
+    def test_log_saved_to_file(self, tmp_path):
+        """Log output should be saved to log.out in experiment folder."""
+        @experiment(timestamp=False)
+        def my_exp(config):
+            print("Hello from experiment")
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "logged", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="subprocess")
+
+        # Check log.out exists and contains output
+        exp_dir = tmp_path / "my_exp"
+        log_files = list(exp_dir.rglob("log.out"))
+        assert len(log_files) == 1
+        assert "Hello from experiment" in log_files[0].read_text()
 
     def test_config_receives_out(self, tmp_path):
         received_out = None

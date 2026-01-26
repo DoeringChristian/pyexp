@@ -350,6 +350,9 @@ class Experiment:
                 structured = exec_instance.run(
                     self._fn, config_with_out, result_path, capture=not args.no_capture
                 )
+                # Save log to plaintext file
+                log_path = experiment_dir / "log.out"
+                log_path.write_text(structured.get("log", ""))
                 # Determine status based on error field
                 if structured.get("error"):
                     status = "failed"
