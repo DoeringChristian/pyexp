@@ -32,6 +32,22 @@ def _generate_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
+def _get_latest_timestamp(base_dir: Path) -> str | None:
+    """Find the most recent timestamp folder in the base directory."""
+    if not base_dir.exists():
+        return None
+    # List directories that look like timestamps (YYYY-MM-DD_HH-MM-SS)
+    timestamp_dirs = [
+        d for d in base_dir.iterdir()
+        if d.is_dir() and len(d.name) == 19 and d.name[4] == "-" and d.name[10] == "_"
+    ]
+    if not timestamp_dirs:
+        return None
+    # Sort by name (timestamps sort lexicographically)
+    timestamp_dirs.sort(key=lambda d: d.name, reverse=True)
+    return timestamp_dirs[0].name
+
+
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Experiment runner")
@@ -51,6 +67,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="TIMESTAMP",
         help="Use specific timestamp folder (e.g., 2024-01-25_14-30-00) to continue or rerun a previous run",
+    )
+    parser.add_argument(
+        "--continue",
+        dest="continue_last",
+        action="store_true",
+        help="Continue from the most recent timestamp folder",
     )
     parser.add_argument(
         "--no-timestamp",
@@ -277,6 +299,12 @@ class Experiment:
         if args.timestamp:
             # CLI provided timestamp - use it (continue or rerun existing run)
             run_dir = base_dir / args.timestamp
+        elif args.continue_last:
+            # Continue from the most recent timestamp
+            latest = _get_latest_timestamp(base_dir)
+            if latest is None:
+                raise RuntimeError(f"No previous runs found in {base_dir}")
+            run_dir = base_dir / latest
         elif use_timestamp:
             # Generate new timestamp
             run_dir = base_dir / _generate_timestamp()

@@ -579,6 +579,53 @@ class TestOutputFolderStructure:
         timestamp_dir = tmp_path / "test_exp" / "2024-01-01_12-00-00"
         assert timestamp_dir.exists()
 
+    def test_continue_uses_latest_timestamp(self, tmp_path):
+        """--continue uses the most recent timestamp folder."""
+        @experiment(name="test_exp", timestamp=True)
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results[0].result["value"]
+
+        # Create two runs with specific timestamps
+        with patch.object(sys, "argv", ["test", "--timestamp", "2024-01-01_10-00-00"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        with patch.object(sys, "argv", ["test", "--timestamp", "2024-01-02_10-00-00"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # --continue should use the latest (2024-01-02)
+        with patch.object(sys, "argv", ["test", "--continue"]):
+            result = my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert result == 1
+        # Verify it used the latest timestamp folder
+        assert (tmp_path / "test_exp" / "2024-01-02_10-00-00").exists()
+
+    def test_continue_no_previous_runs_raises(self, tmp_path):
+        """--continue raises error when no previous runs exist."""
+        @experiment(name="new_exp", timestamp=True)
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results):
+            return results
+
+        with patch.object(sys, "argv", ["test", "--continue"]):
+            with pytest.raises(RuntimeError, match="No previous runs found"):
+                my_exp.run(output_dir=tmp_path, executor="inline")
+
     def test_name_override_in_run(self, tmp_path):
         """Can override name in run()."""
         @experiment(name="default_name", timestamp=False)
