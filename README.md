@@ -438,6 +438,147 @@ The output directory defaults to `out/` but can be customized:
 experiment.run(output_dir="results/")
 ```
 
+## Logging and Visualization
+
+pyexp includes a logging system for tracking metrics, text, and figures during experiments, with a TensorBoard-like viewer for visualization.
+
+### Installation
+
+```bash
+# With viewer support
+pip install "pyexp[viewer]"
+```
+
+### Logger
+
+Use `Logger` to record scalars, text, and figures during training:
+
+```python
+from pyexp import Logger
+
+logger = Logger("out/my_experiment/run1")
+
+for epoch in range(100):
+    logger.set_global_it(epoch)
+
+    # Log scalar metrics
+    logger.add_scalar("loss", loss_value)
+    logger.add_scalar("accuracy", acc_value)
+
+    # Log text (e.g., model outputs, debug info)
+    logger.add_text("sample_output", generated_text)
+
+    # Log figures
+    import matplotlib.pyplot as plt
+    fig, ax = plt.subplots()
+    ax.plot(history)
+
+    # interactive=True (default): renders as interactive widget in viewer
+    # interactive=False: renders as static image (faster loading)
+    logger.add_figure("training_curve", fig, interactive=False)
+
+    # 3D plots work great as interactive
+    fig_3d = plt.figure()
+    ax = fig_3d.add_subplot(111, projection='3d')
+    ax.plot_surface(X, Y, Z)
+    logger.add_figure("loss_landscape", fig_3d, interactive=True)
+
+    plt.close('all')
+
+# Flush ensures all async writes complete
+logger.flush()
+```
+
+**Storage structure:**
+```
+log_dir/
+├── .pyexp                  # Marker file identifying this as a pyexp log
+└── <iteration>/
+    ├── scalars.json        # {tag: value, ...}
+    ├── text.json           # {tag: text, ...}
+    └── figures/
+        ├── <tag>.cpkl      # Pickled figure (always saved)
+        └── <tag>.meta      # Metadata (interactive flag)
+```
+
+### LogReader
+
+Use `LogReader` to explore and load logged data programmatically:
+
+```python
+from pyexp import LogReader
+
+# Discover runs in a directory
+reader = LogReader("out/my_experiment")
+print(reader.runs)  # ['run1', 'run2', ...]
+print(reader.is_run)  # False (parent directory)
+
+# Get a specific run
+run = reader.get_run("run1")
+print(run.is_run)  # True
+print(run.iterations)  # [0, 1, 2, ..., 99]
+
+# Available tags
+print(run.scalar_tags)  # {'loss', 'accuracy'}
+print(run.text_tags)    # {'sample_output'}
+print(run.figure_tags)  # {'training_curve', 'loss_landscape'}
+
+# Load scalar time series
+loss_data = run.load_scalars("loss")  # [(0, 0.5), (1, 0.45), ...]
+
+# Load text
+texts = run.load_text("sample_output")  # [(0, "Hello..."), ...]
+
+# Load figures
+fig = run.load_figure("loss_landscape", iteration=50)
+fig.show()  # Display the matplotlib figure
+
+# Get iterations where a figure was logged
+iters = run.figure_iterations("loss_landscape")  # [0, 25, 50, 75]
+```
+
+### Viewer
+
+Launch the TensorBoard-like web viewer:
+
+```bash
+# View logs in a directory
+uv run --extra viewer python -m pyexp.viewer out/my_experiment
+
+# Or specify a port
+uv run --extra viewer python -m pyexp.viewer out/my_experiment --port 8080
+```
+
+Or from Python:
+
+```python
+from pyexp.viewer import run
+run("out/my_experiment", port=8765)
+```
+
+**Viewer features:**
+
+- **Run discovery**: Automatically finds all runs under the specified directory
+- **Multi-run selection**: Select multiple runs to compare side-by-side
+- **Tabs**: Switch between Scalars, Text, and Figures views
+
+**Scalars tab:**
+- Plotly charts with hover tooltips showing exact values
+- Multiple runs plotted on the same chart for comparison
+- Per-tag log scale toggle
+- Collapsible sections for each tag
+
+**Text tab:**
+- View logged text for each run
+- Iteration slider to browse through logged text over time
+- Collapsible sections for each tag
+
+**Figures tab:**
+- Interactive matplotlib figures (zoom, pan, rotate 3D)
+- Static image rendering for figures logged with `interactive=False`
+- Iteration slider to browse through logged figures over time
+- Collapsible sections for each tag
+
 ## API Reference
 
 ### Functions
@@ -456,6 +597,8 @@ experiment.run(output_dir="results/")
 - `SubprocessExecutor` - Runs in isolated subprocess (default)
 - `ForkExecutor` - Runs in forked process (Unix only)
 - `RayExecutor` - Runs with Ray for distributed execution
+- `Logger` - Log scalars, text, and figures during experiments
+- `LogReader` - Explore and load logged data programmatically
 
 ### Decorators
 
@@ -463,6 +606,31 @@ experiment.run(output_dir="results/")
 - `@pyexp.experiment(name="...", executor="...", timestamp=True/False)` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
+
+### Logger Methods
+
+- `Logger(log_dir)` - Create a logger for the specified directory
+- `set_global_it(it)` - Set the current iteration number
+- `add_scalar(tag, value)` - Log a scalar value
+- `add_text(tag, text)` - Log a text string
+- `add_figure(tag, figure, interactive=True)` - Log a matplotlib figure
+- `flush()` - Wait for all pending async writes to complete
+
+### LogReader Properties & Methods
+
+- `LogReader(log_dir)` - Create a reader for the specified directory
+- `path` - The log directory path
+- `is_run` - Whether this directory is a pyexp run
+- `runs` - List of run names under this directory
+- `get_run(name)` - Get a LogReader for a specific run
+- `iterations` - List of iteration numbers in this run
+- `scalar_tags` - Set of scalar tag names
+- `text_tags` - Set of text tag names
+- `figure_tags` - Set of figure tag names
+- `load_scalars(tag)` - Load scalar values as (iteration, value) pairs
+- `load_text(tag)` - Load text values as (iteration, text) pairs
+- `load_figure(tag, iteration)` - Load a figure object
+- `figure_iterations(tag)` - Get iterations where a figure was logged
 
 ### Types
 
