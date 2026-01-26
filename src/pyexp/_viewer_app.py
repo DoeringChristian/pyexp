@@ -56,25 +56,30 @@ def ScalarPlots():
         solara.Text("No scalars logged yet.")
         return
 
-    import matplotlib
-    matplotlib.use('module://ipympl.backend_nbagg')
-    import matplotlib.pyplot as plt
-    from ipympl.backend_nbagg import Canvas, FigureManager
+    import plotly.graph_objects as go
 
     for tag, values in timeseries.items():
         iterations = [v[0] for v in values]
         vals = [v[1] for v in values]
 
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ax.plot(iterations, vals, marker=".", markersize=4)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel(tag)
-        ax.set_title(tag)
-        ax.grid(True, alpha=0.3)
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=iterations,
+            y=vals,
+            mode='lines+markers',
+            marker=dict(size=4),
+            name=tag,
+            hovertemplate='Iteration: %{x}<br>Value: %{y:.6g}<extra></extra>',
+        ))
+        fig.update_layout(
+            title=tag,
+            xaxis_title='Iteration',
+            yaxis_title=tag,
+            height=300,
+            margin=dict(l=50, r=20, t=40, b=40),
+        )
 
-        canvas = Canvas(fig)
-        manager = FigureManager(canvas, 0)
-        solara.display(canvas)
+        solara.FigurePlotly(fig)
 
 
 @solara.component
