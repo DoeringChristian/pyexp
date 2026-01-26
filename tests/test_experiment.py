@@ -46,7 +46,7 @@ class TestExperimentDecorator:
             return config["x"]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return len(results)
 
         assert my_exp._report_fn is not None
@@ -65,7 +65,7 @@ class TestExperimentRun:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -81,7 +81,7 @@ class TestExperimentRun:
         def my_configs():
             return [{"name": "t", "x": 10}]
 
-        def my_report(results):
+        def my_report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
@@ -103,7 +103,7 @@ class TestExperimentRun:
             return [{"name": "cached", "x": 42}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -129,7 +129,7 @@ class TestExperimentRun:
             return [{"name": "rerun", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -152,7 +152,7 @@ class TestExperimentRun:
             return [{"name": "rep", "x": 99}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         # First run to create cache
@@ -175,7 +175,7 @@ class TestExperimentRun:
             return [{"name": "nocache", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test", "--report"]):
@@ -194,7 +194,7 @@ class TestExperimentRun:
             return [{"name": "dir", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -216,7 +216,7 @@ class TestExperimentRun:
             return [{"name": "outdir", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -241,7 +241,7 @@ class TestExperimentRun:
             return [{"name": "type", "nested": {"a": 1}}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -257,7 +257,7 @@ class TestExperimentRun:
             return 1
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -287,7 +287,7 @@ class TestExperimentRun:
             return [{"name": "bad", "out": "/some/path"}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -308,7 +308,7 @@ class TestExperimentRun:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
@@ -329,7 +329,7 @@ class TestExperimentRun:
             return [{"name": "a", "x": 1}, {"name": "b", "x": 2}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             nonlocal received_results
             received_results = results
             return None
@@ -353,7 +353,7 @@ class TestExperimentRun:
             return [{"name": "test", "lr": 0.01, "epochs": 10}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             nonlocal received_results
             received_results = results
             return None
@@ -385,7 +385,7 @@ class TestExperimentRun:
             return cfgs
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             nonlocal received_results
             received_results = results
             return None
@@ -419,7 +419,7 @@ class TestExperimentRun:
             return cfgs
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             nonlocal received_results
             received_results = results
             return None
@@ -444,7 +444,7 @@ class TestExperimentRun:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             nonlocal received_results
             received_results = results
             return None
@@ -504,7 +504,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -519,10 +519,11 @@ class TestOutputFolderStructure:
         assert len(timestamp_dirs) == 1
         assert timestamp_dirs[0].is_dir()
 
-        # Timestamp folder should contain config folder
-        config_dirs = list(timestamp_dirs[0].iterdir())
+        # Timestamp folder should contain config folder and report folder
+        contents = list(timestamp_dirs[0].iterdir())
+        config_dirs = [d for d in contents if d.name.startswith("cfg-")]
         assert len(config_dirs) == 1
-        assert config_dirs[0].name.startswith("cfg-")
+        assert (timestamp_dirs[0] / "report").exists()
 
     def test_output_structure_without_timestamp(self, tmp_path):
         """Output folder has no timestamp when timestamp=False."""
@@ -535,7 +536,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -545,10 +546,11 @@ class TestOutputFolderStructure:
         exp_dir = tmp_path / "test_exp"
         assert exp_dir.exists()
 
-        # Should directly contain config folder (no timestamp)
-        config_dirs = list(exp_dir.iterdir())
+        # Should directly contain config folder and report folder (no timestamp)
+        contents = list(exp_dir.iterdir())
+        config_dirs = [d for d in contents if d.name.startswith("cfg-")]
         assert len(config_dirs) == 1
-        assert config_dirs[0].name.startswith("cfg-")
+        assert (exp_dir / "report").exists()
 
     def test_cli_timestamp_continues_run(self, tmp_path):
         """--timestamp CLI arg continues a specific run."""
@@ -561,7 +563,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         # First run with specific timestamp
@@ -590,7 +592,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         # Create two runs with specific timestamps
@@ -619,7 +621,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test", "--continue"]):
@@ -637,7 +639,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -658,7 +660,7 @@ class TestOutputFolderStructure:
             return [{"name": "cfg", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -666,9 +668,10 @@ class TestOutputFolderStructure:
 
         # Should have no timestamp folder
         exp_dir = tmp_path / "test_exp"
-        config_dirs = list(exp_dir.iterdir())
+        contents = list(exp_dir.iterdir())
+        config_dirs = [d for d in contents if d.name.startswith("cfg-")]
         assert len(config_dirs) == 1
-        assert config_dirs[0].name.startswith("cfg-")
+        assert (exp_dir / "report").exists()
 
 
 class TestExecutorSystem:
@@ -705,7 +708,7 @@ class TestExecutorSystem:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -726,7 +729,7 @@ class TestExecutorSystem:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -749,7 +752,7 @@ class TestSubprocessExecution:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -768,7 +771,7 @@ class TestSubprocessExecution:
             return [{"name": "failing", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0]
 
         with patch.object(sys, "argv", ["test"]):
@@ -796,7 +799,7 @@ class TestSubprocessExecution:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -825,7 +828,7 @@ class TestSubprocessExecution:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
@@ -847,7 +850,7 @@ class TestSubprocessExecution:
             return cfgs
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -875,7 +878,7 @@ class TestForkExecution:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -894,7 +897,7 @@ class TestForkExecution:
             return [{"name": "failing", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0]
 
         with patch.object(sys, "argv", ["test"]):
@@ -922,7 +925,7 @@ class TestForkExecution:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -951,7 +954,7 @@ class TestForkExecution:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
@@ -970,7 +973,7 @@ class TestForkExecution:
             return [{"name": "test", "x": 7}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -992,7 +995,7 @@ class TestForkExecution:
             return cfgs
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results
 
         with patch.object(sys, "argv", ["test"]):
@@ -1035,7 +1038,7 @@ class TestRayExecution:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         # This will use local Ray since we don't have a cluster
@@ -1070,7 +1073,7 @@ class TestRayExecution:
             return [{"name": "test", "x": 42}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -1089,7 +1092,7 @@ class TestRayExecution:
             return [{"name": "test", "x": 5}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -1108,7 +1111,7 @@ class TestRayExecution:
             return [{"name": "failing", "x": 1}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0]
 
         with patch.object(sys, "argv", ["test"]):
@@ -1134,7 +1137,7 @@ class TestRayExecution:
             ]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):
@@ -1153,7 +1156,7 @@ class TestRayExecution:
             return [{"name": "test", "x": 7}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return results[0].result["value"]
 
         with patch.object(sys, "argv", ["test"]):
@@ -1193,7 +1196,7 @@ class TestCustomExecutor:
             return [{"name": "a", "x": 1}, {"name": "b", "x": 2}]
 
         @my_exp.report
-        def report(results):
+        def report(results, out):
             return [r.result["value"] for r in results]
 
         with patch.object(sys, "argv", ["test"]):

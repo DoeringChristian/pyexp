@@ -195,7 +195,7 @@ class Experiment:
         self._executor_default = executor
         self._timestamp_default = timestamp
         self._configs_fn: Callable[[], list[dict]] | None = None
-        self._report_fn: Callable[[Tensor], Any] | None = None
+        self._report_fn: Callable[[Tensor, Path], Any] | None = None
         wraps(fn)(self)
 
     def __call__(self, config: dict) -> Any:
@@ -207,11 +207,12 @@ class Experiment:
         self._configs_fn = fn
         return fn
 
-    def report(self, fn: Callable[[Tensor], Any]) -> Callable[[Tensor], Any]:
+    def report(self, fn: Callable[[Tensor, Path], Any]) -> Callable[[Tensor, Path], Any]:
         """Decorator to register the report function.
 
-        The report function receives a single Tensor of results. Each result
-        contains the experiment output plus 'config' and 'name' keys for filtering.
+        The report function receives:
+            results: A Tensor of Result objects with .config, .result, .error, .log
+            out: Path to a 'report' directory for saving outputs (plots, tables, etc.)
         """
         self._report_fn = fn
         return fn
@@ -219,7 +220,7 @@ class Experiment:
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
-        report: Callable[[Tensor], Any] | None = None,
+        report: Callable[[Tensor, Path], Any] | None = None,
         output_dir: str | Path = "out",
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
@@ -229,8 +230,9 @@ class Experiment:
 
         Args:
             configs: Optional configs function. If not provided, uses @experiment.configs decorated function.
-            report: Optional report function. If not provided, uses @experiment.report decorated function.
-                    Receives a Tensor where each result has 'config' and 'name' keys.
+            report: Optional report function (results, out) -> Any. If not provided, uses
+                    @experiment.report decorated function. Receives a Tensor of Results and
+                    a Path to the report directory for saving outputs.
             output_dir: Base directory for caching experiment results. Defaults to "out".
             executor: Execution strategy for running experiments. Can be:
                 - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
@@ -247,6 +249,7 @@ class Experiment:
         Output folder structure:
             - timestamp=True:  out/<name>/<timestamp>/<config_name>-<hash>/
             - timestamp=False: out/<name>/<config_name>-<hash>/
+            - Report directory: out/<name>/<timestamp>/report/
         """
         args = _parse_args()
 
@@ -377,7 +380,11 @@ class Experiment:
 
         results = Tensor(results, shape)
 
-        return report_fn(results)
+        # Create report directory
+        report_dir = run_dir / "report"
+        report_dir.mkdir(parents=True, exist_ok=True)
+
+        return report_fn(results, report_dir)
 
 
 def experiment(
