@@ -604,13 +604,13 @@ def experiment(
             return [{"name": "exp", "lr": 0.01}, {"name": "exp2", "lr": 0.001}]
 
         @my_experiment.report
-        def report(results):
-            # Each result has 'name', 'config', and experiment outputs
+        def report(results, report_dir):
+            # Each result has .name, .config, .result, .error, .log, .logger
             # Filter by config values:
             lr_001 = results[{"config.lr": 0.001}]
             # Access fields:
             for r in results:
-                print(f"{r['name']}: {r['accuracy']}")
+                print(f"{r.name}: {r.result['accuracy']}")
 
         my_experiment.run()
 

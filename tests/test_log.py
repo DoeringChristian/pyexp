@@ -7,6 +7,17 @@ import pytest
 from pyexp import Logger
 
 
+def _read_jsonl(path):
+    """Read a JSONL file and return list of parsed entries."""
+    entries = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entries.append(json.loads(line))
+    return entries
+
+
 class TestLogger:
     """Tests for Logger functionality."""
 
@@ -32,17 +43,17 @@ class TestLogger:
         assert logger._global_it == 500
 
     def test_add_scalar(self, tmp_path):
-        """add_scalar should save scalars to iteration folder."""
+        """add_scalar should append to scalars.jsonl."""
         logger = Logger(tmp_path)
         logger.set_global_it(10)
         logger.add_scalar("loss", 0.5)
         logger.flush()
 
-        scalars_path = tmp_path / "10" / "scalars.json"
+        scalars_path = tmp_path / "scalars.jsonl"
         assert scalars_path.exists()
 
-        data = json.loads(scalars_path.read_text())
-        assert data == {"loss": 0.5}
+        entries = _read_jsonl(scalars_path)
+        assert entries == [{"it": 10, "tag": "loss", "value": 0.5}]
 
     def test_add_scalar_multiple_tags_same_iteration(self, tmp_path):
         """Multiple scalars at same iteration should be in same file."""
@@ -53,11 +64,14 @@ class TestLogger:
         logger.add_scalar("accuracy", 0.9)
         logger.flush()
 
-        data = json.loads((tmp_path / "1" / "scalars.json").read_text())
-        assert data == {"loss": 0.5, "accuracy": 0.9}
+        entries = _read_jsonl(tmp_path / "scalars.jsonl")
+        assert entries == [
+            {"it": 1, "tag": "loss", "value": 0.5},
+            {"it": 1, "tag": "accuracy", "value": 0.9},
+        ]
 
     def test_add_scalar_different_iterations(self, tmp_path):
-        """Scalars at different iterations should be in separate folders."""
+        """Scalars at different iterations should all be in scalars.jsonl."""
         logger = Logger(tmp_path)
 
         logger.set_global_it(1)
@@ -70,22 +84,25 @@ class TestLogger:
         logger.add_scalar("loss", 0.5)
         logger.flush()
 
-        assert json.loads((tmp_path / "1" / "scalars.json").read_text()) == {"loss": 1.0}
-        assert json.loads((tmp_path / "2" / "scalars.json").read_text()) == {"loss": 0.8}
-        assert json.loads((tmp_path / "3" / "scalars.json").read_text()) == {"loss": 0.5}
+        entries = _read_jsonl(tmp_path / "scalars.jsonl")
+        assert entries == [
+            {"it": 1, "tag": "loss", "value": 1.0},
+            {"it": 2, "tag": "loss", "value": 0.8},
+            {"it": 3, "tag": "loss", "value": 0.5},
+        ]
 
     def test_add_text(self, tmp_path):
-        """add_text should save text to iteration folder."""
+        """add_text should append to text.jsonl."""
         logger = Logger(tmp_path)
         logger.set_global_it(10)
         logger.add_text("info", "Training started")
         logger.flush()
 
-        text_path = tmp_path / "10" / "text.json"
+        text_path = tmp_path / "text.jsonl"
         assert text_path.exists()
 
-        data = json.loads(text_path.read_text())
-        assert data == {"info": "Training started"}
+        entries = _read_jsonl(text_path)
+        assert entries == [{"it": 10, "tag": "info", "text": "Training started"}]
 
     def test_add_text_multiple_tags_same_iteration(self, tmp_path):
         """Multiple texts at same iteration should be in same file."""
@@ -96,11 +113,14 @@ class TestLogger:
         logger.add_text("debug", "Debug message")
         logger.flush()
 
-        data = json.loads((tmp_path / "1" / "text.json").read_text())
-        assert data == {"info": "Info message", "debug": "Debug message"}
+        entries = _read_jsonl(tmp_path / "text.jsonl")
+        assert entries == [
+            {"it": 1, "tag": "info", "text": "Info message"},
+            {"it": 1, "tag": "debug", "text": "Debug message"},
+        ]
 
     def test_add_text_different_iterations(self, tmp_path):
-        """Texts at different iterations should be in separate folders."""
+        """Texts at different iterations should all be in text.jsonl."""
         logger = Logger(tmp_path)
 
         logger.set_global_it(1)
@@ -110,8 +130,11 @@ class TestLogger:
         logger.add_text("log", "Second message")
         logger.flush()
 
-        assert json.loads((tmp_path / "1" / "text.json").read_text()) == {"log": "First message"}
-        assert json.loads((tmp_path / "5" / "text.json").read_text()) == {"log": "Second message"}
+        entries = _read_jsonl(tmp_path / "text.jsonl")
+        assert entries == [
+            {"it": 1, "tag": "log", "text": "First message"},
+            {"it": 5, "tag": "log", "text": "Second message"},
+        ]
 
     def test_add_figure(self, tmp_path):
         """add_figure should save figure to iteration folder."""
@@ -165,8 +188,8 @@ class TestLogger:
         logger.add_scalar("test", 1.0)
         logger.flush()
 
-        data = json.loads((tmp_path / "0" / "scalars.json").read_text())
-        assert data == {"test": 1.0}
+        entries = _read_jsonl(tmp_path / "scalars.jsonl")
+        assert entries == [{"it": 0, "tag": "test", "value": 1.0}]
 
     def test_mixed_types_same_iteration(self, tmp_path):
         """Scalars, text, and figures at same iteration should coexist."""
@@ -178,11 +201,13 @@ class TestLogger:
         logger.add_figure("chart", {"data": [1, 2, 3]})
         logger.flush()
 
-        it_dir = tmp_path / "42"
-        assert json.loads((it_dir / "scalars.json").read_text()) == {"loss": 0.5}
-        assert json.loads((it_dir / "text.json").read_text()) == {"status": "running"}
+        scalar_entries = _read_jsonl(tmp_path / "scalars.jsonl")
+        assert scalar_entries == [{"it": 42, "tag": "loss", "value": 0.5}]
 
-        with open(it_dir / "figures" / "chart.cpkl", "rb") as f:
+        text_entries = _read_jsonl(tmp_path / "text.jsonl")
+        assert text_entries == [{"it": 42, "tag": "status", "text": "running"}]
+
+        with open(tmp_path / "42" / "figures" / "chart.cpkl", "rb") as f:
             assert cloudpickle.load(f) == {"data": [1, 2, 3]}
 
     def test_flush_waits_for_pending_writes(self, tmp_path):
@@ -196,10 +221,11 @@ class TestLogger:
 
         logger.flush()
 
-        # All iteration folders should exist
-        for i in range(100):
-            data = json.loads((tmp_path / str(i) / "scalars.json").read_text())
-            assert data == {"test": float(i)}
+        # All entries should be in scalars.jsonl
+        entries = _read_jsonl(tmp_path / "scalars.jsonl")
+        assert len(entries) == 100
+        for i, entry in enumerate(entries):
+            assert entry == {"it": i, "tag": "test", "value": float(i)}
 
     def test_async_saving_does_not_block(self, tmp_path):
         """add_* methods should return immediately without blocking."""
@@ -216,3 +242,8 @@ class TestLogger:
         assert elapsed < 0.1
 
         logger.flush()
+
+    def test_marker_file_created(self, tmp_path):
+        """Logger should create .pyexp marker file."""
+        Logger(tmp_path)
+        assert (tmp_path / ".pyexp").exists()

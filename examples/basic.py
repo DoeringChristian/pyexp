@@ -25,16 +25,16 @@ def configs() -> list[dict]:
 
 
 @experiment.report
-def report(results):
+def report(results, report_dir):
     """Generate report from all experiment results.
 
-    Each result contains 'name', 'config', and experiment outputs.
+    Each result has: .name, .config, .result, .error, .log
     """
     print("\n=== Experiment Report ===")
     for r in results:
-        print(f"Config: {r['name']} -> Accuracy: {r['accuracy']:.4f}")
-    best_idx = max(range(len(results)), key=lambda i: results[i]["accuracy"])
-    print(f"\nBest: {results[best_idx]['name']} with accuracy {results[best_idx]['accuracy']:.4f}")
+        print(f"Config: {r.name} -> Accuracy: {r.result['accuracy']:.4f}")
+    best = max(results, key=lambda r: r.result["accuracy"])
+    print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
 
 
 if __name__ == "__main__":

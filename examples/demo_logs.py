@@ -100,15 +100,15 @@ def report(results: ResultTensor, report_dir):
     """Print final results."""
     print("\nResults:")
     for r in results:
-        it, loss = r.logger["loss"]
-        it, fig = r.logger["loss_landscape_3d"]
-        r.logger
-        if r.get("error"):
-            print(f"  {r['name']}: ERROR - {r['error']}")
+        if r.error:
+            print(f"  {r.name}: ERROR - {r.error}")
         else:
-            res = r["result"]
+            # Access logged data via LogReader
+            it, loss = r.logger["loss"]
+            it, fig = r.logger["loss_landscape_3d"]
+            res = r.result
             print(
-                f"  {r['name']}: loss={res['final_loss']:.4f}, accuracy={res['final_accuracy']:.4f}"
+                f"  {r.name}: loss={res['final_loss']:.4f}, accuracy={res['final_accuracy']:.4f}"
             )
 
     print(

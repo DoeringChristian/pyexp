@@ -341,7 +341,7 @@ Filter results using pattern matching or dict queries:
 
 ```python
 @experiment.report
-def report(results):
+def report(results, report_dir):
     # Pattern matching on name (glob-style)
     lr01_results = results["exp_lr0.1_*"]  # All with lr0.1
     epoch10_results = results["*_e10"]      # All with e10
@@ -362,7 +362,7 @@ Results preserve the shape from sweep operations:
 
 ```python
 @experiment.report
-def report(results):
+def report(results, report_dir):
     # Shape is (1, 2, 2) from sweeps
     print(results.shape)
 
@@ -371,7 +371,7 @@ def report(results):
 
     # Access individual result
     r = results[0, 1, 0]
-    print(r["name"], r["accuracy"])
+    print(r.name, r.result["accuracy"])
 ```
 
 ### Custom Executors
