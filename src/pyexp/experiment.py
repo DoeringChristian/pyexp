@@ -66,8 +66,12 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Experiment runner")
     parser.add_argument(
         "--report",
-        action="store_true",
-        help="Skip experiments and only generate report from cached results",
+        nargs="?",
+        const="latest",
+        default=None,
+        metavar="TIMESTAMP",
+        help="Generate report from cached results. Without argument, uses the most recent run. "
+        "With argument (e.g., --report=2024-01-25_14-30-00), uses that specific run.",
     )
     parser.add_argument(
         "--continue",
@@ -377,11 +381,9 @@ class Experiment:
 
         base_dir = Path(resolved_output_dir) / exp_name
 
-        # --report requires --continue (otherwise we'd create an empty new run)
-        if args.report and not args.continue_run:
-            raise RuntimeError(
-                "--report requires --continue to specify which run to report from"
-            )
+        # --report implies --continue (use report's timestamp or latest)
+        if args.report is not None and not args.continue_run:
+            args.continue_run = args.report
 
         # Determine the run directory (always timestamped)
         if args.continue_run:
@@ -623,7 +625,7 @@ def experiment(
         --output-dir DIR      Override output directory
         --continue [TIMESTAMP] Continue a previous run (latest if no timestamp given)
         --retry N             Number of retries on failure (default: 4)
-        --report              Only generate report from cached results
+        --report [TIMESTAMP]  Generate report from cached results (latest run or specific timestamp)
         -s, --capture=no      Show subprocess output instead of progress bar
         --viewer              Start the viewer after experiments complete
         --viewer-port PORT    Port for the viewer (default: 8765)

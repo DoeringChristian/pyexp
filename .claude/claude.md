@@ -17,7 +17,7 @@ All decorator and `run()` function arguments should be overridable via CLI argum
 | `--executor EXECUTOR` | `executor` parameter | `"subprocess"` |
 | `--output-dir DIR` | `output_dir` parameter | `"out"` |
 | `--continue [TIMESTAMP]` | continue previous run (latest if no arg) | new timestamp |
-| `--report` | skip experiments, report only | - |
+| `--report [TIMESTAMP]` | report from cache (latest or specific run) | - |
 | `-s`, `--capture=no` | show live output | captured |
 
 ### Adding New Parameters
