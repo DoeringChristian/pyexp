@@ -128,6 +128,7 @@ def load_iterations(log_path: Path) -> list[int]:
 def load_figure(fig_path: Path) -> Any:
     """Load a figure from cloudpickle file."""
     import cloudpickle
+
     with open(fig_path, "rb") as f:
         try:
             return cloudpickle.load(f)
@@ -191,7 +192,15 @@ def run(log_path: str | Path | None = None, port: int = 8765):
 
     # Run solara with this module
     subprocess.run(
-        [sys.executable, "-m", "solara", "run", "pyexp._viewer_app:Page", "--port", str(port)],
+        [
+            sys.executable,
+            "-m",
+            "solara",
+            "run",
+            "pyexp._viewer_app:Page",
+            "--port",
+            str(port),
+        ],
         check=True,
     )
 

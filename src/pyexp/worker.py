@@ -55,14 +55,21 @@ def run_worker(payload_path: str) -> int:
             logger = Logger(config["out"])
 
             # Log config as YAML at iteration 0
-            config_to_log = {k: v for k, v in config.items() if not k.startswith("_") and k not in ("out", "logger")}
-            logger.add_text("config", yaml.dump(config_to_log, default_flow_style=False))
+            config_to_log = {
+                k: v
+                for k, v in config.items()
+                if not k.startswith("_") and k not in ("out", "logger")
+            }
+            logger.add_text(
+                "config", yaml.dump(config_to_log, default_flow_style=False)
+            )
 
             # Log git commit hash if stash enabled
             stash_enabled = config.get("_stash", True)
             if stash_enabled:
                 try:
                     from pyexp.utils import stash as git_stash
+
                     commit_hash = git_stash()
                     logger.add_text("git_commit", commit_hash)
                 except Exception:

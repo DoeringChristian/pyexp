@@ -96,20 +96,22 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             values = [d[1] for d in data]
 
             run_name = str(run.relative_to(root_path)) if run != root_path else "."
-            fig.add_trace(go.Scatter(
-                x=iterations,
-                y=values,
-                mode='lines+markers',
-                marker=dict(size=4),
-                name=run_name,
-                hovertemplate=f'{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>',
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=iterations,
+                    y=values,
+                    mode="lines+markers",
+                    marker=dict(size=4),
+                    name=run_name,
+                    hovertemplate=f"{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>",
+                )
+            )
 
     fig.update_layout(
         title=tag,
-        xaxis_title='Iteration',
+        xaxis_title="Iteration",
         yaxis_title=tag,
-        yaxis_type='log' if log_scale.value else 'linear',
+        yaxis_type="log" if log_scale.value else "linear",
         height=350,
         margin=dict(l=50, r=20, t=40, b=40),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
@@ -230,6 +232,7 @@ def FigureItem(run: Path, tag: str, root_path: Path, data: list):
                 StaticFigure(fig_path)
         except Exception as e:
             import traceback
+
             solara.Error(f"Failed: {e}\n{traceback.format_exc()}")
 
 
@@ -267,7 +270,8 @@ def FiguresPanel():
 def InteractiveFigure(fig_path: Path):
     """Display a matplotlib figure interactively using ipympl."""
     import matplotlib
-    matplotlib.use('module://ipympl.backend_nbagg')
+
+    matplotlib.use("module://ipympl.backend_nbagg")
     from ipympl.backend_nbagg import Canvas, FigureManager
 
     # Load the pickled figure
@@ -291,7 +295,8 @@ def StaticFigure(fig_path: Path):
     import io
 
     import matplotlib
-    matplotlib.use('Agg')
+
+    matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     # Load the pickled figure
@@ -302,9 +307,9 @@ def StaticFigure(fig_path: Path):
 
     # Render to PNG
     buf = io.BytesIO()
-    mpl_fig.savefig(buf, format='png', dpi=100, bbox_inches='tight')
+    mpl_fig.savefig(buf, format="png", dpi=100, bbox_inches="tight")
     buf.seek(0)
-    img_data = base64.b64encode(buf.read()).decode('utf-8')
+    img_data = base64.b64encode(buf.read()).decode("utf-8")
     plt.close(mpl_fig)
 
     # Display as HTML img tag
@@ -320,6 +325,7 @@ def StaticFigure(fig_path: Path):
 @solara.component
 def RefreshButton():
     """Manual refresh button."""
+
     def do_refresh():
         refresh_counter.set(refresh_counter.value + 1)
 

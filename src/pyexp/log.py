@@ -9,7 +9,6 @@ from typing import Any
 
 import cloudpickle
 
-
 # File names for storage
 SCALARS_FILE = "scalars.jsonl"
 TEXT_FILE = "text.jsonl"
@@ -275,7 +274,9 @@ class LogReader:
             raise ValueError("Not a run directory. Use get_run() first.")
         ckpt_path = self._log_dir / str(iteration) / "checkpoints" / f"{tag}.cpkl"
         if not ckpt_path.exists():
-            raise FileNotFoundError(f"Checkpoint not found: {tag} at iteration {iteration}")
+            raise FileNotFoundError(
+                f"Checkpoint not found: {tag} at iteration {iteration}"
+            )
         with open(ckpt_path, "rb") as f:
             return cloudpickle.load(f)
 

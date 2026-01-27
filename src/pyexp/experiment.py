@@ -50,7 +50,8 @@ def _get_latest_timestamp(base_dir: Path) -> str | None:
         return None
     # List directories that look like timestamps (YYYY-MM-DD_HH-MM-SS)
     timestamp_dirs = [
-        d for d in base_dir.iterdir()
+        d
+        for d in base_dir.iterdir()
         if d.is_dir() and len(d.name) == 19 and d.name[4] == "-" and d.name[10] == "_"
     ]
     if not timestamp_dirs:
@@ -81,7 +82,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         metavar="TIMESTAMP",
         help="Continue from a previous run. Without argument, continues the most recent. "
-             "With argument (e.g., --continue=2024-01-25_14-30-00), continues that specific run.",
+        "With argument (e.g., --continue=2024-01-25_14-30-00), continues that specific run.",
     )
     parser.add_argument(
         "-s",
@@ -169,6 +170,7 @@ class _ProgressBar:
     def _render(self, name: str = "", running: bool = False):
         """Render the progress bar."""
         import sys
+
         pct = self.current / self.total if self.total > 0 else 1
         filled = int(self.width * pct)
         bar = "█" * filled + "░" * (self.width - filled)
@@ -203,6 +205,7 @@ class _ProgressBar:
     def finish(self):
         """Print final summary."""
         import sys
+
         sys.stderr.write("\n")
         sys.stderr.flush()
 
@@ -252,7 +255,9 @@ class Experiment:
         self._configs_fn = fn
         return fn
 
-    def report(self, fn: Callable[[Tensor, Path], Any]) -> Callable[[Tensor, Path], Any]:
+    def report(
+        self, fn: Callable[[Tensor, Path], Any]
+    ) -> Callable[[Tensor, Path], Any]:
         """Decorator to register the report function.
 
         The report function receives:
@@ -347,10 +352,14 @@ class Experiment:
             exec_instance = resolved_executor
         # Parse "ray://..." (Ray URI) or "ray:<address>" format for remote Ray execution
         elif isinstance(resolved_executor, str) and (
-            resolved_executor.startswith("ray://") or
-            (resolved_executor.startswith("ray:") and not resolved_executor.startswith("ray://"))
+            resolved_executor.startswith("ray://")
+            or (
+                resolved_executor.startswith("ray:")
+                and not resolved_executor.startswith("ray://")
+            )
         ):
             from .executors import RayExecutor
+
             if resolved_executor.startswith("ray://"):
                 address = resolved_executor  # Use full URI as address
             else:
@@ -363,15 +372,21 @@ class Experiment:
             exec_instance = get_executor(resolved_executor)
 
         if configs_fn is None:
-            raise RuntimeError("No configs function provided. Use @experiment.configs or pass configs= argument.")
+            raise RuntimeError(
+                "No configs function provided. Use @experiment.configs or pass configs= argument."
+            )
         if report_fn is None:
-            raise RuntimeError("No report function provided. Use @experiment.report or pass report= argument.")
+            raise RuntimeError(
+                "No report function provided. Use @experiment.report or pass report= argument."
+            )
 
         base_dir = Path(resolved_output_dir) / exp_name
 
         # --report requires --continue (otherwise we'd create an empty new run)
         if args.report and not args.continue_run:
-            raise RuntimeError("--report requires --continue to specify which run to report from")
+            raise RuntimeError(
+                "--report requires --continue to specify which run to report from"
+            )
 
         # Determine the run directory (always timestamped)
         if args.continue_run:
@@ -398,10 +413,19 @@ class Experiment:
         viewer_process = None
         if start_viewer:
             import subprocess as sp
+
             run_dir.mkdir(parents=True, exist_ok=True)
             print(f"Viewer: http://localhost:{resolved_viewer_port}")
             viewer_process = sp.Popen(
-                [sys.executable, "-m", "solara", "run", "pyexp._viewer_app:Page", "--port", str(resolved_viewer_port)],
+                [
+                    sys.executable,
+                    "-m",
+                    "solara",
+                    "run",
+                    "pyexp._viewer_app:Page",
+                    "--port",
+                    str(resolved_viewer_port),
+                ],
                 env={**os.environ, "PYEXP_LOG_DIR": str(run_dir.absolute())},
                 stdout=sp.DEVNULL,
                 stderr=sp.DEVNULL,
@@ -425,14 +449,18 @@ class Experiment:
         results = []
 
         for config in flat_configs:
-            assert "out" not in config, "Config cannot contain 'out' key; it is reserved"
+            assert (
+                "out" not in config
+            ), "Config cannot contain 'out' key; it is reserved"
             experiment_dir = _get_experiment_dir(config, run_dir)
             result_path = experiment_dir / "result.pkl"
             config_name = config.get("name", "")
 
             if args.report:
                 if not result_path.exists():
-                    raise RuntimeError(f"No cached result for config {config}. Run experiments first.")
+                    raise RuntimeError(
+                        f"No cached result for config {config}. Run experiments first."
+                    )
                 with open(result_path, "rb") as f:
                     structured = pickle.load(f)
                 status = "cached"
@@ -441,12 +469,14 @@ class Experiment:
                 marker_path.touch(exist_ok=True)
             elif args.rerun or not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_with_out = Config({
-                    **config,
-                    "out": experiment_dir,
-                    "_stash": enable_stash,
-                    "_wants_logger": self._wants_logger,
-                })
+                config_with_out = Config(
+                    {
+                        **config,
+                        "out": experiment_dir,
+                        "_stash": enable_stash,
+                        "_wants_logger": self._wants_logger,
+                    }
+                )
 
                 # Show running status
                 if progress:
@@ -455,7 +485,10 @@ class Experiment:
                 # Retry loop
                 for attempt in range(max_retries + 1):
                     structured = exec_instance.run(
-                        self._fn, config_with_out, result_path, capture=not args.no_capture
+                        self._fn,
+                        config_with_out,
+                        result_path,
+                        capture=not args.no_capture,
                     )
                     if not structured.get("error"):
                         break  # Success, exit retry loop
@@ -602,12 +635,29 @@ def experiment(
 
     Priority: CLI args > run() args > decorator args
     """
+
     def decorator(f: Callable[[dict], Any]) -> Experiment:
-        return Experiment(f, name=name, executor=executor, retry=retry, viewer=viewer, viewer_port=viewer_port, stash=stash)
+        return Experiment(
+            f,
+            name=name,
+            executor=executor,
+            retry=retry,
+            viewer=viewer,
+            viewer_port=viewer_port,
+            stash=stash,
+        )
 
     if fn is not None:
         # Called without arguments: @experiment
-        return Experiment(fn, name=name, executor=executor, retry=retry, viewer=viewer, viewer_port=viewer_port, stash=stash)
+        return Experiment(
+            fn,
+            name=name,
+            executor=executor,
+            retry=retry,
+            viewer=viewer,
+            viewer_port=viewer_port,
+            stash=stash,
+        )
     else:
         # Called with arguments: @experiment(name="mnist", executor="fork")
         return decorator
