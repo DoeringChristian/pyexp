@@ -61,6 +61,60 @@ def _get_latest_timestamp(base_dir: Path) -> str | None:
     return timestamp_dirs[0].name
 
 
+def _list_runs(base_dir: Path) -> None:
+    """List all runs under the experiment base directory with their status."""
+    if not base_dir.exists():
+        print("No runs found.")
+        return
+
+    timestamp_dirs = [
+        d
+        for d in base_dir.iterdir()
+        if d.is_dir() and len(d.name) == 19 and d.name[4] == "-" and d.name[10] == "_"
+    ]
+    if not timestamp_dirs:
+        print("No runs found.")
+        return
+
+    timestamp_dirs.sort(key=lambda d: d.name)
+
+    for run_dir in timestamp_dirs:
+        # Scan config directories inside the run
+        config_dirs = [
+            d for d in run_dir.iterdir()
+            if d.is_dir() and d.name != "report"
+        ]
+        total = len(config_dirs)
+        completed = 0
+        failed = 0
+        for config_dir in config_dirs:
+            result_path = config_dir / "result.pkl"
+            if result_path.exists():
+                try:
+                    with open(result_path, "rb") as f:
+                        structured = pickle.load(f)
+                    if structured.get("error"):
+                        failed += 1
+                    else:
+                        completed += 1
+                except Exception:
+                    failed += 1
+
+        pending = total - completed - failed
+
+        # Build status string
+        parts = []
+        if completed:
+            parts.append(f"\033[32m{completed} passed\033[0m")
+        if failed:
+            parts.append(f"\033[31m{failed} failed\033[0m")
+        if pending:
+            parts.append(f"\033[33m{pending} pending\033[0m")
+        status = ", ".join(parts) if parts else "empty"
+
+        print(f"  {run_dir.name}  {status}  ({total} configs)")
+
+
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Experiment runner")
@@ -135,6 +189,11 @@ def _parse_args() -> argparse.Namespace:
         "--no-stash",
         action="store_true",
         help="Disable git stash (don't capture repository state)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all previous runs with their status",
     )
     return parser.parse_args()
 
@@ -381,6 +440,12 @@ class Experiment:
 
         base_dir = Path(resolved_output_dir) / exp_name
 
+        # --list: show all runs and exit
+        if args.list:
+            print(f"Runs for {exp_name}:")
+            _list_runs(base_dir)
+            return None
+
         # --report implies --continue (use report's timestamp or latest)
         if args.report is not None and not args.continue_run:
             args.continue_run = args.report
@@ -626,6 +691,7 @@ def experiment(
         --continue [TIMESTAMP] Continue a previous run (latest if no timestamp given)
         --retry N             Number of retries on failure (default: 4)
         --report [TIMESTAMP]  Generate report from cached results (latest run or specific timestamp)
+        --list                List all previous runs with their status
         -s, --capture=no      Show subprocess output instead of progress bar
         --viewer              Start the viewer after experiments complete
         --viewer-port PORT    Port for the viewer (default: 8765)

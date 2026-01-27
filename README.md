@@ -413,6 +413,7 @@ CLI arguments can override settings from the decorator or `run()` function.
 | `--output-dir DIR` | Override output directory |
 | `--continue [TIMESTAMP]` | Continue a previous run. Without argument, continues most recent. With argument, continues that specific timestamp. |
 | `--report [TIMESTAMP]` | Generate report from cache. Without argument, uses most recent run. With argument, uses that specific timestamp. |
+| `--list` | List all previous runs with their status |
 | `-s`, `--capture=no` | Show subprocess output instead of progress bar |
 | `--viewer` | Start the viewer after experiments complete |
 | `--viewer-port PORT` | Port for the viewer (default: 8765) |

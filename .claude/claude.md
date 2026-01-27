@@ -18,6 +18,7 @@ All decorator and `run()` function arguments should be overridable via CLI argum
 | `--output-dir DIR` | `output_dir` parameter | `"out"` |
 | `--continue [TIMESTAMP]` | continue previous run (latest if no arg) | new timestamp |
 | `--report [TIMESTAMP]` | report from cache (latest or specific run) | - |
+| `--list` | list all runs with status | - |
 | `-s`, `--capture=no` | show live output | captured |
 
 ### Adding New Parameters
