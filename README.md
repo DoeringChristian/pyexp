@@ -54,7 +54,6 @@ Each run creates a new timestamped folder. Use `--continue` to resume a previous
 python main.py                              # New run (new timestamp)
 python main.py --continue                   # Continue most recent run
 python main.py --continue=2024-01-25_14-30-00  # Continue specific run
-python main.py --continue --rerun           # Rerun all experiments in last run
 python main.py --continue --report          # Report from most recent run
 ```
 
@@ -413,7 +412,6 @@ CLI arguments can override settings from the decorator or `run()` function.
 | `--output-dir DIR` | Override output directory |
 | `--continue [TIMESTAMP]` | Continue a previous run. Without argument, continues most recent. With argument, continues that specific timestamp. |
 | `--report` | Skip experiments, only generate report from cache |
-| `--rerun` | Re-run all experiments, ignore cache |
 | `-s`, `--capture=no` | Show subprocess output instead of progress bar |
 | `--viewer` | Start the viewer after experiments complete |
 | `--viewer-port PORT` | Port for the viewer (default: 8765) |

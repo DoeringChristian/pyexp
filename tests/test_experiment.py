@@ -115,33 +115,6 @@ class TestExperimentRun:
         assert result2 == 42
         assert call_count == 1  # Only called once due to caching
 
-    def test_run_rerun_flag(self, tmp_path):
-        call_count = 0
-
-        @experiment
-        def my_exp(config):
-            nonlocal call_count
-            call_count += 1
-            return {"value": call_count}
-
-        @my_exp.configs
-        def configs():
-            return [{"name": "rerun", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
-        with patch.object(sys, "argv", ["test"]):
-            # Use executor="inline" to track call_count in same process
-            my_exp.run(output_dir=tmp_path, executor="inline")
-
-        with patch.object(sys, "argv", ["test", "--rerun"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
-
-        assert call_count == 2
-        assert result == 2
-
     def test_run_report_flag(self, tmp_path):
         @experiment(timestamp=False)
         def my_exp(config):

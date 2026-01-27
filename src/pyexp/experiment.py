@@ -70,11 +70,6 @@ def _parse_args() -> argparse.Namespace:
         help="Skip experiments and only generate report from cached results",
     )
     parser.add_argument(
-        "--rerun",
-        action="store_true",
-        help="Re-run experiments ignoring cache",
-    )
-    parser.add_argument(
         "--continue",
         dest="continue_run",
         nargs="?",
@@ -467,7 +462,7 @@ class Experiment:
                 # Ensure marker file exists for viewer discovery
                 marker_path = experiment_dir / ".pyexp"
                 marker_path.touch(exist_ok=True)
-            elif args.rerun or not result_path.exists():
+            elif not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_with_out = Config(
                     {
@@ -627,7 +622,6 @@ def experiment(
         --continue [TIMESTAMP] Continue a previous run (latest if no timestamp given)
         --retry N             Number of retries on failure (default: 4)
         --report              Only generate report from cached results
-        --rerun               Re-run all experiments, ignore cache
         -s, --capture=no      Show subprocess output instead of progress bar
         --viewer              Start the viewer after experiments complete
         --viewer-port PORT    Port for the viewer (default: 8765)
