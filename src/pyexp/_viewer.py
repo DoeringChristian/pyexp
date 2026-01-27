@@ -171,12 +171,27 @@ def load_figures_info(log_path: Path) -> dict[str, list[tuple[int, Path, bool]]]
     return figures
 
 
+def _find_free_port(start: int, max_attempts: int = 100) -> int:
+    """Find a free port starting from the given port number."""
+    import socket
+
+    for offset in range(max_attempts):
+        port = start + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"No free port found in range {start}-{start + max_attempts - 1}")
+
+
 def run(log_path: str | Path | None = None, port: int = 8765):
     """Run the viewer server.
 
     Args:
         log_path: Optional log directory to open on start.
-        port: Port to run the server on.
+        port: Port to run the server on. If busy, the next free port is used.
 
     Example:
         from pyexp.viewer import run
@@ -189,6 +204,9 @@ def run(log_path: str | Path | None = None, port: int = 8765):
     if log_path:
         # Set environment variable so the Page component can read it
         os.environ["PYEXP_LOG_DIR"] = str(Path(log_path).absolute())
+
+    port = _find_free_port(port)
+    print(f"Starting pyexp viewer on http://localhost:{port}")
 
     # Run solara with this module
     subprocess.run(
@@ -224,5 +242,4 @@ def main():
     )
     args = parser.parse_args()
 
-    print(f"Starting pyexp viewer on http://localhost:{args.port}")
     run(args.log_dir, args.port)

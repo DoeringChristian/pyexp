@@ -408,8 +408,10 @@ class Experiment:
         viewer_process = None
         if start_viewer:
             import subprocess as sp
+            from pyexp._viewer import _find_free_port
 
             run_dir.mkdir(parents=True, exist_ok=True)
+            resolved_viewer_port = _find_free_port(resolved_viewer_port)
             print(f"Viewer: http://localhost:{resolved_viewer_port}")
             viewer_process = sp.Popen(
                 [
