@@ -1,11 +1,85 @@
 """Solara-based viewer for pyexp logs."""
 
 import json
+import math
 import pickle
 from pathlib import Path
 from typing import Any
 
 from pyexp.log import MARKER_FILE, SCALARS_FILE, TEXT_FILE
+
+# Default max points for downsampling (like TensorBoard)
+DEFAULT_MAX_POINTS = 1000
+
+
+def lttb_downsample(
+    data: list[tuple[int, float]], threshold: int
+) -> list[tuple[int, float]]:
+    """Downsample data using Largest Triangle Three Buckets algorithm.
+
+    This algorithm preserves the visual shape of the data while reducing points.
+    Used by TensorBoard and other visualization tools.
+
+    Args:
+        data: List of (x, y) tuples, must be sorted by x.
+        threshold: Target number of points.
+
+    Returns:
+        Downsampled list of (x, y) tuples.
+    """
+    if len(data) <= threshold or threshold < 3:
+        return data
+
+    # Always keep first and last points
+    sampled = [data[0]]
+
+    # Bucket size
+    bucket_size = (len(data) - 2) / (threshold - 2)
+
+    a = 0  # Index of previous selected point
+
+    for i in range(threshold - 2):
+        # Calculate bucket range
+        bucket_start = int(math.floor((i + 1) * bucket_size)) + 1
+        bucket_end = int(math.floor((i + 2) * bucket_size)) + 1
+        bucket_end = min(bucket_end, len(data) - 1)
+
+        # Calculate average point in next bucket (for area calculation)
+        next_bucket_start = bucket_end
+        next_bucket_end = int(math.floor((i + 3) * bucket_size)) + 1
+        next_bucket_end = min(next_bucket_end, len(data))
+
+        avg_x = sum(data[j][0] for j in range(next_bucket_start, next_bucket_end))
+        avg_y = sum(data[j][1] for j in range(next_bucket_start, next_bucket_end))
+        count = next_bucket_end - next_bucket_start
+        if count > 0:
+            avg_x /= count
+            avg_y /= count
+        else:
+            avg_x, avg_y = data[-1]
+
+        # Find point in current bucket with largest triangle area
+        max_area = -1
+        max_idx = bucket_start
+
+        point_a = data[a]
+        for j in range(bucket_start, bucket_end):
+            # Calculate triangle area using cross product
+            area = abs(
+                (point_a[0] - avg_x) * (data[j][1] - point_a[1])
+                - (point_a[0] - data[j][0]) * (avg_y - point_a[1])
+            )
+            if area > max_area:
+                max_area = area
+                max_idx = j
+
+        sampled.append(data[max_idx])
+        a = max_idx
+
+    # Always add last point
+    sampled.append(data[-1])
+
+    return sampled
 
 
 def is_run_directory(path: Path) -> bool:
@@ -37,8 +111,18 @@ def discover_runs(root_path: Path) -> list[Path]:
     return sorted(runs)
 
 
-def load_scalars_timeseries(log_path: Path) -> dict[str, list[tuple[int, float]]]:
-    """Load all scalars from JSONL file as time series."""
+def load_scalars_timeseries(
+    log_path: Path, max_points: int = DEFAULT_MAX_POINTS
+) -> dict[str, list[tuple[int, float]]]:
+    """Load all scalars from JSONL file as time series.
+
+    Args:
+        log_path: Path to the log directory.
+        max_points: Maximum points per tag (uses LTTB downsampling if exceeded).
+
+    Returns:
+        Dict mapping tag names to list of (iteration, value) tuples.
+    """
     timeseries: dict[str, list[tuple[int, float]]] = {}
     scalars_path = log_path / SCALARS_FILE
 
@@ -60,9 +144,11 @@ def load_scalars_timeseries(log_path: Path) -> dict[str, list[tuple[int, float]]
         except (IOError, OSError):
             pass  # File is being written to
 
-    # Sort by iteration
+    # Sort by iteration and apply downsampling
     for tag in timeseries:
         timeseries[tag].sort(key=lambda x: x[0])
+        if len(timeseries[tag]) > max_points:
+            timeseries[tag] = lttb_downsample(timeseries[tag], max_points)
 
     return timeseries
 

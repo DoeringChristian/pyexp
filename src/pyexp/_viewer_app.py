@@ -75,63 +75,159 @@ def RunSelector():
 
 @solara.component
 def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
-    """Display a scalar plot for a single tag across multiple runs.
+    """Display an interactive scalar plot using bqplot.
 
-    Args:
-        tag: The scalar tag to plot.
-        runs_data: Dict mapping run path to its timeseries data (pre-loaded).
-        root_path: Root directory for computing relative run names.
+    Features (like TensorBoard):
+    - Box zoom: drag to select area, zoom on release
+    - Right-click: X-only zoom
+    - Double-click: Reset zoom
     """
-    import plotly.graph_objects as go
+    import bqplot as bq
+    import numpy as np
 
-    # Per-tag log scale toggle
-    log_scale = solara.use_reactive(False)
-
-    fig = go.Figure()
-
+    # Collect all data
+    series_list = []
     for run, timeseries in runs_data.items():
         if tag in timeseries:
             data = timeseries[tag]
-            iterations = [d[0] for d in data]
-            values = [d[1] for d in data]
-
             run_name = str(run.relative_to(root_path)) if run != root_path else "."
-            fig.add_trace(
-                go.Scatter(
-                    x=iterations,
-                    y=values,
-                    mode="lines+markers",
-                    marker=dict(size=4),
-                    name=run_name,
-                    hovertemplate=f"{run_name}<br>Iteration: %{{x}}<br>Value: %{{y:.6g}}<extra></extra>",
-                )
-            )
+            iterations = np.array([d[0] for d in data])
+            values = np.array([d[1] for d in data])
+            series_list.append((run_name, iterations, values))
 
-    fig.update_layout(
+    if not series_list:
+        solara.Text("No data")
+        return
+
+    # Colors matching TensorBoard
+    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+    # Create scales
+    x_scale = bq.LinearScale()
+    y_scale = bq.LinearScale()
+
+    # Create lines only
+    lines = []
+    for idx, (run_name, iterations, values) in enumerate(series_list):
+        color = colors[idx % len(colors)]
+        line = bq.Lines(
+            x=iterations,
+            y=values,
+            scales={"x": x_scale, "y": y_scale},
+            colors=[color],
+            stroke_width=2,
+            labels=[run_name],
+            display_legend=True,
+        )
+        lines.append(line)
+
+    # Create axes
+    x_axis = bq.Axis(scale=x_scale, label="Iteration", grid_lines="solid", grid_color="#eee")
+    y_axis = bq.Axis(scale=y_scale, orientation="vertical", label="Value", grid_lines="solid", grid_color="#eee")
+
+    # XY Box zoom selector
+    brush_xy = bq.interacts.BrushSelector(x_scale=x_scale, y_scale=y_scale, color="steelblue")
+    # X-only selector
+    brush_x = bq.interacts.BrushIntervalSelector(scale=x_scale, color="orange")
+
+    # Track which mode we're in
+    zoom_mode = solara.use_reactive("xy")
+
+    fig = bq.Figure(
+        marks=lines,
+        axes=[x_axis, y_axis],
         title=tag,
-        xaxis_title="Iteration",
-        yaxis_title=tag,
-        yaxis_type="log" if log_scale.value else "linear",
-        height=350,
-        margin=dict(l=50, r=20, t=40, b=40),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend_location="top-right",
+        fig_margin={"top": 60, "bottom": 60, "left": 70, "right": 20},
+        layout={"width": "100%", "height": "350px"},
+        interaction=brush_xy,
     )
 
-    solara.Checkbox(label="Log scale (Y-axis)", value=log_scale)
-    solara.FigurePlotly(fig)
+    # Handle XY brush - apply zoom only when brushing ends
+    def on_xy_brushing_change(change):
+        # Only apply when brushing ends (goes from True to False)
+        if change["old"] == True and change["new"] == False:
+            selected = brush_xy.selected
+            if selected is not None and len(selected) == 2:
+                [[x1, y1], [x2, y2]] = selected
+                if abs(x2 - x1) > 0.001 and abs(y2 - y1) > 0.001:
+                    x_scale.min, x_scale.max = float(min(x1, x2)), float(max(x1, x2))
+                    y_scale.min, y_scale.max = float(min(y1, y2)), float(max(y1, y2))
+            brush_xy.selected = None
+
+    brush_xy.observe(on_xy_brushing_change, names=["brushing"])
+
+    # Handle X-only brush - apply zoom only when brushing ends
+    def on_x_brushing_change(change):
+        if change["old"] == True and change["new"] == False:
+            selected = brush_x.selected
+            if selected is not None and len(selected) == 2:
+                x1, x2 = selected
+                if abs(x2 - x1) > 0.001:
+                    x_scale.min, x_scale.max = float(min(x1, x2)), float(max(x1, x2))
+                    # Auto-scale y to visible data
+                    y_vals = []
+                    for _, iterations, values in series_list:
+                        mask = (iterations >= x_scale.min) & (iterations <= x_scale.max)
+                        if mask.any():
+                            y_vals.extend(values[mask])
+                    if y_vals:
+                        padding = (max(y_vals) - min(y_vals)) * 0.05 or 0.1
+                        y_scale.min = float(min(y_vals) - padding)
+                        y_scale.max = float(max(y_vals) + padding)
+            brush_x.selected = None
+
+    brush_x.observe(on_x_brushing_change, names=["brushing"])
+
+    # Reset zoom function
+    def reset_zoom(*args):
+        x_scale.min, x_scale.max = None, None
+        y_scale.min, y_scale.max = None, None
+        brush_xy.selected = None
+        brush_x.selected = None
+
+    def set_xy_mode(*args):
+        zoom_mode.set("xy")
+        fig.interaction = brush_xy
+
+    def set_x_mode(*args):
+        zoom_mode.set("x")
+        fig.interaction = brush_x
+
+    # Controls
+    with solara.Row():
+        solara.Button(
+            "XY Zoom",
+            on_click=set_xy_mode,
+            icon_name="mdi-selection-drag",
+            outlined=zoom_mode.value != "xy",
+        )
+        solara.Button(
+            "X Zoom",
+            on_click=set_x_mode,
+            icon_name="mdi-arrow-expand-horizontal",
+            outlined=zoom_mode.value != "x",
+        )
+        solara.Button("Reset", on_click=reset_zoom, icon_name="mdi-magnify-minus")
+
+    solara.display(fig)
 
 
 @solara.component
 def ScalarsPanel():
     """Panel for viewing scalar time series."""
-    _ = refresh_counter.value
+    refresh = refresh_counter.value
+    runs = selected_runs.value
 
-    if not selected_runs.value:
+    if not runs:
         solara.Text("Select runs from the sidebar to view scalars.")
         return
 
-    # Load all scalar data ONCE per run
-    runs_data = {run: load_scalars_timeseries(run) for run in selected_runs.value}
+    # Memoize data loading - only reload when runs or refresh changes
+    def load_data():
+        return {run: load_scalars_timeseries(run) for run in runs}
+
+    runs_data = solara.use_memo(load_data, dependencies=[tuple(runs), refresh])
 
     # Get all tags from the pre-loaded data
     all_tags = set()
@@ -176,14 +272,18 @@ def TextItem(run: Path, tag: str, root_path: Path, data: list):
 @solara.component
 def TextPanel():
     """Panel for viewing text logs."""
-    _ = refresh_counter.value
+    refresh = refresh_counter.value
+    runs = selected_runs.value
 
-    if not selected_runs.value:
+    if not runs:
         solara.Text("Select runs from the sidebar to view text.")
         return
 
-    # Load all text data ONCE per run
-    runs_data = {run: load_text_timeseries(run) for run in selected_runs.value}
+    # Memoize data loading
+    def load_data():
+        return {run: load_text_timeseries(run) for run in runs}
+
+    runs_data = solara.use_memo(load_data, dependencies=[tuple(runs), refresh])
 
     # Get all tags from the pre-loaded data
     all_tags = set()
@@ -198,7 +298,7 @@ def TextPanel():
 
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
-            for run in selected_runs.value:
+            for run in runs:
                 if tag in runs_data[run] and runs_data[run][tag]:
                     TextItem(run, tag, root_path, runs_data[run][tag])
 
@@ -239,14 +339,18 @@ def FigureItem(run: Path, tag: str, root_path: Path, data: list):
 @solara.component
 def FiguresPanel():
     """Panel for viewing figures."""
-    _ = refresh_counter.value
+    refresh = refresh_counter.value
+    runs = selected_runs.value
 
-    if not selected_runs.value:
+    if not runs:
         solara.Text("Select runs from the sidebar to view figures.")
         return
 
-    # Load all figure info ONCE per run
-    runs_data = {run: load_figures_info(run) for run in selected_runs.value}
+    # Memoize data loading
+    def load_data():
+        return {run: load_figures_info(run) for run in runs}
+
+    runs_data = solara.use_memo(load_data, dependencies=[tuple(runs), refresh])
 
     # Get all tags from the pre-loaded data
     all_tags = set()
@@ -261,7 +365,7 @@ def FiguresPanel():
 
     for tag in sorted(all_tags):
         with solara.Details(tag, expand=True):
-            for run in selected_runs.value:
+            for run in runs:
                 if tag in runs_data[run] and runs_data[run][tag]:
                     FigureItem(run, tag, root_path, runs_data[run][tag])
 

@@ -9,7 +9,7 @@ dependencies = ["cloudpickle>=3.0", "pyyaml>=6.0"]
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
 ray = ["ray>=2.0"]
-viewer = ["solara[server]>=1.0", "matplotlib>=3.0", "ipympl>=0.9", "plotly>=5.0", "anywidget>=0.9"]
+viewer = ["solara[server]>=1.0", "matplotlib>=3.0", "ipympl>=0.9", "bqplot>=0.12"]
 
 [project.scripts]
 pyexp-viewer = "pyexp._viewer:main"
