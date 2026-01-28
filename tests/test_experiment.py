@@ -364,8 +364,10 @@ class TestExperimentRun:
         assert result.config["lr"] == 0.01
         assert result.config["epochs"] == 10
         assert result.result["accuracy"] == 0.95
-        # out should not be in config
-        assert "out" not in result.config
+        # out should be accessible both via config and result.out
+        assert "out" in result.config
+        assert result.config.out.exists()
+        assert result.out == result.config.out
 
     def test_results_filterable_by_config(self, tmp_path):
         """Results should be filterable by config values."""
@@ -529,6 +531,10 @@ class TestResultsMethod:
         assert results[0].config["name"] == "test"
         assert results[0].config["x"] == 5
         assert results[0].result["value"] == 10
+        # out should be accessible via result.out and result.config.out
+        assert results[0].out is not None
+        assert results[0].out.exists()
+        assert results[0].out == results[0].config.out
 
     def test_results_loads_specific_timestamp(self, tmp_path):
         """results() can load a specific timestamp."""

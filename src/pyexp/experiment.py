@@ -139,8 +139,11 @@ def _load_results_from_dir(
         if wants_logger:
             log_reader = LogReader(experiment_dir)
 
+        # Include 'out' in config for consistency with run()
+        config_with_out = {**config, "out": experiment_dir}
+
         result_obj = Result(
-            config=config,
+            config=config_with_out,
             result=structured.get("result"),
             error=structured.get("error"),
             log=structured.get("log", ""),
@@ -779,8 +782,8 @@ class Experiment:
             if progress:
                 progress.update(status, config_name)
 
-            # Create Result object with config (without 'out' key)
-            config_without_out = {k: v for k, v in config.items() if k != "out"}
+            # Create Result object with config (include 'out' for consistency)
+            config_with_out = {**config, "out": experiment_dir}
 
             # Add LogReader if logger was used
             log_reader = None
@@ -788,7 +791,7 @@ class Experiment:
                 log_reader = LogReader(experiment_dir)
 
             result_obj = Result(
-                config=config_without_out,
+                config=config_with_out,
                 result=structured.get("result"),
                 error=structured.get("error"),
                 log=structured.get("log", ""),

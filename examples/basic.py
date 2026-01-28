@@ -44,5 +44,7 @@ if __name__ == "__main__":
     results = experiment.results()
     print(f"\nLoaded {len(list(results))} results from latest run")
 
+    print(f"{results[0].config.out=}")
+
     # Load results from a specific timestamp
     # results = experiment.results(timestamp="2026-01-28_10-30-00")

@@ -33,7 +33,7 @@ def configs():
 
 @experiment.report
 def report(results, report_dir):
-    # Each result has: name, config, result, error, log, logger
+    # Each result has: name, config, result, error, log, logger, out
     for r in results:
         print(f"{r.name}: {r.result['accuracy']}")
 
@@ -324,6 +324,13 @@ def experiment(config: Config):
     model = train(config)
     torch.save(model, config.out / "model.pt")
     return {"accuracy": 0.95}
+
+@experiment.report
+def report(results, report_dir):
+    for r in results:
+        # Access output directory via result.out or result.config.out
+        model = torch.load(r.out / "model.pt")
+        print(f"{r.name}: saved at {r.out}")
 ```
 
 ### Parameter Sweeps
@@ -370,8 +377,12 @@ cfgs = sweep(cfgs, [
 
 The report function receives a `Tensor` of results. Each result contains:
 - `name`: the combined config name
-- `config`: the full config dict
-- All experiment outputs
+- `config`: the full config dict (includes `out` path)
+- `result`: the experiment return value
+- `error`: error message if failed, else `None`
+- `log`: captured stdout/stderr
+- `logger`: `LogReader` if logging was used
+- `out`: path to experiment output directory (same as `config.out`)
 
 Filter results using pattern matching or dict queries:
 
@@ -734,6 +745,7 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Classes
 
 - `Config` - Dict subclass with dot notation access
+- `Result` - Experiment result with config, result, error, log, logger, out
 - `Tensor` - Shape-preserving container with advanced indexing
 - `Experiment` - Experiment runner with caching
 - `Executor` - Abstract base class for custom executors
@@ -743,6 +755,16 @@ The viewer starts as a background process before experiments begin, allowing you
 - `RayExecutor` - Runs with Ray for distributed execution
 - `Logger` - Log scalars, text, and figures during experiments
 - `LogReader` - Explore and load logged data programmatically
+
+### Result Properties
+
+- `result.name` - Config name
+- `result.config` - Full config dict (includes `out`)
+- `result.result` - Experiment return value
+- `result.error` - Error message if failed, else `None`
+- `result.log` - Captured stdout/stderr
+- `result.logger` - `LogReader` if logging was used, else `None`
+- `result.out` - Path to experiment output directory
 
 ### Decorators
 

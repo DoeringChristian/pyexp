@@ -151,3 +151,16 @@ Each run saves a `configs.json` file containing:
 - `shape`: Tensor shape from sweeps
 
 This enables `results()` to reconstruct the exact tensor structure from a previous run.
+
+## Result Object
+
+Each `Result` object has these properties:
+- `result.name` - Config name
+- `result.config` - Full config dict (includes `out`)
+- `result.result` - Experiment return value
+- `result.error` - Error message if failed, else `None`
+- `result.log` - Captured stdout/stderr
+- `result.logger` - `LogReader` if logging was used
+- `result.out` - Path to experiment output directory (same as `result.config.out`)
+
+The `out` path is available both during experiment execution (`config.out`) and in results (`result.out`, `result.config.out`).

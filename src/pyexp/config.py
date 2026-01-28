@@ -216,6 +216,11 @@ class Result(dict):
     def name(self) -> str:
         return self["name"]
 
+    @property
+    def out(self) -> Path | None:
+        """The experiment output directory path."""
+        return self["config"].get("out")
+
     def __repr__(self) -> str:
         status = "error" if self.error else "ok"
         name = self.config.get("name", "unnamed")
