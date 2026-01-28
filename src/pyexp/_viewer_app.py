@@ -80,11 +80,34 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     Features:
     - Drag: XY box zoom
     - Shift+Drag: X-only zoom (Y auto-scales)
-    - Double-click or Reset button: restore full view
+    - Reset button: restore full view
     """
+    import anywidget
     import bqplot as bq
     import ipywidgets as widgets
     import numpy as np
+    import traitlets
+
+    # Custom widget to detect shift key using anywidget
+    class ShiftDetector(anywidget.AnyWidget):
+        _esm = """
+        export function render({ model, el }) {
+            const handler = (e) => {
+                if (e.key === 'Shift') {
+                    model.set('shift_pressed', e.type === 'keydown');
+                    model.save_changes();
+                }
+            };
+            document.addEventListener('keydown', handler);
+            document.addEventListener('keyup', handler);
+
+            return () => {
+                document.removeEventListener('keydown', handler);
+                document.removeEventListener('keyup', handler);
+            };
+        }
+        """
+        shift_pressed = traitlets.Bool(False).tag(sync=True)
 
     # Collect all data
     series_list = []
@@ -131,9 +154,8 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # X-only selector
     brush_x = bq.interacts.BrushIntervalSelector(scale=x_scale, color="orange")
 
-    # Widget to track shift key state
-    shift_pressed = widgets.Checkbox(value=False)
-    shift_pressed.layout.display = 'none'
+    # Shift key detector
+    shift_detector = ShiftDetector()
 
     fig = bq.Figure(
         marks=lines,
@@ -152,7 +174,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         else:
             fig.interaction = brush_xy
 
-    shift_pressed.observe(on_shift_change, names=["value"])
+    shift_detector.observe(on_shift_change, names=["shift_pressed"])
 
     # Handle XY brush - apply zoom only when brushing ends
     def on_xy_brushing_change(change):
@@ -196,42 +218,12 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         brush_xy.selected = None
         brush_x.selected = None
 
-    # JavaScript to detect shift key
-    fig_id = id(fig)
-    js_code = widgets.HTML(value=f"""
-    <script>
-    (function() {{
-        const checkboxes = document.querySelectorAll('input[type="checkbox"]');
-        let shiftCheckbox = null;
-        checkboxes.forEach(cb => {{
-            if (cb.style.display === 'none' || cb.parentElement?.style?.display === 'none') {{
-                shiftCheckbox = cb;
-            }}
-        }});
-
-        document.addEventListener('keydown', (e) => {{
-            if (e.key === 'Shift' && shiftCheckbox) {{
-                shiftCheckbox.checked = true;
-                shiftCheckbox.dispatchEvent(new Event('change', {{bubbles: true}}));
-            }}
-        }});
-
-        document.addEventListener('keyup', (e) => {{
-            if (e.key === 'Shift' && shiftCheckbox) {{
-                shiftCheckbox.checked = false;
-                shiftCheckbox.dispatchEvent(new Event('change', {{bubbles: true}}));
-            }}
-        }});
-    }})();
-    </script>
-    """)
-
     # Controls
     with solara.Row():
         solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
         solara.Text("Drag to zoom • Shift+Drag for X-only", style={"color": "#666", "font-size": "12px"})
 
-    solara.display(widgets.VBox([js_code, shift_pressed, fig]))
+    solara.display(widgets.VBox([shift_detector, fig]))
 
 
 @solara.component
