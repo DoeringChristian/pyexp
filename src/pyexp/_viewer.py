@@ -216,6 +216,8 @@ def run(log_path: str | Path | None = None, port: int = 8765):
             "solara",
             "run",
             "pyexp._viewer_app:Page",
+            "--host",
+            "localhost",
             "--port",
             str(port),
         ],

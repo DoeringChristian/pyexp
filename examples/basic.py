@@ -39,3 +39,10 @@ def report(results, report_dir):
 
 if __name__ == "__main__":
     experiment.run()
+
+    # Load latest results
+    results = experiment.results()
+    print(f"\nLoaded {len(list(results))} results from latest run")
+
+    # Load results from a specific timestamp
+    # results = experiment.results(timestamp="2026-01-28_10-30-00")

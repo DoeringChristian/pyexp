@@ -83,6 +83,74 @@ def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
     return output_dir / f"{name}-{hash_str}"
 
 
+def _save_configs_json(run_dir: Path, configs: list[dict], shape: tuple) -> None:
+    """Save configs and shape to a JSON file for later loading."""
+    configs_to_save = [
+        {k: v for k, v in c.items() if not k.startswith("_")}
+        for c in configs
+    ]
+    data = {
+        "configs": configs_to_save,
+        "shape": list(shape),
+    }
+    configs_path = run_dir / "configs.json"
+    configs_path.write_text(json.dumps(data, indent=2, default=str))
+
+
+def _load_configs_json(run_dir: Path) -> tuple[list[dict], tuple]:
+    """Load configs and shape from a JSON file."""
+    configs_path = run_dir / "configs.json"
+    if not configs_path.exists():
+        raise FileNotFoundError(f"No configs.json found in {run_dir}")
+    data = json.loads(configs_path.read_text())
+    return data["configs"], tuple(data["shape"])
+
+
+def _load_results_from_dir(
+    run_dir: Path,
+    wants_logger: bool = False,
+) -> Tensor:
+    """Load results from a run directory using configs.json.
+
+    Args:
+        run_dir: Path to the run directory containing configs.json and experiment dirs.
+        wants_logger: Whether to attach LogReader to results.
+
+    Returns:
+        Tensor of Result objects with the original shape.
+    """
+    configs, shape = _load_configs_json(run_dir)
+
+    results = []
+    for config in configs:
+        experiment_dir = _get_experiment_dir(config, run_dir)
+        result_path = experiment_dir / "result.pkl"
+
+        if not result_path.exists():
+            raise FileNotFoundError(
+                f"No result found for config '{config.get('name', config)}' at {result_path}"
+            )
+
+        with open(result_path, "rb") as f:
+            structured = pickle.load(f)
+
+        # Add LogReader if requested
+        log_reader = None
+        if wants_logger:
+            log_reader = LogReader(experiment_dir)
+
+        result_obj = Result(
+            config=config,
+            result=structured.get("result"),
+            error=structured.get("error"),
+            log=structured.get("log", ""),
+            logger=log_reader,
+        )
+        results.append(result_obj)
+
+    return Tensor(results, shape)
+
+
 def _generate_timestamp() -> str:
     """Generate a timestamp string for the current time."""
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -330,6 +398,7 @@ class Experiment:
         fn: Callable[[dict], Any],
         *,
         name: str | None = None,
+        output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str = "subprocess",
         retry: int = 4,
         viewer: bool = False,
@@ -338,6 +407,19 @@ class Experiment:
     ):
         self._fn = fn
         self._name = name or fn.__name__
+
+        # Determine the default output directory relative to the experiment file
+        if output_dir is not None:
+            self._output_dir_default = Path(output_dir)
+        else:
+            # Use directory of the file containing the experiment function
+            fn_file = fn.__globals__.get("__file__")
+            if fn_file:
+                self._output_dir_default = Path(fn_file).parent / "out"
+            else:
+                # Fallback for interactive/REPL usage
+                self._output_dir_default = Path("out")
+
         self._executor_default = executor
         self._retry_default = retry
         self._viewer_default = viewer
@@ -369,11 +451,56 @@ class Experiment:
         self._report_fn = fn
         return fn
 
+    def results(
+        self,
+        timestamp: str | None = None,
+        output_dir: str | Path | None = None,
+        name: str | None = None,
+    ) -> Tensor:
+        """Load results from a previous experiment run.
+
+        Args:
+            timestamp: Timestamp of the run to load (e.g., "2026-01-28_10-30-00").
+                      If None or "latest", loads the most recent run.
+            output_dir: Base directory where experiment results are stored.
+                       Defaults to directory relative to experiment file.
+            name: Experiment name. Defaults to the function name.
+
+        Returns:
+            Tensor of Result objects with .config, .result, .error, .log, .logger
+
+        Example:
+            # Load latest results
+            results = my_experiment.results()
+
+            # Load specific run
+            results = my_experiment.results(timestamp="2026-01-28_10-30-00")
+
+            # Access results
+            for r in results:
+                print(f"{r.name}: {r.result}")
+        """
+        exp_name = name or self._name
+        resolved_output_dir = Path(output_dir) if output_dir else self._output_dir_default
+        base_dir = resolved_output_dir / exp_name
+
+        if timestamp is None or timestamp == "latest":
+            latest = _get_latest_timestamp(base_dir)
+            if latest is None:
+                raise FileNotFoundError(f"No runs found in {base_dir}")
+            run_dir = base_dir / latest
+        else:
+            run_dir = base_dir / timestamp
+            if not run_dir.exists():
+                raise FileNotFoundError(f"Run not found: {run_dir}")
+
+        return _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
+
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
         report: Callable[[Tensor, Path], Any] | None = None,
-        output_dir: str | Path = "out",
+        output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
         retry: int | None = None,
@@ -388,7 +515,8 @@ class Experiment:
             report: Optional report function (results, out) -> Any. If not provided, uses
                     @experiment.report decorated function. Receives a Tensor of Results and
                     a Path to the report directory for saving outputs.
-            output_dir: Base directory for caching experiment results. Defaults to "out".
+            output_dir: Base directory for caching experiment results.
+                       Defaults to "out" directory relative to experiment file.
             executor: Execution strategy for running experiments. Can be:
                 - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
                 - "fork": Run in forked process (Unix only, guarantees same module state)
@@ -404,8 +532,8 @@ class Experiment:
             stash: If True, capture git repository state and log commit hash. Defaults to decorator value (True).
 
         Output folder structure:
-            out/<name>/<timestamp>/<config_name>-<hash>/
-            Report directory: out/<name>/<timestamp>/report/
+            <output_dir>/<name>/<timestamp>/<config_name>-<hash>/
+            Report directory: <output_dir>/<name>/<timestamp>/report/
         """
         args = _parse_args()
 
@@ -415,7 +543,13 @@ class Experiment:
         configs_fn = configs or self._configs_fn
         report_fn = report or self._report_fn
         exp_name = args.name or name or self._name
-        resolved_output_dir = args.output_dir or output_dir
+        # Output dir: CLI > run() arg > decorator arg (file-relative default)
+        if args.output_dir:
+            resolved_output_dir = Path(args.output_dir)
+        elif output_dir is not None:
+            resolved_output_dir = Path(output_dir)
+        else:
+            resolved_output_dir = self._output_dir_default
 
         # Retry: CLI > run() arg > decorator arg
         if args.retry is not None:
@@ -531,6 +665,8 @@ class Experiment:
                     "solara",
                     "run",
                     "pyexp._viewer_app:Page",
+                    "--host",
+                    "localhost",
                     "--port",
                     str(resolved_viewer_port),
                 ],
@@ -551,6 +687,17 @@ class Experiment:
         # Flatten config_list for iteration
         flat_configs = list(config_list)
 
+        # Save configs.json for later loading via results()
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _save_configs_json(run_dir, flat_configs, shape)
+
+        # If report-only mode, load results directly from configs.json
+        if args.report:
+            results = _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
+            report_dir = run_dir / "report"
+            report_dir.mkdir(parents=True, exist_ok=True)
+            return report_fn(results, report_dir)
+
         # Initialize progress bar if capturing output
         show_progress = not args.no_capture and not args.report
         progress = _ProgressBar(len(flat_configs)) if show_progress else None
@@ -565,18 +712,7 @@ class Experiment:
             result_path = experiment_dir / "result.pkl"
             config_name = config.get("name", "")
 
-            if args.report:
-                if not result_path.exists():
-                    raise RuntimeError(
-                        f"No cached result for config {config}. Run experiments first."
-                    )
-                with open(result_path, "rb") as f:
-                    structured = pickle.load(f)
-                status = "cached"
-                # Ensure marker file exists for viewer discovery
-                marker_path = experiment_dir / ".pyexp"
-                marker_path.touch(exist_ok=True)
-            elif not result_path.exists():
+            if not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
 
                 # Save config as JSON for inspection/validation
@@ -677,6 +813,7 @@ def experiment(
     fn: Callable[[dict], Any] | None = None,
     *,
     name: str | None = None,
+    output_dir: str | Path | None = None,
     executor: ExecutorName | Executor | str = "subprocess",
     retry: int = 4,
     viewer: bool = False,
@@ -687,6 +824,9 @@ def experiment(
 
     Args:
         name: Experiment name for the output folder. Defaults to function name.
+        output_dir: Base directory for experiment results. Defaults to "out" directory
+            relative to the file containing the experiment function.
+            Can be overridden in run() or via --output-dir CLI argument.
         executor: Default execution strategy for running experiments. Can be:
             - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
             - "fork": Run in forked process (Unix only, guarantees same module state)
@@ -705,7 +845,7 @@ def experiment(
             Can be overridden in run() or via --no-stash CLI argument.
 
     Output folder structure:
-        out/<name>/<timestamp>/<config_name>-<hash>/
+        <output_dir>/<name>/<timestamp>/<config_name>-<hash>/
 
     Example usage:
 
@@ -765,6 +905,7 @@ def experiment(
         return Experiment(
             f,
             name=name,
+            output_dir=output_dir,
             executor=executor,
             retry=retry,
             viewer=viewer,
@@ -777,6 +918,7 @@ def experiment(
         return Experiment(
             fn,
             name=name,
+            output_dir=output_dir,
             executor=executor,
             retry=retry,
             viewer=viewer,

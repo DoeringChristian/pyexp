@@ -501,6 +501,171 @@ class TestExperimentRun:
                 my_exp.run(output_dir=tmp_path, executor="inline")
 
 
+class TestResultsMethod:
+    """Tests for the experiment.results() method."""
+
+    def test_results_loads_latest_run(self, tmp_path):
+        """results() loads the latest run by default."""
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Load results
+        results = my_exp.results(output_dir=tmp_path)
+
+        assert results.shape == (1,)
+        assert results[0].config["name"] == "test"
+        assert results[0].config["x"] == 5
+        assert results[0].result["value"] == 10
+
+    def test_results_loads_specific_timestamp(self, tmp_path):
+        """results() can load a specific timestamp."""
+        import time
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        # Run first experiment
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Get the first timestamp
+        base_dir = tmp_path / "my_exp"
+        first_timestamp = sorted(base_dir.iterdir())[0].name
+
+        time.sleep(1.1)  # Ensure different timestamp
+
+        # Modify configs for second run
+        @my_exp.configs
+        def configs2():
+            return [{"name": "test", "x": 99}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Load first run by timestamp
+        results = my_exp.results(timestamp=first_timestamp, output_dir=tmp_path)
+        assert results[0].result["value"] == 1
+
+        # Load latest (second run)
+        results_latest = my_exp.results(output_dir=tmp_path)
+        assert results_latest[0].result["value"] == 99
+
+    def test_results_preserves_tensor_shape(self, tmp_path):
+        """results() preserves the original tensor shape from sweep."""
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"] * config["y"]}
+
+        @my_exp.configs
+        def configs():
+            cfgs = [{"name": "base"}]
+            cfgs = sweep(cfgs, [{"name": "x1", "x": 1}, {"name": "x2", "x": 2}])
+            cfgs = sweep(cfgs, [{"name": "y10", "y": 10}, {"name": "y20", "y": 20}])
+            return cfgs
+
+        @my_exp.report
+        def report(results, out):
+            return results
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        results = my_exp.results(output_dir=tmp_path)
+
+        # Should preserve 3D shape: (1 base) x (2 x values) x (2 y values)
+        assert results.shape == (1, 2, 2)
+
+    def test_results_no_runs_raises(self, tmp_path):
+        """results() raises FileNotFoundError when no runs exist."""
+
+        @experiment
+        def my_exp(config):
+            return {"value": 1}
+
+        with pytest.raises(FileNotFoundError, match="No runs found"):
+            my_exp.results(output_dir=tmp_path)
+
+    def test_results_invalid_timestamp_raises(self, tmp_path):
+        """results() raises FileNotFoundError for invalid timestamp."""
+
+        @experiment
+        def my_exp(config):
+            return {"value": 1}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return None
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        with pytest.raises(FileNotFoundError, match="Run not found"):
+            my_exp.results(timestamp="1999-01-01_00-00-00", output_dir=tmp_path)
+
+    def test_configs_json_saved(self, tmp_path):
+        """run() saves configs.json with configs and shape."""
+        import json
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "a", "x": 1},
+                {"name": "b", "x": 2},
+            ]
+
+        @my_exp.report
+        def report(results, out):
+            return None
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Find the run directory
+        base_dir = tmp_path / "my_exp"
+        run_dir = sorted(base_dir.iterdir())[0]
+
+        # Check configs.json exists and has correct content
+        configs_path = run_dir / "configs.json"
+        assert configs_path.exists()
+
+        data = json.loads(configs_path.read_text())
+        assert data["shape"] == [2]
+        assert len(data["configs"]) == 2
+        assert data["configs"][0]["name"] == "a"
+        assert data["configs"][1]["name"] == "b"
+
+
 class TestOutputFolderStructure:
     """Tests for output folder naming and timestamp features."""
 
