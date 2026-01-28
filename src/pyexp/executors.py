@@ -181,18 +181,26 @@ class SubprocessExecutor(Executor):
             cloudpickle.dump(payload, f)
 
         try:
-            # Run worker subprocess
+            # Run worker subprocess with inherited sys.path via PYTHONPATH
+            env = os.environ.copy()
+            pythonpath = os.pathsep.join(sys.path)
+            if env.get("PYTHONPATH"):
+                pythonpath = pythonpath + os.pathsep + env["PYTHONPATH"]
+            env["PYTHONPATH"] = pythonpath
+
             if capture:
                 proc = subprocess.run(
                     [sys.executable, "-m", "pyexp.worker", payload_path],
                     capture_output=True,
                     text=True,
+                    env=env,
                 )
                 log = proc.stdout + proc.stderr
             else:
                 # Show output live
                 proc = subprocess.run(
                     [sys.executable, "-m", "pyexp.worker", payload_path],
+                    env=env,
                 )
                 log = ""
 

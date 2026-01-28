@@ -25,6 +25,50 @@ def _wants_logger(fn: Callable) -> bool:
     return len(params) >= 2
 
 
+_VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
+
+
+def _validate_config_value(value: Any, path: str = "") -> None:
+    """Validate that a config value contains only base types.
+
+    Allowed: int, float, str, bool, None, Path, and containers (dict, list, tuple, set)
+    of these types. dict and Config are allowed as containers.
+
+    Raises:
+        TypeError: If a value is not a valid config type (e.g., functions, classes).
+    """
+    if isinstance(value, _VALID_CONFIG_TYPES):
+        return
+    if isinstance(value, dict):
+        for k, v in value.items():
+            key_path = f"{path}.{k}" if path else str(k)
+            if not isinstance(k, str):
+                raise TypeError(
+                    f"Config key {key_path!r} must be a string, got {type(k).__name__}"
+                )
+            _validate_config_value(v, key_path)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for i, item in enumerate(value):
+            _validate_config_value(item, f"{path}[{i}]")
+        return
+    raise TypeError(
+        f"Invalid config value at '{path}': {type(value).__name__} = {value!r}. "
+        f"Only base types (int, float, str, bool, None, Path) and containers "
+        f"(dict, list, tuple, set) are allowed."
+    )
+
+
+def _validate_configs(configs: list[dict]) -> None:
+    """Validate all configs in a list."""
+    for i, config in enumerate(configs):
+        name = config.get("name", f"config[{i}]")
+        try:
+            _validate_config_value(config)
+        except TypeError as e:
+            raise TypeError(f"Config '{name}': {e}") from None
+
+
 def _config_hash(config: dict) -> str:
     """Generate a short hash of the config for cache identification."""
     config_without_name = {k: v for k, v in config.items() if k != "name"}
@@ -496,6 +540,7 @@ class Experiment:
             )
 
         config_list = configs_fn()
+        _validate_configs(list(config_list))
 
         # Get shape from config_list if it's a Tensor
         if isinstance(config_list, Tensor):
@@ -533,6 +578,14 @@ class Experiment:
                 marker_path.touch(exist_ok=True)
             elif not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
+
+                # Save config as JSON for inspection/validation
+                config_to_save = {k: v for k, v in config.items() if not k.startswith("_")}
+                config_json_path = experiment_dir / "config.json"
+                config_json_path.write_text(
+                    json.dumps(config_to_save, indent=2, default=str)
+                )
+
                 config_with_out = Config(
                     {
                         **config,
@@ -566,6 +619,14 @@ class Experiment:
                 # Determine status based on error field
                 if structured.get("error"):
                     status = "failed"
+                    # Print error message so user can see what went wrong
+                    error_msg = structured.get("error", "")
+                    print(f"\n--- Error in {config_name or 'experiment'} ---")
+                    print(error_msg)
+                    if structured.get("log"):
+                        print("--- Log output ---")
+                        print(structured["log"])
+                    print("---")
                 else:
                     status = "passed"
             else:
