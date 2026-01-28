@@ -77,12 +77,13 @@ def RunSelector():
 def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     """Display an interactive scalar plot using bqplot.
 
-    Features (like TensorBoard):
-    - Box zoom: drag to select area, zoom on release
-    - Right-click: X-only zoom
-    - Double-click: Reset zoom
+    Features:
+    - Drag: XY box zoom
+    - Shift+Drag: X-only zoom (Y auto-scales)
+    - Double-click or Reset button: restore full view
     """
     import bqplot as bq
+    import ipywidgets as widgets
     import numpy as np
 
     # Collect all data
@@ -130,8 +131,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # X-only selector
     brush_x = bq.interacts.BrushIntervalSelector(scale=x_scale, color="orange")
 
-    # Track which mode we're in
-    zoom_mode = solara.use_reactive("xy")
+    # Widget to track shift key state
+    shift_pressed = widgets.Checkbox(value=False)
+    shift_pressed.layout.display = 'none'
 
     fig = bq.Figure(
         marks=lines,
@@ -143,10 +145,18 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         interaction=brush_xy,
     )
 
+    # Switch interaction based on shift key
+    def on_shift_change(change):
+        if change["new"]:
+            fig.interaction = brush_x
+        else:
+            fig.interaction = brush_xy
+
+    shift_pressed.observe(on_shift_change, names=["value"])
+
     # Handle XY brush - apply zoom only when brushing ends
     def on_xy_brushing_change(change):
-        # Only apply when brushing ends (goes from True to False)
-        if change["old"] == True and change["new"] == False:
+        if change["old"] is True and change["new"] is False:
             selected = brush_xy.selected
             if selected is not None and len(selected) == 2:
                 [[x1, y1], [x2, y2]] = selected
@@ -159,7 +169,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
 
     # Handle X-only brush - apply zoom only when brushing ends
     def on_x_brushing_change(change):
-        if change["old"] == True and change["new"] == False:
+        if change["old"] is True and change["new"] is False:
             selected = brush_x.selected
             if selected is not None and len(selected) == 2:
                 x1, x2 = selected
@@ -186,31 +196,42 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         brush_xy.selected = None
         brush_x.selected = None
 
-    def set_xy_mode(*args):
-        zoom_mode.set("xy")
-        fig.interaction = brush_xy
+    # JavaScript to detect shift key
+    fig_id = id(fig)
+    js_code = widgets.HTML(value=f"""
+    <script>
+    (function() {{
+        const checkboxes = document.querySelectorAll('input[type="checkbox"]');
+        let shiftCheckbox = null;
+        checkboxes.forEach(cb => {{
+            if (cb.style.display === 'none' || cb.parentElement?.style?.display === 'none') {{
+                shiftCheckbox = cb;
+            }}
+        }});
 
-    def set_x_mode(*args):
-        zoom_mode.set("x")
-        fig.interaction = brush_x
+        document.addEventListener('keydown', (e) => {{
+            if (e.key === 'Shift' && shiftCheckbox) {{
+                shiftCheckbox.checked = true;
+                shiftCheckbox.dispatchEvent(new Event('change', {{bubbles: true}}));
+            }}
+        }});
+
+        document.addEventListener('keyup', (e) => {{
+            if (e.key === 'Shift' && shiftCheckbox) {{
+                shiftCheckbox.checked = false;
+                shiftCheckbox.dispatchEvent(new Event('change', {{bubbles: true}}));
+            }}
+        }});
+    }})();
+    </script>
+    """)
 
     # Controls
     with solara.Row():
-        solara.Button(
-            "XY Zoom",
-            on_click=set_xy_mode,
-            icon_name="mdi-selection-drag",
-            outlined=zoom_mode.value != "xy",
-        )
-        solara.Button(
-            "X Zoom",
-            on_click=set_x_mode,
-            icon_name="mdi-arrow-expand-horizontal",
-            outlined=zoom_mode.value != "x",
-        )
-        solara.Button("Reset", on_click=reset_zoom, icon_name="mdi-magnify-minus")
+        solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
+        solara.Text("Drag to zoom • Shift+Drag for X-only", style={"color": "#666", "font-size": "12px"})
 
-    solara.display(fig)
+    solara.display(widgets.VBox([js_code, shift_pressed, fig]))
 
 
 @solara.component
