@@ -748,6 +748,18 @@ class Experiment:
                     )
                     if not structured.get("error"):
                         break  # Success, exit retry loop
+
+                    # Print error immediately on each failure
+                    error_msg = structured.get("error", "")
+                    remaining = max_retries - attempt
+                    retry_info = f" (retrying, {remaining} left)" if remaining > 0 else ""
+                    print(f"\n--- Error in {config_name or 'experiment'}{retry_info} ---")
+                    print(error_msg)
+                    if structured.get("log"):
+                        print("--- Log output ---")
+                        print(structured["log"])
+                    print("---")
+
                     if attempt < max_retries:
                         # Delete result.pkl before retry so executor writes fresh
                         result_path.unlink(missing_ok=True)
@@ -758,14 +770,6 @@ class Experiment:
                 # Determine status based on error field
                 if structured.get("error"):
                     status = "failed"
-                    # Print error message so user can see what went wrong
-                    error_msg = structured.get("error", "")
-                    print(f"\n--- Error in {config_name or 'experiment'} ---")
-                    print(error_msg)
-                    if structured.get("log"):
-                        print("--- Log output ---")
-                        print(structured["log"])
-                    print("---")
                 else:
                     status = "passed"
             else:

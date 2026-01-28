@@ -28,7 +28,7 @@ def configs() -> list[dict]:
 def report(results, report_dir):
     """Generate report from all experiment results.
 
-    Each result has: .name, .config, .result, .error, .log
+    Each result has: .name, .config, .result, .error, .log, .out
     """
     print("\n=== Experiment Report ===")
     for r in results:
@@ -44,7 +44,9 @@ if __name__ == "__main__":
     results = experiment.results()
     print(f"\nLoaded {len(list(results))} results from latest run")
 
-    print(f"{results[0].config.out=}")
+    # Access output directory via result.out or result.config.out
+    print(f"Output dir: {results[0].out}")
+    print(f"Same as config.out: {results[0].out == results[0].config.out}")
 
     # Load results from a specific timestamp
     # results = experiment.results(timestamp="2026-01-28_10-30-00")
