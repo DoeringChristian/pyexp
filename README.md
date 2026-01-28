@@ -58,37 +58,73 @@ python main.py --report                        # Report from most recent run
 python main.py --report=2024-01-25_14-30-00    # Report from specific run
 ```
 
+### Loading Previous Results
+
+Use the `results()` method to load results from a previous run programmatically:
+
+```python
+# Load results from the latest run
+results = experiment.results()
+
+# Load results from a specific timestamp
+results = experiment.results(timestamp="2024-01-25_14-30-00")
+
+# Override output directory
+results = experiment.results(output_dir="/data/experiments")
+
+# Work with loaded results
+for r in results:
+    print(f"{r.name}: {r.result['accuracy']}")
+
+# Results preserve tensor shape from sweeps
+print(results.shape)  # e.g., (1, 2, 2)
+filtered = results[{"config.learning_rate": 0.01}]
+```
+
 ### Output Folder Structure
 
-Results are organized by experiment name and timestamp:
+Results are organized by experiment name and timestamp. By default, the output directory is created relative to the experiment file:
 
 ```
-out/
+<experiment_file_dir>/out/
   <experiment_name>/
     <timestamp>/                    # Each run gets a new timestamp
+      configs.json                  # Saved config list and shape
       <config_name>-<hash>/
+        config.json                 # Individual config
         result.pkl
+        log.out                     # Captured stdout/stderr
         model.pt                    # Your saved artifacts
       <config_name>-<hash>/
         ...
+      report/                       # Report outputs
     <timestamp>/                    # Another run
       ...
 ```
 
-Control the experiment name:
-
 ```python
-# Default: uses function name
+# Default: output_dir is relative to experiment file
+# If my_experiment.py is at /project/experiments/my_experiment.py:
 @pyexp.experiment
 def my_experiment(config): ...
-# -> out/my_experiment/2024-01-25_14-30-00/<config>-<hash>/
+# -> /project/experiments/out/my_experiment/<timestamp>/<config>-<hash>/
 
-# Custom name
-@pyexp.experiment(name="mnist")
+# Custom output directory in decorator
+@pyexp.experiment(output_dir="/data/results")
 def my_experiment(config): ...
-# -> out/mnist/2024-01-25_14-30-00/<config>-<hash>/
+# -> /data/results/my_experiment/<timestamp>/<config>-<hash>/
 
 # Override at runtime
+experiment.run(output_dir="results/")
+
+# Override via CLI
+# python my_experiment.py --output-dir /tmp/test
+
+# Custom experiment name
+@pyexp.experiment(name="mnist")
+def my_experiment(config): ...
+
+# Override name at runtime
 experiment.run(name="experiment_v2")
 ```
 
@@ -437,11 +473,21 @@ python main.py --output-dir results/
 
 ## Configuration
 
-The output directory defaults to `out/` but can be customized:
+The output directory defaults to `out/` relative to the experiment file's location:
 
 ```python
+# Override in decorator
+@pyexp.experiment(output_dir="/data/experiments")
+def my_experiment(config): ...
+
+# Override in run()
 experiment.run(output_dir="results/")
+
+# Override via CLI
+# python my_experiment.py --output-dir /tmp/test
 ```
+
+Priority: CLI `--output-dir` > `run(output_dir=...)` > `@experiment(output_dir=...)` > file-relative default
 
 ## Logging and Visualization
 
@@ -701,9 +747,17 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Decorators
 
 - `@pyexp.experiment` - Define an experiment function
-- `@pyexp.experiment(name="...", executor="...")` - Define with options
+- `@pyexp.experiment(name="...", output_dir="...", executor="...")` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
+
+### Experiment Methods
+
+- `experiment.run(...)` - Execute the full pipeline: configs → experiments → report
+- `experiment.results(timestamp=None, output_dir=None)` - Load results from a previous run
+  - `timestamp`: Specific timestamp or `"latest"` (default: latest)
+  - `output_dir`: Override output directory (default: file-relative)
+  - Returns: `Tensor` of `Result` objects preserving sweep shape
 
 ### Logger Methods
 

@@ -15,7 +15,7 @@ All decorator and `run()` function arguments should be overridable via CLI argum
 |--------------|-----------|---------|
 | `--name NAME` | `name` parameter | function name |
 | `--executor EXECUTOR` | `executor` parameter | `"subprocess"` |
-| `--output-dir DIR` | `output_dir` parameter | `"out"` |
+| `--output-dir DIR` | `output_dir` parameter | `<file_dir>/out/` (relative to experiment file) |
 | `--continue [TIMESTAMP]` | continue previous run (latest if no arg) | new timestamp |
 | `--report [TIMESTAMP]` | report from cache (latest or specific run) | - |
 | `--list` | list all runs with status | - |
@@ -123,3 +123,31 @@ model = build(MyModel, config["model"])
 - `build()` requires `type` key in dict config
 - Passing existing instance returns it unchanged (with type check)
 - kwargs override config values
+
+## Output Directory
+
+The default output directory is relative to the experiment file's location:
+- If `my_experiment.py` is at `/project/experiments/my_experiment.py`
+- Output goes to `/project/experiments/out/<name>/<timestamp>/`
+
+Override order: CLI `--output-dir` > `run(output_dir=...)` > `@experiment(output_dir=...)` > file-relative default
+
+## Results Loading
+
+The `results()` method loads results from previous runs:
+
+```python
+# Load latest run
+results = experiment.results()
+
+# Load specific run
+results = experiment.results(timestamp="2024-01-25_14-30-00")
+```
+
+### configs.json
+
+Each run saves a `configs.json` file containing:
+- `configs`: List of config dicts (without internal `_` prefixed keys)
+- `shape`: Tensor shape from sweeps
+
+This enables `results()` to reconstruct the exact tensor structure from a previous run.
