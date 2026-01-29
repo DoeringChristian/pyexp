@@ -713,48 +713,72 @@ class Experiment:
                 stderr=sp.DEVNULL,
             )
 
-        config_list = configs_fn()
-        _validate_configs(list(config_list))
+        # =================================================================
+        # PHASE 1: Config Generation (only on fresh start)
+        # =================================================================
+        # On fresh start: generate configs, compute hashes, create directories
+        # On --continue or --report: skip this phase, use saved configs
+        is_fresh_start = not args.continue_run and not args.report
 
-        # Get shape from config_list if it's a Tensor
-        if isinstance(config_list, Tensor):
-            shape = config_list.shape
-        else:
-            shape = (len(config_list),)
+        if is_fresh_start:
+            config_list = configs_fn()
+            _validate_configs(list(config_list))
 
-        # Flatten config_list for iteration
-        flat_configs = list(config_list)
+            # Get shape from config_list if it's a Tensor
+            if isinstance(config_list, Tensor):
+                shape = config_list.shape
+            else:
+                shape = (len(config_list),)
 
-        # Compute experiment directories for each config
-        experiment_dirs = [_get_experiment_dir(config, run_dir) for config in flat_configs]
+            # Flatten config_list for iteration
+            flat_configs = list(config_list)
 
-        # Build configs with 'out' field
-        configs_with_out = []
-        for config, experiment_dir in zip(flat_configs, experiment_dirs):
-            assert (
-                "out" not in config
-            ), "Config cannot contain 'out' key; it is reserved"
-            configs_with_out.append(Config({**config, "out": experiment_dir}))
+            # Compute experiment directories for each config (hashes computed here)
+            experiment_dirs = [
+                _get_experiment_dir(config, run_dir) for config in flat_configs
+            ]
 
-        # Create all experiment directories and save configs upfront
-        run_dir.mkdir(parents=True, exist_ok=True)
-        _save_configs_json(run_dir, shape, experiment_dirs)
+            # Build configs with 'out' field
+            configs_with_out = []
+            for config, experiment_dir in zip(flat_configs, experiment_dirs):
+                assert (
+                    "out" not in config
+                ), "Config cannot contain 'out' key; it is reserved"
+                configs_with_out.append(Config({**config, "out": experiment_dir}))
 
-        for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
-            experiment_dir.mkdir(parents=True, exist_ok=True)
-            config_json_path = experiment_dir / "config.json"
-            config_json_path.write_text(
-                json.dumps(dict(config_with_out), indent=2, default=str)
-            )
+            # Create run directory and save configs.json
+            run_dir.mkdir(parents=True, exist_ok=True)
+            _save_configs_json(run_dir, shape, experiment_dirs)
 
-        # Run experiments (skip if report-only mode)
+            # Create all experiment directories and save individual config.json files
+            for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                config_json_path = experiment_dir / "config.json"
+                config_json_path.write_text(
+                    json.dumps(dict(config_with_out), indent=2, default=str)
+                )
+
+        # =================================================================
+        # PHASE 2: Experiment Execution (skip if --report)
+        # =================================================================
+        # Load configs from saved config.json files and run experiments
         if not args.report:
+            # Load experiment directories and shape from configs.json
+            experiment_dirs, shape = _load_configs_json(run_dir)
+
             # Initialize progress bar if capturing output
             show_progress = not args.no_capture
-            progress = _ProgressBar(len(flat_configs)) if show_progress else None
+            progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
 
-            for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
+            for experiment_dir in experiment_dirs:
                 result_path = experiment_dir / "result.pkl"
+
+                # Load config from saved config.json
+                config_json_path = experiment_dir / "config.json"
+                config_data = json.loads(config_json_path.read_text())
+                # Convert 'out' string back to Path
+                config_data["out"] = experiment_dir
+                config_with_out = Config(config_data)
                 config_name = config_with_out.get("name", "")
 
                 if not result_path.exists():
@@ -778,8 +802,12 @@ class Experiment:
                         # Print error immediately on each failure
                         error_msg = structured.get("error", "")
                         remaining = max_retries - attempt
-                        retry_info = f" (retrying, {remaining} left)" if remaining > 0 else ""
-                        print(f"\n--- Error in {config_name or 'experiment'}{retry_info} ---")
+                        retry_info = (
+                            f" (retrying, {remaining} left)" if remaining > 0 else ""
+                        )
+                        print(
+                            f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
+                        )
                         print(error_msg)
                         if structured.get("log"):
                             print("--- Log output ---")
@@ -808,10 +836,12 @@ class Experiment:
             if progress:
                 progress.finish()
 
-        # Always load results from disk for the report
+        # =================================================================
+        # PHASE 3: Report Generation (always runs)
+        # =================================================================
+        # Load results from disk and run report function
         results = _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
 
-        # Create report directory and run report
         report_dir = run_dir / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 

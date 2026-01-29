@@ -395,12 +395,16 @@ class Logger:
         """Set the global iteration counter."""
         self._global_it = it
 
+    def _get_timestamp(self) -> float:
+        """Get current timestamp in seconds with nanosecond precision."""
+        return time.time_ns() / 1e9
+
     def add_scalar(self, tag: str, scalar_value: float) -> None:
         """Log a scalar value at the current iteration.
 
         Scalars are appended to scalars.jsonl as {"it": N, "tag": "...", "value": V, "ts": T}.
         """
-        ts = time.time()
+        ts = self._get_timestamp()
         self._queue.put(("scalar", (tag, scalar_value, self._global_it, ts)))
 
     def add_text(self, tag: str, text_string: str) -> None:
@@ -408,7 +412,7 @@ class Logger:
 
         Text is appended to text.jsonl as {"it": N, "tag": "...", "text": "...", "ts": T}.
         """
-        ts = time.time()
+        ts = self._get_timestamp()
         self._queue.put(("text", (tag, text_string, self._global_it, ts)))
 
     def add_figure(self, tag: str, figure: Any, interactive: bool = True) -> None:
@@ -423,7 +427,7 @@ class Logger:
             interactive: If True, render as interactive widget in viewer.
                         If False, render as static image (faster loading).
         """
-        ts = time.time()
+        ts = self._get_timestamp()
         self._queue.put(("figure", (tag, figure, self._global_it, interactive, ts)))
 
     def add_checkpoint(self, tag: str, obj: Any) -> None:
@@ -436,7 +440,7 @@ class Logger:
             tag: Name/tag for the checkpoint.
             obj: The object to save (must be picklable).
         """
-        ts = time.time()
+        ts = self._get_timestamp()
         self._queue.put(("checkpoint", (tag, obj, self._global_it, ts)))
 
     def _write_scalar(self, tag: str, scalar_value: float, it: int, ts: float) -> None:
