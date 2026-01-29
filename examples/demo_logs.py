@@ -19,7 +19,7 @@ def train(config: Config, logger: Logger):
         logger.set_global_it(i)
 
         # Simulate computation time
-        # time.sleep(0.025)
+        time.sleep(0.005)
 
         # Simulated loss curve (decreasing with noise) - seed affects noise
         loss = 1.0 * math.exp(-i / (30 + seed * 5)) + 0.1 * math.sin(
@@ -43,7 +43,8 @@ def train(config: Config, logger: Logger):
         if i % 25 == 0:
             try:
                 import matplotlib
-                matplotlib.use('Agg')  # Non-interactive backend for subprocess
+
+                matplotlib.use("Agg")  # Non-interactive backend for subprocess
                 import matplotlib.pyplot as plt
                 import numpy as np
 

@@ -359,8 +359,10 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
 
     # Helper to format time duration
     def format_time(seconds: float) -> str:
-        if seconds < 60:
-            return f"{seconds:.1f}s"
+        if seconds < 1:
+            return f"{seconds*1000:.1f}ms"
+        elif seconds < 60:
+            return f"{seconds:.3f}s"
         elif seconds < 3600:
             return f"{seconds/60:.1f}m"
         else:
@@ -438,7 +440,8 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
                 if ts > 0:
                     from datetime import datetime
                     dt = datetime.fromtimestamp(ts)
-                    time_str = dt.strftime("%H:%M:%S")
+                    # Include milliseconds in the time display
+                    time_str = dt.strftime("%H:%M:%S") + f".{int((ts % 1) * 1000):03d}"
                     label_parts.append(
                         f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)}, {time_str})<br>'
                     )
