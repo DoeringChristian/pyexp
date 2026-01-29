@@ -83,16 +83,16 @@ def RunSelector():
                 current.remove(n)
             on_select(current)
 
-        # Get color if selected
+        # Color the label if selected
         if is_selected:
             color = get_run_color(run, selected_runs.value)
-            with solara.Row(style={"align-items": "center", "gap": "4px"}):
+            with solara.Row(style={"align-items": "center"}):
+                solara.Checkbox(label="", value=is_selected, on_value=toggle)
                 solara.HTML(
                     tag="span",
-                    attributes={"style": f"color: {color}; font-size: 16px;"},
-                    unsafe_innerHTML="●",
+                    attributes={"style": f"color: {color}; font-weight: bold; cursor: pointer;"},
+                    unsafe_innerHTML=name,
                 )
-                solara.Checkbox(label=name, value=is_selected, on_value=toggle)
         else:
             solara.Checkbox(label=name, value=is_selected, on_value=toggle)
 
