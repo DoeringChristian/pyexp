@@ -206,6 +206,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             sync=True
         )
 
+    # Log scale state
+    log_scale = solara.use_reactive(False)
+
     # Collect all data
     series_list = []
     for run, timeseries in runs_data.items():
@@ -223,9 +226,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # Use shared colors
     colors = RUN_COLORS
 
-    # Create scales
+    # Create scales (use LogScale for y if enabled)
     x_scale = bq.LinearScale()
-    y_scale = bq.LinearScale()
+    y_scale = bq.LogScale() if log_scale.value else bq.LinearScale()
 
     # Create lines (no legend)
     lines = []
@@ -420,9 +423,18 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         brush_xy.selected = None
         brush_x.selected = None
 
+    # Toggle log scale
+    def toggle_log(*args):
+        log_scale.set(not log_scale.value)
+
     # Controls
     with solara.Row():
         solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
+        solara.Button(
+            "Log Y" if not log_scale.value else "Linear Y",
+            on_click=toggle_log,
+            icon_name="mdi-math-log" if not log_scale.value else "mdi-chart-line",
+        )
         solara.Text(
             "Drag to zoom • Shift+Drag for X-only",
             style={"color": "#666", "font-size": "12px"},
@@ -464,6 +476,48 @@ def ScalarsPanel():
 
 
 @solara.component
+def CopyButton(text: str):
+    """Button that copies text to clipboard using JavaScript."""
+    import anywidget
+    import traitlets
+
+    class CopyWidget(anywidget.AnyWidget):
+        _esm = """
+        export function render({ model, el }) {
+            const btn = document.createElement('button');
+            btn.innerHTML = '📋 Copy';
+            btn.style.cssText = 'padding: 4px 8px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; font-size: 12px;';
+
+            btn.addEventListener('click', async () => {
+                const text = model.get('text');
+                try {
+                    await navigator.clipboard.writeText(text);
+                    btn.innerHTML = '✓ Copied!';
+                    btn.style.background = '#d4edda';
+                    setTimeout(() => {
+                        btn.innerHTML = '📋 Copy';
+                        btn.style.background = '#f5f5f5';
+                    }, 1500);
+                } catch (err) {
+                    btn.innerHTML = '✗ Failed';
+                    btn.style.background = '#f8d7da';
+                    setTimeout(() => {
+                        btn.innerHTML = '📋 Copy';
+                        btn.style.background = '#f5f5f5';
+                    }, 1500);
+                }
+            });
+
+            el.appendChild(btn);
+        }
+        """
+        text = traitlets.Unicode("").tag(sync=True)
+
+    widget = CopyWidget(text=text)
+    solara.display(widget)
+
+
+@solara.component
 def TextItem(run: Path, tag: str, root_path: Path, data: list, color: str):
     """Display text for a single run and tag."""
     run_name = str(run.relative_to(root_path)) if run != root_path else "."
@@ -489,8 +543,10 @@ def TextItem(run: Path, tag: str, root_path: Path, data: list, color: str):
             )
             solara.Text(f"Iteration: {iterations[iter_idx.value]}")
 
-        # Display text
+        # Display text with copy button
         text = data[iter_idx.value][1]
+        with solara.Row(style={"justify-content": "flex-end", "margin-bottom": "4px"}):
+            CopyButton(text)
         solara.Markdown(f"```\n{text}\n```")
 
 
