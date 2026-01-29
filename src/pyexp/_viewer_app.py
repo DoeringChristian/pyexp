@@ -17,7 +17,16 @@ from pyexp._viewer import (
 )
 
 # Shared colors for runs (matching TensorBoard palette)
-RUN_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+RUN_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+]
 
 # Reactive state
 root_dir = solara.reactive("")
@@ -37,7 +46,10 @@ def get_run_color(run: Path, runs: list) -> str:
 @solara.component
 def RunSelector():
     """Left panel for selecting runs."""
+    import re
+
     _ = refresh_counter.value  # Trigger refresh
+    filter_pattern = solara.use_reactive("")
 
     if not root_dir.value:
         solara.Text("Enter a directory path above.")
@@ -54,11 +66,28 @@ def RunSelector():
         solara.Text("No runs found.")
         return
 
-    solara.Markdown(f"**{len(runs)} runs found**")
-
     # Multi-select for runs
     run_names = [str(r.relative_to(root_path)) if r != root_path else "." for r in runs]
     run_map = {name: run for name, run in zip(run_names, runs)}
+
+    # Filter runs by regex
+    filtered_names = run_names
+    filter_error = None
+    if filter_pattern.value:
+        try:
+            pattern = re.compile(filter_pattern.value, re.IGNORECASE)
+            filtered_names = [name for name in run_names if pattern.search(name)]
+        except re.error as e:
+            filter_error = str(e)
+
+    solara.InputText(
+        label="Filter (regex)",
+        value=filter_pattern,
+    )
+    if filter_error:
+        solara.Error(f"Invalid regex: {filter_error}")
+
+    solara.Markdown(f"**{len(filtered_names)}/{len(runs)} runs**")
 
     def on_select(selected_names):
         selected_runs.set([run_map[name] for name in selected_names])
@@ -71,7 +100,7 @@ def RunSelector():
                 current_names.append(name)
                 break
 
-    for name in run_names:
+    for name in filtered_names:
         is_selected = name in current_names
         run = run_map[name]
 
@@ -90,7 +119,9 @@ def RunSelector():
                 solara.Checkbox(label="", value=is_selected, on_value=toggle)
                 solara.HTML(
                     tag="span",
-                    attributes={"style": f"color: {color}; font-weight: bold; cursor: pointer;"},
+                    attributes={
+                        "style": f"color: {color}; font-weight: bold; cursor: pointer;"
+                    },
                     unsafe_innerHTML=name,
                 )
         else:
@@ -116,8 +147,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # Custom widget to detect shift key and mouse position
     class JsonType(traitlets.TraitType):
         """A trait type for JSON-serializable data."""
+
         default_value = {}
-        info_text = 'a JSON-serializable dict'
+        info_text = "a JSON-serializable dict"
 
         def validate(self, obj, value):
             if isinstance(value, dict):
@@ -170,7 +202,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         }
         """
         shift_pressed = traitlets.Bool(False).tag(sync=True)
-        mouse_pos = traitlets.Dict({"x": -1, "y": -1, "width": 0, "height": 0}).tag(sync=True)
+        mouse_pos = traitlets.Dict({"x": -1, "y": -1, "width": 0, "height": 0}).tag(
+            sync=True
+        )
 
     # Collect all data
     series_list = []
@@ -236,11 +270,21 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         hover_scatters.append(scatter)
 
     # Create axes
-    x_axis = bq.Axis(scale=x_scale, label="Iteration", grid_lines="solid", grid_color="#eee")
-    y_axis = bq.Axis(scale=y_scale, orientation="vertical", label="Value", grid_lines="solid", grid_color="#eee")
+    x_axis = bq.Axis(
+        scale=x_scale, label="Iteration", grid_lines="solid", grid_color="#eee"
+    )
+    y_axis = bq.Axis(
+        scale=y_scale,
+        orientation="vertical",
+        label="Value",
+        grid_lines="solid",
+        grid_color="#eee",
+    )
 
     # XY Box zoom selector
-    brush_xy = bq.interacts.BrushSelector(x_scale=x_scale, y_scale=y_scale, color="steelblue")
+    brush_xy = bq.interacts.BrushSelector(
+        x_scale=x_scale, y_scale=y_scale, color="steelblue"
+    )
     # X-only selector
     brush_x = bq.interacts.BrushIntervalSelector(scale=x_scale, color="orange")
 
@@ -379,7 +423,10 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # Controls
     with solara.Row():
         solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
-        solara.Text("Drag to zoom • Shift+Drag for X-only", style={"color": "#666", "font-size": "12px"})
+        solara.Text(
+            "Drag to zoom • Shift+Drag for X-only",
+            style={"color": "#666", "font-size": "12px"},
+        )
 
     solara.display(widgets.VBox([detector, fig, hover_label]))
 
@@ -428,7 +475,9 @@ def TextItem(run: Path, tag: str, root_path: Path, data: list, color: str):
     with solara.Card():
         solara.HTML(
             tag="div",
-            attributes={"style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"},
+            attributes={
+                "style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"
+            },
             unsafe_innerHTML=f"● {run_name}",
         )
         if len(iterations) > 1:
@@ -492,7 +541,9 @@ def FigureItem(run: Path, tag: str, root_path: Path, data: list, color: str):
     with solara.Card():
         solara.HTML(
             tag="div",
-            attributes={"style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"},
+            attributes={
+                "style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"
+            },
             unsafe_innerHTML=f"● {run_name}",
         )
         if len(iterations) > 1:
