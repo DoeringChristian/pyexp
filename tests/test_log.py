@@ -7,14 +7,22 @@ import pytest
 from pyexp import Logger
 
 
-def _read_jsonl(path):
-    """Read a JSONL file and return list of parsed entries."""
+def _read_jsonl(path, strip_ts=True):
+    """Read a JSONL file and return list of parsed entries.
+
+    Args:
+        path: Path to the JSONL file.
+        strip_ts: If True, remove 'ts' (timestamp) field from entries for comparison.
+    """
     entries = []
     with open(path) as f:
         for line in f:
             line = line.strip()
             if line:
-                entries.append(json.loads(line))
+                entry = json.loads(line)
+                if strip_ts:
+                    entry.pop("ts", None)
+                entries.append(entry)
     return entries
 
 

@@ -89,9 +89,9 @@ Results are organized by experiment name and timestamp. By default, the output d
 <experiment_file_dir>/out/
   <experiment_name>/
     <timestamp>/                    # Each run gets a new timestamp
-      configs.json                  # Saved config list and shape
+      configs.json                  # References to run folders and shape
       <config_name>-<hash>/
-        config.json                 # Individual config
+        config.json                 # Full config (includes 'out' path)
         result.pkl
         log.out                     # Captured stdout/stderr
         model.pt                    # Your saved artifacts

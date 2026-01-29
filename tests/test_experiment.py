@@ -458,7 +458,7 @@ class TestExperimentRun:
         assert result.result == 10
 
     def test_config_json_saved(self, tmp_path):
-        """Each experiment run should save a config.json."""
+        """Each experiment run should save a config.json with 'out' field."""
         import json
 
         @experiment
@@ -482,6 +482,8 @@ class TestExperimentRun:
         assert data["name"] == "test"
         assert data["lr"] == 0.01
         assert data["nested"]["a"] == 1
+        # config.json should include 'out' field
+        assert "out" in data
 
     def test_invalid_config_type_raises(self, tmp_path):
         """Configs with non-base types should be rejected."""
@@ -636,7 +638,7 @@ class TestResultsMethod:
             my_exp.results(timestamp="1999-01-01_00-00-00", output_dir=tmp_path)
 
     def test_configs_json_saved(self, tmp_path):
-        """run() saves configs.json with configs and shape."""
+        """run() saves configs.json with run folder references and shape."""
         import json
 
         @experiment
@@ -667,9 +669,18 @@ class TestResultsMethod:
 
         data = json.loads(configs_path.read_text())
         assert data["shape"] == [2]
-        assert len(data["configs"]) == 2
-        assert data["configs"][0]["name"] == "a"
-        assert data["configs"][1]["name"] == "b"
+        assert len(data["runs"]) == 2
+        # runs should be folder names like "a-<hash>" and "b-<hash>"
+        assert data["runs"][0].startswith("a-")
+        assert data["runs"][1].startswith("b-")
+
+        # Individual config.json files should contain full configs with 'out'
+        for run_folder in data["runs"]:
+            config_json = run_dir / run_folder / "config.json"
+            assert config_json.exists()
+            config_data = json.loads(config_json.read_text())
+            assert "out" in config_data
+            assert "x" in config_data
 
 
 class TestOutputFolderStructure:
