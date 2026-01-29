@@ -728,118 +728,90 @@ class Experiment:
         # Compute experiment directories for each config
         experiment_dirs = [_get_experiment_dir(config, run_dir) for config in flat_configs]
 
-        # Save configs.json for later loading via results()
-        run_dir.mkdir(parents=True, exist_ok=True)
-        _save_configs_json(run_dir, shape, experiment_dirs)
-
-        # If report-only mode, load results directly from configs.json
-        if args.report:
-            results = _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
-            report_dir = run_dir / "report"
-            report_dir.mkdir(parents=True, exist_ok=True)
-            return report_fn(results, report_dir)
-
-        # Initialize progress bar if capturing output
-        show_progress = not args.no_capture and not args.report
-        progress = _ProgressBar(len(flat_configs)) if show_progress else None
-
-        results = []
-
+        # Build configs with 'out' field
+        configs_with_out = []
         for config, experiment_dir in zip(flat_configs, experiment_dirs):
             assert (
                 "out" not in config
             ), "Config cannot contain 'out' key; it is reserved"
-            result_path = experiment_dir / "result.pkl"
-            config_name = config.get("name", "")
+            configs_with_out.append(Config({**config, "out": experiment_dir}))
 
-            if not result_path.exists():
-                experiment_dir.mkdir(parents=True, exist_ok=True)
+        # Create all experiment directories and save configs upfront
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _save_configs_json(run_dir, shape, experiment_dirs)
 
-                # Save config as JSON for inspection/validation (includes 'out')
-                config_with_out = Config({**config, "out": experiment_dir})
-                config_json_path = experiment_dir / "config.json"
-                config_json_path.write_text(
-                    json.dumps(dict(config_with_out), indent=2, default=str)
-                )
-
-                # Show running status
-                if progress:
-                    progress.start(config_name)
-
-                # Retry loop
-                for attempt in range(max_retries + 1):
-                    structured = exec_instance.run(
-                        self._fn,
-                        config_with_out,
-                        result_path,
-                        capture=not args.no_capture,
-                        wants_logger=self._wants_logger,
-                        stash=enable_stash,
-                    )
-                    if not structured.get("error"):
-                        break  # Success, exit retry loop
-
-                    # Print error immediately on each failure
-                    error_msg = structured.get("error", "")
-                    remaining = max_retries - attempt
-                    retry_info = f" (retrying, {remaining} left)" if remaining > 0 else ""
-                    print(f"\n--- Error in {config_name or 'experiment'}{retry_info} ---")
-                    print(error_msg)
-                    if structured.get("log"):
-                        print("--- Log output ---")
-                        print(structured["log"])
-                    print("---")
-
-                    if attempt < max_retries:
-                        # Delete result.pkl before retry so executor writes fresh
-                        result_path.unlink(missing_ok=True)
-
-                # Save log to plaintext file
-                log_path = experiment_dir / "log.out"
-                log_path.write_text(structured.get("log", ""))
-                # Determine status based on error field
-                if structured.get("error"):
-                    status = "failed"
-                else:
-                    status = "passed"
-            else:
-                # Load cached result
-                experiment_dir.mkdir(parents=True, exist_ok=True)
-                # Ensure marker file exists for viewer discovery
-                marker_path = experiment_dir / ".pyexp"
-                marker_path.touch(exist_ok=True)
-                with open(result_path, "rb") as f:
-                    structured = pickle.load(f)
-                status = "cached"
-
-            # Update progress bar
-            if progress:
-                progress.update(status, config_name)
-
-            # Create Result object with config (include 'out' for consistency)
-            config_with_out = {**config, "out": experiment_dir}
-
-            # Add LogReader if logger was used
-            log_reader = None
-            if self._wants_logger:
-                log_reader = LogReader(experiment_dir)
-
-            result_obj = Result(
-                config=config_with_out,
-                result=structured.get("result"),
-                error=structured.get("error"),
-                log=structured.get("log", ""),
-                logger=log_reader,
+        for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
+            experiment_dir.mkdir(parents=True, exist_ok=True)
+            config_json_path = experiment_dir / "config.json"
+            config_json_path.write_text(
+                json.dumps(dict(config_with_out), indent=2, default=str)
             )
-            results.append(result_obj)
 
-        # Finish progress bar
-        if progress:
-            progress.finish()
+        # Run experiments (skip if report-only mode)
+        if not args.report:
+            # Initialize progress bar if capturing output
+            show_progress = not args.no_capture
+            progress = _ProgressBar(len(flat_configs)) if show_progress else None
 
-        results = Tensor(results, shape)
+            for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
+                result_path = experiment_dir / "result.pkl"
+                config_name = config_with_out.get("name", "")
 
-        # Create report directory
+                if not result_path.exists():
+                    # Show running status
+                    if progress:
+                        progress.start(config_name)
+
+                    # Retry loop
+                    for attempt in range(max_retries + 1):
+                        structured = exec_instance.run(
+                            self._fn,
+                            config_with_out,
+                            result_path,
+                            capture=not args.no_capture,
+                            wants_logger=self._wants_logger,
+                            stash=enable_stash,
+                        )
+                        if not structured.get("error"):
+                            break  # Success, exit retry loop
+
+                        # Print error immediately on each failure
+                        error_msg = structured.get("error", "")
+                        remaining = max_retries - attempt
+                        retry_info = f" (retrying, {remaining} left)" if remaining > 0 else ""
+                        print(f"\n--- Error in {config_name or 'experiment'}{retry_info} ---")
+                        print(error_msg)
+                        if structured.get("log"):
+                            print("--- Log output ---")
+                            print(structured["log"])
+                        print("---")
+
+                        if attempt < max_retries:
+                            # Delete result.pkl before retry so executor writes fresh
+                            result_path.unlink(missing_ok=True)
+
+                    # Save log to plaintext file
+                    log_path = experiment_dir / "log.out"
+                    log_path.write_text(structured.get("log", ""))
+                    status = "failed" if structured.get("error") else "passed"
+                else:
+                    # Ensure marker file exists for viewer discovery
+                    marker_path = experiment_dir / ".pyexp"
+                    marker_path.touch(exist_ok=True)
+                    status = "cached"
+
+                # Update progress bar
+                if progress:
+                    progress.update(status, config_name)
+
+            # Finish progress bar
+            if progress:
+                progress.finish()
+
+        # Always load results from disk for the report
+        results = _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
+
+        # Create report directory and run report
         report_dir = run_dir / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 
