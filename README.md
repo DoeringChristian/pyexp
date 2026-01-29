@@ -58,6 +58,25 @@ python main.py --report                        # Report from most recent run
 python main.py --report=2024-01-25_14-30-00    # Report from specific run
 ```
 
+### Execution Phases
+
+The experiment framework separates execution into three phases:
+
+1. **Config Generation** (only on fresh start - no `--continue` or `--report`):
+   - Runs the `@experiment.configs` function to generate configurations
+   - Computes directory hashes and creates experiment folders
+   - Saves `configs.json` (folder references) and individual `config.json` files
+
+2. **Experiment Execution** (fresh start or `--continue`, skipped for `--report`):
+   - Loads configs from saved `config.json` files (not recomputed)
+   - Runs experiments and saves results to `result.pkl`
+
+3. **Report Generation** (always runs):
+   - Loads all results from disk
+   - Runs the `@experiment.report` function
+
+This separation ensures that `--continue` and `--report` modes are immune to changes in the config generation code - they always use the saved configurations from the original run.
+
 ### Loading Previous Results
 
 Use the `results()` method to load results from a previous run programmatically:

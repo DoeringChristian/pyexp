@@ -140,6 +140,64 @@ class TestExperimentRun:
 
         assert result == 99
 
+    def test_report_uses_saved_configs(self, tmp_path):
+        """--report should use saved configs, not recompute from configs function."""
+        config_value = [42]  # Mutable to allow modification
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": config_value[0]}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].config["x"]
+
+        # First run with x=42
+        with patch.object(sys, "argv", ["test"]):
+            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
+        assert result1 == 42
+
+        # Change configs function to return different value
+        config_value[0] = 999
+
+        # --report should still use saved config with x=42
+        with patch.object(sys, "argv", ["test", "--report"]):
+            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
+        assert result2 == 42  # Should be original value, not 999
+
+    def test_continue_uses_saved_configs(self, tmp_path):
+        """--continue should use saved configs, not recompute from configs function."""
+        config_value = [42]  # Mutable to allow modification
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": config_value[0]}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].config["x"]
+
+        # First run with x=42
+        with patch.object(sys, "argv", ["test"]):
+            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
+        assert result1 == 42
+
+        # Change configs function to return different value
+        config_value[0] = 999
+
+        # --continue should still use saved config with x=42
+        with patch.object(sys, "argv", ["test", "--continue"]):
+            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
+        assert result2 == 42  # Should be original value, not 999
+
     def test_run_report_flag_no_cache_raises(self, tmp_path):
         @experiment
         def my_exp(config):
