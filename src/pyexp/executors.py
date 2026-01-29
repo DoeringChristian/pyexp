@@ -42,6 +42,8 @@ class Executor(ABC):
         config: Config,
         result_path: Path,
         capture: bool = True,
+        wants_logger: bool = False,
+        stash: bool = True,
     ) -> dict:
         """Run a single experiment and return the result.
 
@@ -50,6 +52,8 @@ class Executor(ABC):
             config: The experiment config (already has 'out' set).
             result_path: Path where result should be cached.
             capture: If True (default), capture output. If False, show output live.
+            wants_logger: If True, create a Logger and pass it to the experiment function.
+            stash: If True, capture git commit hash at the start of the experiment.
 
         Returns:
             The experiment result dict. If execution failed, should contain
@@ -71,6 +75,8 @@ class InlineExecutor(Executor):
         config: Config,
         result_path: Path,
         capture: bool = True,
+        wants_logger: bool = False,
+        stash: bool = True,
     ) -> dict:
         """Run experiment inline and cache result.
 
@@ -82,7 +88,6 @@ class InlineExecutor(Executor):
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        wants_logger = config.get("_wants_logger", False)
         logger = None
 
         if wants_logger:
@@ -96,15 +101,14 @@ class InlineExecutor(Executor):
             config_to_log = {
                 k: v
                 for k, v in config.items()
-                if not k.startswith("_") and k not in ("out", "logger")
+                if k not in ("out", "logger")
             }
             logger.add_text(
                 "config", yaml.dump(config_to_log, default_flow_style=False)
             )
 
             # Log git commit hash if stash enabled
-            stash_enabled = config.get("_stash", True)
-            if stash_enabled:
+            if stash:
                 try:
                     from pyexp.utils import stash as git_stash
 
@@ -160,6 +164,8 @@ class SubprocessExecutor(Executor):
         config: Config,
         result_path: Path,
         capture: bool = True,
+        wants_logger: bool = False,
+        stash: bool = True,
     ) -> dict:
         """Run experiment in subprocess via cloudpickle serialization.
 
@@ -173,6 +179,8 @@ class SubprocessExecutor(Executor):
             "fn": fn,
             "config": config,
             "result_path": str(result_path),
+            "wants_logger": wants_logger,
+            "stash": stash,
         }
 
         # Write payload to temp file
@@ -254,6 +262,8 @@ class ForkExecutor(Executor):
         config: Config,
         result_path: Path,
         capture: bool = True,
+        wants_logger: bool = False,
+        stash: bool = True,
     ) -> dict:
         """Run experiment in a forked process.
 
@@ -278,8 +288,6 @@ class ForkExecutor(Executor):
                     os.dup2(write_fd, 2)  # stderr
                     os.close(write_fd)
 
-                wants_logger = config.get("_wants_logger", False)
-
                 if wants_logger:
                     # Create logger for this experiment
                     from pyexp.log import Logger
@@ -291,15 +299,14 @@ class ForkExecutor(Executor):
                     config_to_log = {
                         k: v
                         for k, v in config.items()
-                        if not k.startswith("_") and k not in ("out", "logger")
+                        if k not in ("out", "logger")
                     }
                     logger.add_text(
                         "config", yaml.dump(config_to_log, default_flow_style=False)
                     )
 
                     # Log git commit hash if stash enabled
-                    stash_enabled = config.get("_stash", True)
-                    if stash_enabled:
+                    if stash:
                         try:
                             from pyexp.utils import stash as git_stash
 
@@ -457,6 +464,8 @@ class RayExecutor(Executor):
         config: Config,
         result_path: Path,
         capture: bool = True,
+        wants_logger: bool = False,
+        stash: bool = True,
     ) -> dict:
         """Run experiment as a Ray task.
 
@@ -466,7 +475,7 @@ class RayExecutor(Executor):
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         @self._ray.remote
-        def _run_experiment(fn, config, result_path_str, capture):
+        def _run_experiment(fn, config, result_path_str, capture, wants_logger, stash):
             """Ray remote function to execute experiment."""
             import io
             import pickle
@@ -479,8 +488,6 @@ class RayExecutor(Executor):
             log = ""
             logger = None
 
-            wants_logger = config.get("_wants_logger", False)
-
             if wants_logger:
                 from pyexp.log import Logger
                 import yaml
@@ -492,15 +499,14 @@ class RayExecutor(Executor):
                 config_to_log = {
                     k: v
                     for k, v in config.items()
-                    if not k.startswith("_") and k not in ("out", "logger")
+                    if k not in ("out", "logger")
                 }
                 logger.add_text(
                     "config", yaml.dump(config_to_log, default_flow_style=False)
                 )
 
                 # Log git commit hash if stash enabled
-                stash_enabled = config.get("_stash", True)
-                if stash_enabled:
+                if stash:
                     try:
                         from pyexp.utils import stash as git_stash
 
@@ -538,7 +544,7 @@ class RayExecutor(Executor):
             return structured
 
         # Submit task and wait for result
-        future = _run_experiment.remote(fn, config, str(result_path), capture)
+        future = _run_experiment.remote(fn, config, str(result_path), capture, wants_logger, stash)
         try:
             result = self._ray.get(future)
             return result

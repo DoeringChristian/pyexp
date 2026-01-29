@@ -12,6 +12,8 @@ The payload file contains cloudpickle-serialized data:
         "fn": <experiment function>,
         "config": <config dict>,
         "result_path": <path to write result>,
+        "wants_logger": <bool>,
+        "stash": <bool>,
     }
 """
 
@@ -44,8 +46,8 @@ def run_worker(payload_path: str) -> int:
         fn = payload["fn"]
         config = payload["config"]
         result_path = Path(payload["result_path"])
-
-        wants_logger = config.get("_wants_logger", False)
+        wants_logger = payload.get("wants_logger", False)
+        stash = payload.get("stash", True)
 
         if wants_logger:
             from pyexp.log import Logger
@@ -58,15 +60,14 @@ def run_worker(payload_path: str) -> int:
             config_to_log = {
                 k: v
                 for k, v in config.items()
-                if not k.startswith("_") and k not in ("out", "logger")
+                if k not in ("out", "logger")
             }
             logger.add_text(
                 "config", yaml.dump(config_to_log, default_flow_style=False)
             )
 
             # Log git commit hash if stash enabled
-            stash_enabled = config.get("_stash", True)
-            if stash_enabled:
+            if stash:
                 try:
                     from pyexp.utils import stash as git_stash
 

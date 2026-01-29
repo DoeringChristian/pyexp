@@ -233,14 +233,24 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # Compute x-axis data based on mode
     if relative_time.value:
         # Use relative time (seconds from first timestamp of each run)
+        # Re-sort series by timestamp to ensure correct ordering
         x_data_list = []
+        new_series_list = []
         for run_name, iterations, values, timestamps in series_list:
             if timestamps.any() and timestamps[0] > 0:
-                rel_time = timestamps - timestamps[0]
+                # Sort by timestamp
+                sort_idx = np.argsort(timestamps)
+                sorted_its = iterations[sort_idx]
+                sorted_vals = values[sort_idx]
+                sorted_ts = timestamps[sort_idx]
+                rel_time = sorted_ts - sorted_ts[0]
                 x_data_list.append(rel_time)
+                new_series_list.append((run_name, sorted_its, sorted_vals, sorted_ts))
             else:
                 # Fallback to iterations if no timestamps
                 x_data_list.append(iterations.astype(float))
+                new_series_list.append((run_name, iterations, values, timestamps))
+        series_list = new_series_list
         x_label = "Time (s)"
     else:
         x_data_list = [iterations.astype(float) for _, iterations, _, _ in series_list]

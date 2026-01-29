@@ -83,27 +83,53 @@ def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
     return output_dir / f"{name}-{hash_str}"
 
 
-def _save_configs_json(run_dir: Path, configs: list[dict], shape: tuple) -> None:
-    """Save configs and shape to a JSON file for later loading."""
-    configs_to_save = [
-        {k: v for k, v in c.items() if not k.startswith("_")}
-        for c in configs
-    ]
+def _save_configs_json(
+    run_dir: Path, shape: tuple, paths: list[Path]
+) -> None:
+    """Save run references and shape to a JSON file for later loading.
+
+    Args:
+        run_dir: The run directory.
+        shape: Shape of the config tensor.
+        paths: List of paths to the experiment directories (one per config).
+    """
+    # Store just the relative paths to run folders
+    runs = [str(p.relative_to(run_dir)) for p in paths]
+
     data = {
-        "configs": configs_to_save,
+        "runs": runs,
         "shape": list(shape),
     }
     configs_path = run_dir / "configs.json"
     configs_path.write_text(json.dumps(data, indent=2, default=str))
 
 
-def _load_configs_json(run_dir: Path) -> tuple[list[dict], tuple]:
-    """Load configs and shape from a JSON file."""
+def _load_configs_json(run_dir: Path) -> tuple[list[Path], tuple]:
+    """Load run paths and shape from configs.json.
+
+    Returns:
+        Tuple of (list of experiment directory paths, shape tuple).
+    """
     configs_path = run_dir / "configs.json"
     if not configs_path.exists():
         raise FileNotFoundError(f"No configs.json found in {run_dir}")
     data = json.loads(configs_path.read_text())
-    return data["configs"], tuple(data["shape"])
+
+    # Handle both old format (configs list) and new format (runs list)
+    if "runs" in data:
+        # New format: just paths to run folders
+        paths = [run_dir / run for run in data["runs"]]
+    else:
+        # Old format: full configs with 'out' field
+        paths = []
+        for config in data["configs"]:
+            if "out" in config:
+                paths.append(run_dir / config["out"])
+            else:
+                # Very old format: compute from hash
+                paths.append(_get_experiment_dir(config, run_dir))
+
+    return paths, tuple(data["shape"])
 
 
 def _load_results_from_dir(
@@ -119,11 +145,23 @@ def _load_results_from_dir(
     Returns:
         Tensor of Result objects with the original shape.
     """
-    configs, shape = _load_configs_json(run_dir)
+    experiment_dirs, shape = _load_configs_json(run_dir)
 
     results = []
-    for config in configs:
-        experiment_dir = _get_experiment_dir(config, run_dir)
+    for experiment_dir in experiment_dirs:
+        # Load config from individual config.json
+        config_path = experiment_dir / "config.json"
+        if config_path.exists():
+            config = json.loads(config_path.read_text())
+            # Convert 'out' string back to Path if present
+            if "out" in config:
+                config["out"] = Path(config["out"])
+        else:
+            config = {}
+
+        # Ensure 'out' is set to the experiment directory
+        config["out"] = experiment_dir
+
         result_path = experiment_dir / "result.pkl"
 
         if not result_path.exists():
@@ -139,11 +177,8 @@ def _load_results_from_dir(
         if wants_logger:
             log_reader = LogReader(experiment_dir)
 
-        # Include 'out' in config for consistency with run()
-        config_with_out = {**config, "out": experiment_dir}
-
         result_obj = Result(
-            config=config_with_out,
+            config=config,
             result=structured.get("result"),
             error=structured.get("error"),
             log=structured.get("log", ""),
@@ -690,9 +725,12 @@ class Experiment:
         # Flatten config_list for iteration
         flat_configs = list(config_list)
 
+        # Compute experiment directories for each config
+        experiment_dirs = [_get_experiment_dir(config, run_dir) for config in flat_configs]
+
         # Save configs.json for later loading via results()
         run_dir.mkdir(parents=True, exist_ok=True)
-        _save_configs_json(run_dir, flat_configs, shape)
+        _save_configs_json(run_dir, shape, experiment_dirs)
 
         # If report-only mode, load results directly from configs.json
         if args.report:
@@ -707,31 +745,21 @@ class Experiment:
 
         results = []
 
-        for config in flat_configs:
+        for config, experiment_dir in zip(flat_configs, experiment_dirs):
             assert (
                 "out" not in config
             ), "Config cannot contain 'out' key; it is reserved"
-            experiment_dir = _get_experiment_dir(config, run_dir)
             result_path = experiment_dir / "result.pkl"
             config_name = config.get("name", "")
 
             if not result_path.exists():
                 experiment_dir.mkdir(parents=True, exist_ok=True)
 
-                # Save config as JSON for inspection/validation
-                config_to_save = {k: v for k, v in config.items() if not k.startswith("_")}
+                # Save config as JSON for inspection/validation (includes 'out')
+                config_with_out = Config({**config, "out": experiment_dir})
                 config_json_path = experiment_dir / "config.json"
                 config_json_path.write_text(
-                    json.dumps(config_to_save, indent=2, default=str)
-                )
-
-                config_with_out = Config(
-                    {
-                        **config,
-                        "out": experiment_dir,
-                        "_stash": enable_stash,
-                        "_wants_logger": self._wants_logger,
-                    }
+                    json.dumps(dict(config_with_out), indent=2, default=str)
                 )
 
                 # Show running status
@@ -745,6 +773,8 @@ class Experiment:
                         config_with_out,
                         result_path,
                         capture=not args.no_capture,
+                        wants_logger=self._wants_logger,
+                        stash=enable_stash,
                     )
                     if not structured.get("error"):
                         break  # Success, exit retry loop
