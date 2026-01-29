@@ -1291,11 +1291,13 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cloudpickle" },
+    { name = "protobuf" },
     { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
 dev = [
+    { name = "protobuf" },
     { name = "pytest" },
 ]
 ray = [
@@ -1316,6 +1318,8 @@ requires-dist = [
     { name = "cloudpickle", specifier = ">=3.0" },
     { name = "ipympl", marker = "extra == 'viewer'", specifier = ">=0.9" },
     { name = "matplotlib", marker = "extra == 'viewer'", specifier = ">=3.0" },
+    { name = "protobuf", specifier = ">=4.0" },
+    { name = "protobuf", marker = "extra == 'dev'", specifier = ">=4.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ray", marker = "extra == 'ray'", specifier = ">=2.0" },

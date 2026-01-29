@@ -1,0 +1,51 @@
+// Protocol buffer schema for pyexp event logging.
+// Similar to TensorBoard's event format but simplified.
+//
+// To regenerate events_pb2.py:
+//   protoc --python_out=. events.proto
+
+syntax = "proto3";
+
+package pyexp;
+
+// A single logged event
+message Event {
+  // Timestamp in seconds since epoch (nanosecond precision stored as double)
+  double timestamp = 1;
+
+  // Iteration number
+  int64 iteration = 2;
+
+  // The actual data (one of the following)
+  oneof data {
+    Scalar scalar = 3;
+    Text text = 4;
+    Figure figure = 5;
+    Checkpoint checkpoint = 6;
+  }
+}
+
+// A scalar value (e.g., loss, accuracy)
+message Scalar {
+  string tag = 1;
+  double value = 2;
+}
+
+// A text string (e.g., logs, summaries)
+message Text {
+  string tag = 1;
+  string value = 2;
+}
+
+// A figure (matplotlib figure serialized with cloudpickle)
+message Figure {
+  string tag = 1;
+  bytes data = 2;  // cloudpickle serialized figure
+  bool interactive = 3;
+}
+
+// A checkpoint (arbitrary object serialized with cloudpickle)
+message Checkpoint {
+  string tag = 1;
+  bytes data = 2;  // cloudpickle serialized object
+}

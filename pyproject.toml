@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "A library for running Python experiments with config, experiment, and report phases"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["cloudpickle>=3.0", "pyyaml>=6.0"]
+dependencies = ["cloudpickle>=3.0", "pyyaml>=6.0", "protobuf>=4.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "protobuf>=4.0"]
 ray = ["ray>=2.0"]
 viewer = ["solara[server]>=1.0", "matplotlib>=3.0", "ipympl>=0.9", "bqplot>=0.12", "anywidget>=0.9"]
 
