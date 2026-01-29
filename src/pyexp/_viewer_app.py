@@ -306,8 +306,15 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         interaction=brush_xy,
     )
 
-    # Hover info label
-    hover_label = widgets.HTML(value="", layout=widgets.Layout(min_height="80px"))
+    # Build base legend (always visible, shows run names)
+    base_legend_parts = ["<b>&nbsp;</b><br>"]  # Placeholder for iteration line
+    for idx, (run_name, _, _) in enumerate(series_list):
+        color = colors[idx % len(colors)]
+        base_legend_parts.append(f'<span style="color:{color}">●</span> {run_name}<br>')
+    base_legend = "".join(base_legend_parts)
+
+    # Hover info label (initialized with base legend)
+    hover_label = widgets.HTML(value=base_legend, layout=widgets.Layout(min_height="80px"))
 
     # Switch interaction based on shift key
     def on_shift_change(change):
@@ -322,11 +329,11 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     def on_mouse_move(change):
         pos = change["new"]
         if pos["x"] < 0:
-            # Mouse left the figure
+            # Mouse left the figure - show base legend
             vline.opacities = [0]
             for scatter in hover_scatters:
                 scatter.opacities = [0]
-            hover_label.value = ""
+            hover_label.value = base_legend
             return
 
         # Convert pixel to data coordinates
@@ -342,7 +349,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             vline.opacities = [0]
             for scatter in hover_scatters:
                 scatter.opacities = [0]
-            hover_label.value = ""
+            hover_label.value = base_legend
             return
 
         # Get current scale bounds
