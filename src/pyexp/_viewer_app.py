@@ -80,6 +80,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     Features:
     - Drag: XY box zoom
     - Shift+Drag: X-only zoom (Y auto-scales)
+    - Hover: Shows crosshair with values for all runs
     - Reset button: restore full view
     """
     import anywidget
@@ -88,26 +89,64 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     import numpy as np
     import traitlets
 
-    # Custom widget to detect shift key using anywidget
-    class ShiftDetector(anywidget.AnyWidget):
+    # Custom widget to detect shift key and mouse position
+    class JsonType(traitlets.TraitType):
+        """A trait type for JSON-serializable data."""
+        default_value = {}
+        info_text = 'a JSON-serializable dict'
+
+        def validate(self, obj, value):
+            if isinstance(value, dict):
+                return value
+            self.error(obj, value)
+
+    class KeyMouseDetector(anywidget.AnyWidget):
         _esm = """
         export function render({ model, el }) {
-            const handler = (e) => {
+            // Shift key detection
+            const keyHandler = (e) => {
                 if (e.key === 'Shift') {
                     model.set('shift_pressed', e.type === 'keydown');
                     model.save_changes();
                 }
             };
-            document.addEventListener('keydown', handler);
-            document.addEventListener('keyup', handler);
+            document.addEventListener('keydown', keyHandler);
+            document.addEventListener('keyup', keyHandler);
+
+            // Use event delegation for mouse tracking - works even when figures are recreated
+            let currentSvg = null;
+
+            const mouseHandler = (e) => {
+                // Find the closest bqplot SVG
+                const svg = e.target.closest('svg');
+                if (!svg || !svg.querySelector('.plotarea_events')) {
+                    if (currentSvg) {
+                        model.set('mouse_pos', {x: -1, y: -1, width: 0, height: 0});
+                        model.save_changes();
+                        currentSvg = null;
+                    }
+                    return;
+                }
+
+                currentSvg = svg;
+                const rect = svg.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                model.set('mouse_pos', {x: x, y: y, width: rect.width, height: rect.height});
+                model.save_changes();
+            };
+
+            document.addEventListener('mousemove', mouseHandler);
 
             return () => {
-                document.removeEventListener('keydown', handler);
-                document.removeEventListener('keyup', handler);
+                document.removeEventListener('keydown', keyHandler);
+                document.removeEventListener('keyup', keyHandler);
+                document.removeEventListener('mousemove', mouseHandler);
             };
         }
         """
         shift_pressed = traitlets.Bool(False).tag(sync=True)
+        mouse_pos = traitlets.Dict({"x": -1, "y": -1, "width": 0, "height": 0}).tag(sync=True)
 
     # Collect all data
     series_list = []
@@ -130,7 +169,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     x_scale = bq.LinearScale()
     y_scale = bq.LinearScale()
 
-    # Create lines only
+    # Create lines (no legend)
     lines = []
     for idx, (run_name, iterations, values) in enumerate(series_list):
         color = colors[idx % len(colors)]
@@ -141,9 +180,36 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             colors=[color],
             stroke_width=2,
             labels=[run_name],
-            display_legend=True,
+            display_legend=False,
         )
         lines.append(line)
+
+    # Vertical crosshair line
+    all_iters = np.concatenate([s[1] for s in series_list])
+    all_vals = np.concatenate([s[2] for s in series_list])
+    vline = bq.Lines(
+        x=[0, 0],
+        y=[float(all_vals.min()), float(all_vals.max())],
+        scales={"x": x_scale, "y": y_scale},
+        colors=["#888"],
+        stroke_width=1,
+        line_style="dashed",
+        opacities=[0],
+    )
+
+    # Scatter points for crosshair intersections
+    hover_scatters = []
+    for idx, (run_name, iterations, values) in enumerate(series_list):
+        color = colors[idx % len(colors)]
+        scatter = bq.Scatter(
+            x=[float(iterations[0])],
+            y=[float(values[0])],
+            scales={"x": x_scale, "y": y_scale},
+            colors=[color],
+            default_size=50,
+            opacities=[0],
+        )
+        hover_scatters.append(scatter)
 
     # Create axes
     x_axis = bq.Axis(scale=x_scale, label="Iteration", grid_lines="solid", grid_color="#eee")
@@ -154,18 +220,23 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # X-only selector
     brush_x = bq.interacts.BrushIntervalSelector(scale=x_scale, color="orange")
 
-    # Shift key detector
-    shift_detector = ShiftDetector()
+    # Key/mouse detector
+    detector = KeyMouseDetector()
+
+    # Figure margins for coordinate calculation
+    fig_margin = {"top": 60, "bottom": 60, "left": 70, "right": 20}
 
     fig = bq.Figure(
-        marks=lines,
+        marks=lines + [vline] + hover_scatters,
         axes=[x_axis, y_axis],
         title=tag,
-        legend_location="top-right",
-        fig_margin={"top": 60, "bottom": 60, "left": 70, "right": 20},
+        fig_margin=fig_margin,
         layout={"width": "100%", "height": "350px"},
         interaction=brush_xy,
     )
+
+    # Hover info label
+    hover_label = widgets.HTML(value="", layout=widgets.Layout(min_height="80px"))
 
     # Switch interaction based on shift key
     def on_shift_change(change):
@@ -174,7 +245,70 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         else:
             fig.interaction = brush_xy
 
-    shift_detector.observe(on_shift_change, names=["shift_pressed"])
+    detector.observe(on_shift_change, names=["shift_pressed"])
+
+    # Update crosshair on mouse move
+    def on_mouse_move(change):
+        pos = change["new"]
+        if pos["x"] < 0:
+            # Mouse left the figure
+            vline.opacities = [0]
+            for scatter in hover_scatters:
+                scatter.opacities = [0]
+            hover_label.value = ""
+            return
+
+        # Convert pixel to data coordinates
+        fig_width = pos["width"]
+        fig_height = pos["height"]
+        plot_width = fig_width - fig_margin["left"] - fig_margin["right"]
+        plot_height = fig_height - fig_margin["top"] - fig_margin["bottom"]
+
+        px = pos["x"] - fig_margin["left"]
+        py = pos["y"] - fig_margin["top"]
+
+        if px < 0 or px > plot_width or py < 0 or py > plot_height:
+            vline.opacities = [0]
+            for scatter in hover_scatters:
+                scatter.opacities = [0]
+            hover_label.value = ""
+            return
+
+        # Get current scale bounds
+        x_min = x_scale.min if x_scale.min is not None else float(all_iters.min())
+        x_max = x_scale.max if x_scale.max is not None else float(all_iters.max())
+        y_min = y_scale.min if y_scale.min is not None else float(all_vals.min())
+        y_max = y_scale.max if y_scale.max is not None else float(all_vals.max())
+
+        # Convert to data coordinates
+        x_data = x_min + (px / plot_width) * (x_max - x_min)
+
+        # Update vertical line
+        vline.x = [x_data, x_data]
+        vline.y = [y_min, y_max]
+        vline.opacities = [0.7]
+
+        # Find values for each series and update scatter/label
+        label_parts = [f"<b>Iteration: {int(x_data)}</b><br>"]
+        for idx, (run_name, iterations, values) in enumerate(series_list):
+            # Find closest point
+            closest_idx = np.argmin(np.abs(iterations - x_data))
+            val = values[closest_idx]
+            it = iterations[closest_idx]
+
+            # Update scatter
+            hover_scatters[idx].x = [float(it)]
+            hover_scatters[idx].y = [float(val)]
+            hover_scatters[idx].opacities = [1]
+
+            color = colors[idx % len(colors)]
+            label_parts.append(
+                f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)})<br>'
+            )
+
+        hover_label.value = "".join(label_parts)
+
+    detector.observe(on_mouse_move, names=["mouse_pos"])
 
     # Handle XY brush - apply zoom only when brushing ends
     def on_xy_brushing_change(change):
@@ -223,7 +357,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
         solara.Text("Drag to zoom • Shift+Drag for X-only", style={"color": "#666", "font-size": "12px"})
 
-    solara.display(widgets.VBox([shift_detector, fig]))
+    solara.display(widgets.VBox([detector, fig, hover_label]))
 
 
 @solara.component
