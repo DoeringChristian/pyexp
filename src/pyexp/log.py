@@ -4,6 +4,7 @@ import atexit
 import json
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -397,16 +398,18 @@ class Logger:
     def add_scalar(self, tag: str, scalar_value: float) -> None:
         """Log a scalar value at the current iteration.
 
-        Scalars are appended to scalars.jsonl as {"it": N, "tag": "...", "value": V}.
+        Scalars are appended to scalars.jsonl as {"it": N, "tag": "...", "value": V, "ts": T}.
         """
-        self._queue.put(("scalar", (tag, scalar_value, self._global_it)))
+        ts = time.time()
+        self._queue.put(("scalar", (tag, scalar_value, self._global_it, ts)))
 
     def add_text(self, tag: str, text_string: str) -> None:
         """Log a text string at the current iteration.
 
-        Text is appended to text.jsonl as {"it": N, "tag": "...", "text": "..."}.
+        Text is appended to text.jsonl as {"it": N, "tag": "...", "text": "...", "ts": T}.
         """
-        self._queue.put(("text", (tag, text_string, self._global_it)))
+        ts = time.time()
+        self._queue.put(("text", (tag, text_string, self._global_it, ts)))
 
     def add_figure(self, tag: str, figure: Any, interactive: bool = True) -> None:
         """Log a figure object at the current iteration.
@@ -420,7 +423,8 @@ class Logger:
             interactive: If True, render as interactive widget in viewer.
                         If False, render as static image (faster loading).
         """
-        self._queue.put(("figure", (tag, figure, self._global_it, interactive)))
+        ts = time.time()
+        self._queue.put(("figure", (tag, figure, self._global_it, interactive, ts)))
 
     def add_checkpoint(self, tag: str, obj: Any) -> None:
         """Log an arbitrary object as a checkpoint at the current iteration.
@@ -432,25 +436,28 @@ class Logger:
             tag: Name/tag for the checkpoint.
             obj: The object to save (must be picklable).
         """
-        self._queue.put(("checkpoint", (tag, obj, self._global_it)))
+        ts = time.time()
+        self._queue.put(("checkpoint", (tag, obj, self._global_it, ts)))
 
-    def _write_scalar(self, tag: str, scalar_value: float, it: int) -> None:
+    def _write_scalar(self, tag: str, scalar_value: float, it: int, ts: float) -> None:
         """Append a scalar value to scalars.jsonl."""
-        entry = {"it": it, "tag": tag, "value": scalar_value}
+        entry = {"it": it, "tag": tag, "value": scalar_value, "ts": ts}
         scalars_path = self._log_dir / SCALARS_FILE
         with self._scalars_lock:
             with open(scalars_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
-    def _write_text(self, tag: str, text_string: str, it: int) -> None:
+    def _write_text(self, tag: str, text_string: str, it: int, ts: float) -> None:
         """Append a text string to text.jsonl."""
-        entry = {"it": it, "tag": tag, "text": text_string}
+        entry = {"it": it, "tag": tag, "text": text_string, "ts": ts}
         text_path = self._log_dir / TEXT_FILE
         with self._text_lock:
             with open(text_path, "a") as f:
                 f.write(json.dumps(entry) + "\n")
 
-    def _write_figure(self, tag: str, figure: Any, it: int, interactive: bool) -> None:
+    def _write_figure(
+        self, tag: str, figure: Any, it: int, interactive: bool, ts: float
+    ) -> None:
         """Write a figure to disk."""
         it_dir = self._get_it_dir(it)
         fig_dir = it_dir / "figures"
@@ -461,11 +468,11 @@ class Logger:
         with open(fig_path, "wb") as f:
             cloudpickle.dump(figure, f)
 
-        # Save metadata
+        # Save metadata (including timestamp)
         meta_path = fig_dir / f"{tag}.meta"
-        meta_path.write_text(json.dumps({"interactive": interactive}))
+        meta_path.write_text(json.dumps({"interactive": interactive, "ts": ts}))
 
-    def _write_checkpoint(self, tag: str, obj: Any, it: int) -> None:
+    def _write_checkpoint(self, tag: str, obj: Any, it: int, ts: float) -> None:
         """Write a checkpoint object to disk."""
         it_dir = self._get_it_dir(it)
         ckpt_dir = it_dir / "checkpoints"
@@ -474,3 +481,7 @@ class Logger:
         ckpt_path = ckpt_dir / f"{tag}.cpkl"
         with open(ckpt_path, "wb") as f:
             cloudpickle.dump(obj, f)
+
+        # Save metadata with timestamp
+        meta_path = ckpt_dir / f"{tag}.meta"
+        meta_path.write_text(json.dumps({"ts": ts}))

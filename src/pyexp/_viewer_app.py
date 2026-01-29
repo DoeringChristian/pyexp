@@ -208,8 +208,10 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
 
     # Log scale state
     log_scale = solara.use_reactive(False)
+    # Relative time mode (show time relative to first log of each run)
+    relative_time = solara.use_reactive(False)
 
-    # Collect all data
+    # Collect all data including timestamps
     series_list = []
     for run, timeseries in runs_data.items():
         if tag in timeseries:
@@ -217,7 +219,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             run_name = str(run.relative_to(root_path)) if run != root_path else "."
             iterations = np.array([d[0] for d in data])
             values = np.array([d[1] for d in data])
-            series_list.append((run_name, iterations, values))
+            # Timestamps (may be None for older logs)
+            timestamps = np.array([d[2] if len(d) > 2 and d[2] is not None else 0.0 for d in data])
+            series_list.append((run_name, iterations, values, timestamps))
 
     if not series_list:
         solara.Text("No data")
@@ -226,16 +230,33 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     # Use shared colors
     colors = RUN_COLORS
 
+    # Compute x-axis data based on mode
+    if relative_time.value:
+        # Use relative time (seconds from first timestamp of each run)
+        x_data_list = []
+        for run_name, iterations, values, timestamps in series_list:
+            if timestamps.any() and timestamps[0] > 0:
+                rel_time = timestamps - timestamps[0]
+                x_data_list.append(rel_time)
+            else:
+                # Fallback to iterations if no timestamps
+                x_data_list.append(iterations.astype(float))
+        x_label = "Time (s)"
+    else:
+        x_data_list = [iterations.astype(float) for _, iterations, _, _ in series_list]
+        x_label = "Iteration"
+
     # Create scales (use LogScale for y if enabled)
     x_scale = bq.LinearScale()
     y_scale = bq.LogScale() if log_scale.value else bq.LinearScale()
 
     # Create lines (no legend)
     lines = []
-    for idx, (run_name, iterations, values) in enumerate(series_list):
+    for idx, (run_name, iterations, values, timestamps) in enumerate(series_list):
         color = colors[idx % len(colors)]
+        x_data = x_data_list[idx]
         line = bq.Lines(
-            x=iterations,
+            x=x_data,
             y=values,
             scales={"x": x_scale, "y": y_scale},
             colors=[color],
@@ -246,7 +267,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         lines.append(line)
 
     # Vertical crosshair line
-    all_iters = np.concatenate([s[1] for s in series_list])
+    all_x = np.concatenate(x_data_list)
     all_vals = np.concatenate([s[2] for s in series_list])
     vline = bq.Lines(
         x=[0, 0],
@@ -260,10 +281,11 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
 
     # Scatter points for crosshair intersections
     hover_scatters = []
-    for idx, (run_name, iterations, values) in enumerate(series_list):
+    for idx, (run_name, iterations, values, timestamps) in enumerate(series_list):
         color = colors[idx % len(colors)]
+        x_data = x_data_list[idx]
         scatter = bq.Scatter(
-            x=[float(iterations[0])],
+            x=[float(x_data[0])],
             y=[float(values[0])],
             scales={"x": x_scale, "y": y_scale},
             colors=[color],
@@ -274,7 +296,7 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
 
     # Create axes
     x_axis = bq.Axis(
-        scale=x_scale, label="Iteration", grid_lines="solid", grid_color="#eee"
+        scale=x_scale, label=x_label, grid_lines="solid", grid_color="#eee"
     )
     y_axis = bq.Axis(
         scale=y_scale,
@@ -307,8 +329,8 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     )
 
     # Build base legend (always visible, shows run names)
-    base_legend_parts = ["<b>&nbsp;</b><br>"]  # Placeholder for iteration line
-    for idx, (run_name, _, _) in enumerate(series_list):
+    base_legend_parts = ["<b>&nbsp;</b><br>"]  # Placeholder for iteration/time line
+    for idx, (run_name, _, _, _) in enumerate(series_list):
         color = colors[idx % len(colors)]
         base_legend_parts.append(f'<span style="color:{color}">●</span> {run_name}<br>')
     base_legend = "".join(base_legend_parts)
@@ -324,6 +346,15 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             fig.interaction = brush_xy
 
     detector.observe(on_shift_change, names=["shift_pressed"])
+
+    # Helper to format time duration
+    def format_time(seconds: float) -> str:
+        if seconds < 60:
+            return f"{seconds:.1f}s"
+        elif seconds < 3600:
+            return f"{seconds/60:.1f}m"
+        else:
+            return f"{seconds/3600:.1f}h"
 
     # Update crosshair on mouse move
     def on_mouse_move(change):
@@ -353,36 +384,58 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             return
 
         # Get current scale bounds
-        x_min = x_scale.min if x_scale.min is not None else float(all_iters.min())
-        x_max = x_scale.max if x_scale.max is not None else float(all_iters.max())
+        x_min_bound = x_scale.min if x_scale.min is not None else float(all_x.min())
+        x_max_bound = x_scale.max if x_scale.max is not None else float(all_x.max())
         y_min = y_scale.min if y_scale.min is not None else float(all_vals.min())
         y_max = y_scale.max if y_scale.max is not None else float(all_vals.max())
 
         # Convert to data coordinates
-        x_data = x_min + (px / plot_width) * (x_max - x_min)
+        x_pos = x_min_bound + (px / plot_width) * (x_max_bound - x_min_bound)
 
         # Update vertical line
-        vline.x = [x_data, x_data]
+        vline.x = [x_pos, x_pos]
         vline.y = [y_min, y_max]
         vline.opacities = [0.7]
 
         # Find values for each series and update scatter/label
-        label_parts = [f"<b>Iteration: {int(x_data)}</b><br>"]
-        for idx, (run_name, iterations, values) in enumerate(series_list):
+        if relative_time.value:
+            label_parts = [f"<b>Time: {format_time(x_pos)}</b><br>"]
+        else:
+            label_parts = [f"<b>Iteration: {int(x_pos)}</b><br>"]
+
+        for idx, (run_name, iterations, values, timestamps) in enumerate(series_list):
+            x_data = x_data_list[idx]
             # Find closest point
-            closest_idx = np.argmin(np.abs(iterations - x_data))
+            closest_idx = np.argmin(np.abs(x_data - x_pos))
             val = values[closest_idx]
             it = iterations[closest_idx]
+            ts = timestamps[closest_idx] if len(timestamps) > closest_idx else 0
 
             # Update scatter
-            hover_scatters[idx].x = [float(it)]
+            hover_scatters[idx].x = [float(x_data[closest_idx])]
             hover_scatters[idx].y = [float(val)]
             hover_scatters[idx].opacities = [1]
 
             color = colors[idx % len(colors)]
-            label_parts.append(
-                f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)})<br>'
-            )
+            # Show both iteration and relative time info
+            if relative_time.value:
+                time_str = format_time(x_data[closest_idx])
+                label_parts.append(
+                    f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)}, {time_str})<br>'
+                )
+            else:
+                # Show timestamp if available
+                if ts > 0:
+                    from datetime import datetime
+                    dt = datetime.fromtimestamp(ts)
+                    time_str = dt.strftime("%H:%M:%S")
+                    label_parts.append(
+                        f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)}, {time_str})<br>'
+                    )
+                else:
+                    label_parts.append(
+                        f'<span style="color:{color}">●</span> {run_name}: <b>{val:.6g}</b> (iter {int(it)})<br>'
+                    )
 
         hover_label.value = "".join(label_parts)
 
@@ -411,8 +464,9 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
                     x_scale.min, x_scale.max = float(min(x1, x2)), float(max(x1, x2))
                     # Auto-scale y to visible data
                     y_vals = []
-                    for _, iterations, values in series_list:
-                        mask = (iterations >= x_scale.min) & (iterations <= x_scale.max)
+                    for idx, (_, _, values, _) in enumerate(series_list):
+                        x_data = x_data_list[idx]
+                        mask = (x_data >= x_scale.min) & (x_data <= x_scale.max)
                         if mask.any():
                             y_vals.extend(values[mask])
                     if y_vals:
@@ -434,6 +488,10 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
     def toggle_log(*args):
         log_scale.set(not log_scale.value)
 
+    # Toggle relative time mode
+    def toggle_time_mode(*args):
+        relative_time.set(not relative_time.value)
+
     # Controls
     with solara.Row():
         solara.Button("Reset Zoom", on_click=reset_zoom, icon_name="mdi-magnify-minus")
@@ -441,6 +499,11 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
             "Log Y" if not log_scale.value else "Linear Y",
             on_click=toggle_log,
             icon_name="mdi-math-log" if not log_scale.value else "mdi-chart-line",
+        )
+        solara.Button(
+            "Rel. Time" if not relative_time.value else "Iteration",
+            on_click=toggle_time_mode,
+            icon_name="mdi-clock-outline" if not relative_time.value else "mdi-counter",
         )
         solara.Text(
             "Drag to zoom • Shift+Drag for X-only",

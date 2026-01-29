@@ -42,6 +42,8 @@ def train(config: Config, logger: Logger):
         # Log figures every 25 iterations
         if i % 25 == 0:
             try:
+                import matplotlib
+                matplotlib.use('Agg')  # Non-interactive backend for subprocess
                 import matplotlib.pyplot as plt
                 import numpy as np
 

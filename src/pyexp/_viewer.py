@@ -113,7 +113,7 @@ def discover_runs(root_path: Path) -> list[Path]:
 
 def load_scalars_timeseries(
     log_path: Path, max_points: int = DEFAULT_MAX_POINTS
-) -> dict[str, list[tuple[int, float]]]:
+) -> dict[str, list[tuple[int, float, float | None]]]:
     """Load all scalars from JSONL file as time series.
 
     Args:
@@ -121,9 +121,10 @@ def load_scalars_timeseries(
         max_points: Maximum points per tag (uses LTTB downsampling if exceeded).
 
     Returns:
-        Dict mapping tag names to list of (iteration, value) tuples.
+        Dict mapping tag names to list of (iteration, value, timestamp) tuples.
+        Timestamp may be None for older logs without timestamps.
     """
-    timeseries: dict[str, list[tuple[int, float]]] = {}
+    timeseries: dict[str, list[tuple[int, float, float | None]]] = {}
     scalars_path = log_path / SCALARS_FILE
 
     if scalars_path.exists():
@@ -138,7 +139,8 @@ def load_scalars_timeseries(
                         tag = entry["tag"]
                         if tag not in timeseries:
                             timeseries[tag] = []
-                        timeseries[tag].append((entry["it"], entry["value"]))
+                        ts = entry.get("ts")  # May be None for older logs
+                        timeseries[tag].append((entry["it"], entry["value"], ts))
                     except (json.JSONDecodeError, KeyError):
                         continue  # Skip malformed lines
         except (IOError, OSError):
@@ -148,7 +150,11 @@ def load_scalars_timeseries(
     for tag in timeseries:
         timeseries[tag].sort(key=lambda x: x[0])
         if len(timeseries[tag]) > max_points:
-            timeseries[tag] = lttb_downsample(timeseries[tag], max_points)
+            # Extract (it, val) for LTTB, then rebuild with timestamps
+            points_2d = [(it, val) for it, val, _ in timeseries[tag]]
+            ts_map = {it: ts for it, _, ts in timeseries[tag]}
+            downsampled = lttb_downsample(points_2d, max_points)
+            timeseries[tag] = [(it, val, ts_map.get(it)) for it, val in downsampled]
 
     return timeseries
 
@@ -195,12 +201,12 @@ def load_iterations(log_path: Path) -> list[int]:
 
     # Get iterations from scalars JSONL
     for values in load_scalars_timeseries(log_path).values():
-        for it, _ in values:
+        for it, *_ in values:
             iterations.add(it)
 
     # Get iterations from text JSONL
     for values in load_text_timeseries(log_path).values():
-        for it, _ in values:
+        for it, *_ in values:
             iterations.add(it)
 
     # Get iterations from directories (figures, checkpoints)
