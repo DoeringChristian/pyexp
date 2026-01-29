@@ -16,10 +16,22 @@ from pyexp._viewer import (
     load_text_timeseries,
 )
 
+# Shared colors for runs (matching TensorBoard palette)
+RUN_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
 # Reactive state
 root_dir = solara.reactive("")
 selected_runs = solara.reactive([])
 refresh_counter = solara.reactive(0)
+
+
+def get_run_color(run: Path, runs: list) -> str:
+    """Get the color for a run based on its index in the selected runs list."""
+    try:
+        idx = runs.index(run)
+        return RUN_COLORS[idx % len(RUN_COLORS)]
+    except ValueError:
+        return "#666"
 
 
 @solara.component
@@ -61,6 +73,7 @@ def RunSelector():
 
     for name in run_names:
         is_selected = name in current_names
+        run = run_map[name]
 
         def toggle(checked, n=name):
             current = list(current_names)
@@ -70,7 +83,18 @@ def RunSelector():
                 current.remove(n)
             on_select(current)
 
-        solara.Checkbox(label=name, value=is_selected, on_value=toggle)
+        # Get color if selected
+        if is_selected:
+            color = get_run_color(run, selected_runs.value)
+            with solara.Row(style={"align-items": "center", "gap": "4px"}):
+                solara.HTML(
+                    tag="span",
+                    attributes={"style": f"color: {color}; font-size: 16px;"},
+                    unsafe_innerHTML="●",
+                )
+                solara.Checkbox(label=name, value=is_selected, on_value=toggle)
+        else:
+            solara.Checkbox(label=name, value=is_selected, on_value=toggle)
 
 
 @solara.component
@@ -162,8 +186,8 @@ def ScalarPlot(tag: str, runs_data: dict, root_path: Path):
         solara.Text("No data")
         return
 
-    # Colors matching TensorBoard
-    colors = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+    # Use shared colors
+    colors = RUN_COLORS
 
     # Create scales
     x_scale = bq.LinearScale()
@@ -393,7 +417,7 @@ def ScalarsPanel():
 
 
 @solara.component
-def TextItem(run: Path, tag: str, root_path: Path, data: list):
+def TextItem(run: Path, tag: str, root_path: Path, data: list, color: str):
     """Display text for a single run and tag."""
     run_name = str(run.relative_to(root_path)) if run != root_path else "."
     iterations = [d[0] for d in data]
@@ -401,7 +425,12 @@ def TextItem(run: Path, tag: str, root_path: Path, data: list):
     # Iteration slider - hook at top of component
     iter_idx = solara.use_reactive(len(iterations) - 1)
 
-    with solara.Card(title=run_name):
+    with solara.Card():
+        solara.HTML(
+            tag="div",
+            attributes={"style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"},
+            unsafe_innerHTML=f"● {run_name}",
+        )
         if len(iterations) > 1:
             solara.SliderInt(
                 label="Iteration",
@@ -447,11 +476,12 @@ def TextPanel():
         with solara.Details(tag, expand=True):
             for run in runs:
                 if tag in runs_data[run] and runs_data[run][tag]:
-                    TextItem(run, tag, root_path, runs_data[run][tag])
+                    color = get_run_color(run, runs)
+                    TextItem(run, tag, root_path, runs_data[run][tag], color)
 
 
 @solara.component
-def FigureItem(run: Path, tag: str, root_path: Path, data: list):
+def FigureItem(run: Path, tag: str, root_path: Path, data: list, color: str):
     """Display figure for a single run and tag."""
     run_name = str(run.relative_to(root_path)) if run != root_path else "."
     iterations = [d[0] for d in data]
@@ -459,7 +489,12 @@ def FigureItem(run: Path, tag: str, root_path: Path, data: list):
     # Iteration slider - hook at top of component
     iter_idx = solara.use_reactive(len(iterations) - 1)
 
-    with solara.Card(title=run_name):
+    with solara.Card():
+        solara.HTML(
+            tag="div",
+            attributes={"style": f"font-weight: bold; color: {color}; margin-bottom: 8px;"},
+            unsafe_innerHTML=f"● {run_name}",
+        )
         if len(iterations) > 1:
             solara.SliderInt(
                 label="Iteration",
@@ -514,7 +549,8 @@ def FiguresPanel():
         with solara.Details(tag, expand=True):
             for run in runs:
                 if tag in runs_data[run] and runs_data[run][tag]:
-                    FigureItem(run, tag, root_path, runs_data[run][tag])
+                    color = get_run_color(run, runs)
+                    FigureItem(run, tag, root_path, runs_data[run][tag], color)
 
 
 @solara.component
