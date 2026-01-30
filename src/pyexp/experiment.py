@@ -10,6 +10,7 @@ import inspect
 import json
 import os
 import pickle
+import re
 import sys
 
 from .config import Config, Result, Tensor
@@ -76,11 +77,40 @@ def _config_hash(config: dict) -> str:
     return hashlib.sha256(config_str.encode()).hexdigest()[:12]
 
 
+def _sanitize_name(name: str) -> str:
+    """Sanitize a config name for use as a directory name.
+
+    Replaces characters that are problematic in file paths:
+    - / and \\ (path separators)
+    - : (Windows drive separator)
+    - * ? " < > | (Windows reserved)
+    """
+    # Replace problematic characters with underscore
+    for char in r'/\:*?"<>|':
+        name = name.replace(char, "_")
+    return name
+
+
 def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
     """Get the cache directory path for an experiment config."""
-    name = config.get("name", "experiment")
+    name = _sanitize_name(config.get("name", "experiment"))
     hash_str = _config_hash(config)
     return output_dir / f"{name}-{hash_str}"
+
+
+def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
+    """Filter items by name using a regex pattern.
+
+    Args:
+        items: List of items to filter.
+        pattern: Regex pattern to match against names.
+        get_name: Function to extract name from an item.
+
+    Returns:
+        Filtered list of items whose names match the pattern.
+    """
+    regex = re.compile(pattern)
+    return [item for item in items if regex.search(get_name(item) or "")]
 
 
 def _save_configs_json(
@@ -344,6 +374,13 @@ def _parse_args() -> argparse.Namespace:
         "--list",
         action="store_true",
         help="List all previous runs with their status",
+    )
+    parser.add_argument(
+        "--filter",
+        type=str,
+        default=None,
+        metavar="REGEX",
+        help="Filter configs by name using a regex pattern (e.g., --filter 'lr_0\\.01.*')",
     )
     return parser.parse_args()
 
@@ -766,6 +803,24 @@ class Experiment:
             # Load experiment directories and shape from configs.json
             experiment_dirs, shape = _load_configs_json(run_dir)
 
+            # Apply filter if specified
+            if args.filter:
+                def get_config_name(exp_dir: Path) -> str:
+                    config_path = exp_dir / "config.json"
+                    if config_path.exists():
+                        config = json.loads(config_path.read_text())
+                        return config.get("name", "")
+                    return ""
+
+                original_count = len(experiment_dirs)
+                experiment_dirs = _filter_by_name(
+                    experiment_dirs, args.filter, get_config_name
+                )
+                if not experiment_dirs:
+                    print(f"No configs match filter '{args.filter}'")
+                    return None
+                print(f"Filter '{args.filter}': {len(experiment_dirs)}/{original_count} configs selected")
+
             # Initialize progress bar if capturing output
             show_progress = not args.no_capture
             progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
@@ -932,6 +987,7 @@ def experiment(
         --retry N             Number of retries on failure (default: 4)
         --report [TIMESTAMP]  Generate report from cached results (latest run or specific timestamp)
         --list                List all previous runs with their status
+        --filter REGEX        Filter configs by name using a regex (e.g., --filter 'lr_0\\.01.*')
         -s, --capture=no      Show subprocess output instead of progress bar
         --viewer              Start the viewer after experiments complete
         --viewer-port PORT    Port for the viewer (default: 8765)
