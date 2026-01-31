@@ -163,6 +163,53 @@ def report(results, report_dir):
             print(f"{r.name}: {r.result['accuracy']}")
 ```
 
+### Checkpoints
+
+Use the `@chkpt` decorator to create checkpoint boundaries within experiments. Checkpoints enable:
+- **Partial resumption**: If an experiment fails mid-way, `--continue` resumes from the last checkpoint
+- **Automatic retry**: Failed checkpoint methods can be automatically retried
+
+```python
+from pyexp import Experiment, ExperimentRunner, chkpt
+
+class MyExperiment(Experiment):
+    model: dict
+    results: dict
+
+    @chkpt(retry=3)
+    def train(self):
+        """Training phase - retried up to 3 times on failure."""
+        self.model = train_model(self.cfg)
+
+    @chkpt
+    def evaluate(self):
+        """Evaluation phase - checkpointed."""
+        self.results = evaluate(self.model)
+
+    def experiment(self):
+        self.train()      # Checkpoint saved after completion
+        self.evaluate()   # If this fails, train() won't re-run on --continue
+
+    @staticmethod
+    def configs():
+        return [{"name": "exp", "lr": 0.01}]
+
+    @staticmethod
+    def report(results, out):
+        for exp in results:
+            print(f"{exp.name}: {exp.results}")
+```
+
+Checkpoints are stored in `<experiment_dir>/.checkpoints/<method_name>.pkl` and contain the experiment instance's state after the method completes.
+
+**How it works:**
+1. Before running a `@chkpt` method, check if a checkpoint file exists
+2. If exists: restore `self` state from checkpoint and skip execution
+3. If not: run the method, then save `self` state to checkpoint
+4. On failure with `retry > 1`: retry the method up to N times before giving up
+
+**Note:** The `@chkpt` decorator only works with class-based experiments (subclasses of `Experiment`), not with the decorator API.
+
 ### Execution Modes
 
 Choose how experiments are executed using the `executor` parameter:
@@ -811,6 +858,8 @@ The viewer starts as a background process before experiments begin, allowing you
 - `@pyexp.experiment(name="...", output_dir="...", executor="...")` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
+- `@chkpt` - Checkpoint a method in a class-based experiment
+- `@chkpt(retry=N)` - Checkpoint with automatic retry on failure
 
 ### Experiment Methods
 

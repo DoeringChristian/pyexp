@@ -1,50 +1,61 @@
-import pyexp
-from pyexp import Config
+"""Example demonstrating checkpoint decorator for fault-tolerant experiments."""
+
+from pathlib import Path
+
+from pyexp import Experiment, ExperimentRunner, Tensor, chkpt
 
 
-@pyexp.chkpt(retry=3)
-def pass1():
+class ChkptExperiment(Experiment):
+    """Experiment with checkpointed phases."""
 
-    for i in range(10):
-        # do some training
-        ...
+    model: dict
+    finetuned_model: dict
+    results: dict
 
+    @chkpt(retry=3)
+    def train(self):
+        """Training phase - checkpointed with 3 retries."""
+        print(f"Training with lr={self.cfg.learning_rate}")
+        for i in range(10):
+            # Simulate training
+            pass
+        self.model = {"weights": [1, 2, 3], "lr": self.cfg.learning_rate}
 
-@pyexp.chkpt
-def pass2():
+    @chkpt
+    def finetune(self):
+        """Finetuning phase - checkpointed."""
+        print(f"Finetuning for {self.cfg.epochs} epochs")
+        for i in range(10):
+            # Simulate finetuning
+            pass
+        self.finetuned_model = {**self.model, "finetuned": True}
 
-    for i in range(10):
-        # do some finetuning
-        ...
+    def experiment(self):
+        # Before running train(), a checkpoint is taken.
+        # If it fails, it will be re-run up to 3 times.
+        self.train()
 
+        # If finetune() fails and we --continue, train() won't re-run
+        # because its checkpoint exists.
+        self.finetune()
 
-@pyexp.experiment
-def experiment(config: Config):
+        self.results = {"accuracy": 0.95}
 
-    # Before running pass1, a checkpoint should be taken.
-    # If it failed, it should be re-run up to 3 times.
-    pass1()
+    @staticmethod
+    def configs() -> list[dict]:
+        return [
+            {"name": "fast", "learning_rate": 0.01, "epochs": 10},
+            {"name": "medium", "learning_rate": 0.001, "epochs": 20},
+            {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
+        ]
 
-    # If pass2 failed, we should be able to continue here instead of having to
-    # re-run pass1.
-    pass2()
-
-    return {}
-
-
-@experiment.configs
-def configs() -> list[dict]:
-    """Generate experiment configurations."""
-    return [
-        {"name": "fast", "learning_rate": 0.01, "epochs": 10},
-        {"name": "medium", "learning_rate": 0.001, "epochs": 20},
-        {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
-    ]
-
-
-@experiment.report
-def report(results, report_dir): ...
+    @staticmethod
+    def report(results: Tensor["ChkptExperiment"], out: Path):
+        print("\n=== Experiment Report ===")
+        for exp in results:
+            print(f"{exp.name}: accuracy={exp.results['accuracy']}")
 
 
 if __name__ == "__main__":
-    experiment.run()
+    runner = ExperimentRunner(ChkptExperiment)
+    runner.run()

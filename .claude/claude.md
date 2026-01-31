@@ -164,3 +164,47 @@ Each experiment instance has these properties:
 - `exp.result` - Experiment return value (when using decorator API)
 
 The `out` path is available both during experiment execution (`self.out`) and in results (`exp.out`).
+
+## Checkpoint System
+
+The `@chkpt` decorator enables partial resumption of experiments. It works only with class-based experiments (subclasses of `Experiment`).
+
+### How It Works
+
+1. Before running a `@chkpt` method, check if `<exp.out>/.checkpoints/<method_name>.pkl` exists
+2. If exists: restore `self` state from checkpoint (excluding runner-managed `_Experiment__*` attrs) and return cached return value
+3. If not: run the method, then pickle `self` state and return value to checkpoint file
+4. On failure with `retry > 1`: retry the method before giving up
+
+### State Captured
+
+The checkpoint saves:
+- All user-defined attributes on `self` (everything except `_Experiment__cfg`, `_Experiment__out`, etc.)
+- The return value of the method (if any)
+
+On restore, these are copied back onto `self`, effectively skipping the method execution.
+
+### Usage Pattern
+
+```python
+from pyexp import Experiment, chkpt
+
+class MyExperiment(Experiment):
+    @chkpt(retry=3)
+    def train(self):
+        self.model = expensive_training(self.cfg)
+
+    @chkpt
+    def evaluate(self):
+        self.accuracy = evaluate(self.model)
+
+    def experiment(self):
+        self.train()      # Checkpointed
+        self.evaluate()   # If this fails, train() won't re-run on --continue
+```
+
+### Limitations
+
+- Only works with class-based experiments (not decorator API)
+- State must be picklable (uses cloudpickle)
+- Checkpoints are per-method, not per-iteration within a method

@@ -139,6 +139,89 @@ class Experiment:
         raise NotImplementedError("Subclass must implement report()")
 
 
+def chkpt(method: Callable | None = None, *, retry: int = 1) -> Callable:
+    """Checkpoint decorator for Experiment methods.
+
+    Caches the state of `self` after the method completes successfully.
+    On subsequent calls (e.g., when resuming with --continue), restores
+    `self` from the cached state instead of re-running the method.
+
+    Checkpoints are stored in `self.out/.checkpoints/{method_name}.pkl`.
+
+    Args:
+        retry: Number of times to retry on failure before giving up. Default is 1 (no retry).
+
+    Example:
+        class MyExperiment(Experiment):
+            @chkpt(retry=3)
+            def train(self):
+                self.model = train_model(self.cfg)
+
+            @chkpt
+            def evaluate(self):
+                self.results = evaluate(self.model)
+
+            def experiment(self):
+                self.train()      # Checkpointed after completion
+                self.evaluate()   # If this fails, train() won't re-run on --continue
+    """
+    import cloudpickle
+
+    def decorator(fn: Callable) -> Callable:
+        @wraps(fn)
+        def wrapper(self: "Experiment", *args, **kwargs):
+            # Generate checkpoint path
+            checkpoint_dir = self.out / ".checkpoints"
+            checkpoint_path = checkpoint_dir / f"{fn.__name__}.pkl"
+
+            # Check for existing checkpoint
+            if checkpoint_path.exists():
+                with open(checkpoint_path, "rb") as f:
+                    cached_data = cloudpickle.load(f)
+
+                # Restore state onto self (excluding runner-managed attributes)
+                for key, value in cached_data["state"].items():
+                    if not key.startswith("_Experiment__"):
+                        setattr(self, key, value)
+
+                return cached_data.get("return_value")
+
+            # Run with retry logic
+            last_error = None
+            for attempt in range(retry):
+                try:
+                    result = fn(self, *args, **kwargs)
+
+                    # Save checkpoint
+                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                    state = {
+                        k: v
+                        for k, v in self.__dict__.items()
+                        if not k.startswith("_Experiment__")
+                    }
+                    cached_data = {"state": state, "return_value": result}
+                    with open(checkpoint_path, "wb") as f:
+                        cloudpickle.dump(cached_data, f)
+
+                    return result
+                except Exception as e:
+                    last_error = e
+                    if attempt < retry - 1:
+                        continue
+                    raise
+
+            raise last_error  # Should never reach here, but satisfies type checker
+
+        return wrapper
+
+    if method is not None:
+        # Called without arguments: @chkpt
+        return decorator(method)
+    else:
+        # Called with arguments: @chkpt(retry=3)
+        return decorator
+
+
 _VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
 
 

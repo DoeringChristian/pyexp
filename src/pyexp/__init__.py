@@ -10,7 +10,7 @@ from .config import (
     register,
     sweep,
 )
-from .experiment import Experiment, ExperimentRunner, experiment
+from .experiment import Experiment, ExperimentRunner, chkpt, experiment
 from .executors import (
     Executor,
     ExecutorName,
@@ -35,6 +35,7 @@ __all__ = [
     "sweep",
     "Experiment",
     "ExperimentRunner",
+    "chkpt",
     "experiment",
     "Executor",
     "ExecutorName",

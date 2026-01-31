@@ -1495,3 +1495,456 @@ class TestClassBasedExperiment:
 
         assert isinstance(result, Path)
         assert result.exists()
+
+
+class TestCheckpointDecorator:
+    """Tests for the @chkpt checkpoint decorator."""
+
+    def test_chkpt_saves_checkpoint(self, tmp_path):
+        """@chkpt saves a checkpoint file after method completes."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            model: dict
+
+            @chkpt
+            def train(self):
+                self.model = {"weights": [1, 2, 3]}
+
+            def experiment(self):
+                self.train()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].model
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result == {"weights": [1, 2, 3]}
+
+        # Check checkpoint file was created
+        exp_dir = tmp_path / "MyExperiment"
+        checkpoint_dirs = list(exp_dir.rglob(".checkpoints"))
+        assert len(checkpoint_dirs) == 1
+        assert (checkpoint_dirs[0] / "train.pkl").exists()
+
+    def test_chkpt_restores_from_checkpoint(self, tmp_path):
+        """@chkpt restores state from checkpoint on subsequent calls."""
+        from pyexp import chkpt
+        import json
+
+        # Use a file to track calls across pickle boundaries
+        call_log = tmp_path / "call_log.json"
+        call_log.write_text(json.dumps({"train": 0, "evaluate": 0}))
+
+        class MyExperiment(Experiment):
+            model: dict
+            accuracy: float
+
+            @chkpt
+            def train(self):
+                log = json.loads(call_log.read_text())
+                log["train"] += 1
+                call_log.write_text(json.dumps(log))
+                self.model = {"weights": [1, 2, 3]}
+
+            @chkpt
+            def evaluate(self):
+                log = json.loads(call_log.read_text())
+                log["evaluate"] += 1
+                call_log.write_text(json.dumps(log))
+                self.accuracy = 0.95
+
+            def experiment(self):
+                self.train()
+                self.evaluate()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return {"model": results[0].model, "accuracy": results[0].accuracy}
+
+        # First run
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result1 = runner.run(executor="inline")
+
+        log = json.loads(call_log.read_text())
+        assert log["train"] == 1
+        assert log["evaluate"] == 1
+        assert result1["accuracy"] == 0.95
+
+        # Get the timestamp for continue
+        exp_dir = tmp_path / "MyExperiment"
+        timestamps = [d for d in exp_dir.iterdir() if d.is_dir()]
+        timestamp = timestamps[0].name
+
+        # Delete experiment.pkl to force re-run but keep checkpoints
+        for exp_pkl in exp_dir.rglob("experiment.pkl"):
+            exp_pkl.unlink()
+
+        # Second run with --continue should use checkpoints
+        with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
+            result2 = runner.run(executor="inline")
+
+        log = json.loads(call_log.read_text())
+        # train and evaluate should NOT be called again (restored from checkpoint)
+        assert log["train"] == 1
+        assert log["evaluate"] == 1
+        assert result2["accuracy"] == 0.95
+
+    def test_chkpt_with_retry(self, tmp_path):
+        """@chkpt(retry=N) retries on failure."""
+        from pyexp import chkpt
+        import json
+
+        # Use a file to track attempts across pickle boundaries
+        attempt_log = tmp_path / "attempt_log.json"
+        attempt_log.write_text(json.dumps({"train": 0}))
+
+        class MyExperiment(Experiment):
+            model: dict
+
+            @chkpt(retry=3)
+            def train(self):
+                log = json.loads(attempt_log.read_text())
+                log["train"] += 1
+                attempt_log.write_text(json.dumps(log))
+                if log["train"] < 3:
+                    raise ValueError("Training failed")
+                self.model = {"weights": [1, 2, 3]}
+
+            def experiment(self):
+                self.train()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].model
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        log = json.loads(attempt_log.read_text())
+        # Should succeed on 3rd attempt
+        assert log["train"] == 3
+        assert result == {"weights": [1, 2, 3]}
+
+    def test_chkpt_retry_exhausted_raises(self, tmp_path):
+        """@chkpt raises after retry count exhausted."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            @chkpt(retry=2)
+            def train(self):
+                raise ValueError("Always fails")
+
+            def experiment(self):
+                self.train()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        # Experiment should have error set
+        assert result.error is not None
+        assert "ValueError" in result.error
+
+    def test_chkpt_preserves_return_value(self, tmp_path):
+        """@chkpt caches and restores return values."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            result_value: int
+
+            @chkpt
+            def compute(self):
+                return 42
+
+            def experiment(self):
+                self.result_value = self.compute()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].result_value
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result == 42
+
+    def test_chkpt_multiple_sequential(self, tmp_path):
+        """Multiple @chkpt methods work correctly in sequence."""
+        from pyexp import chkpt
+
+        call_order = []
+
+        class MyExperiment(Experiment):
+            step1_done: bool
+            step2_done: bool
+            step3_done: bool
+
+            @chkpt
+            def step1(self):
+                call_order.append("step1")
+                self.step1_done = True
+
+            @chkpt
+            def step2(self):
+                call_order.append("step2")
+                self.step2_done = True
+
+            @chkpt
+            def step3(self):
+                call_order.append("step3")
+                self.step3_done = True
+
+            def experiment(self):
+                self.step1()
+                self.step2()
+                self.step3()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                exp = results[0]
+                return (exp.step1_done, exp.step2_done, exp.step3_done)
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert call_order == ["step1", "step2", "step3"]
+        assert result == (True, True, True)
+
+        # Check all checkpoint files exist
+        exp_dir = tmp_path / "MyExperiment"
+        checkpoint_dirs = list(exp_dir.rglob(".checkpoints"))
+        assert len(checkpoint_dirs) == 1
+        checkpoint_files = list(checkpoint_dirs[0].iterdir())
+        assert len(checkpoint_files) == 3
+        assert {f.name for f in checkpoint_files} == {"step1.pkl", "step2.pkl", "step3.pkl"}
+
+    def test_chkpt_state_isolation(self, tmp_path):
+        """@chkpt doesn't affect runner-managed attributes."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            user_attr: str
+
+            @chkpt
+            def setup(self):
+                self.user_attr = "modified"
+
+            def experiment(self):
+                # Store original cfg reference
+                original_cfg = self.cfg
+                self.setup()
+                # cfg should still be the same object
+                assert self.cfg is original_cfg
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].user_attr
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result == "modified"
+
+    def test_chkpt_partial_failure_resume(self, tmp_path):
+        """Resume after partial failure skips completed checkpoints."""
+        from pyexp import chkpt
+        import json
+
+        # Use a file to track calls across pickle boundaries
+        call_log = tmp_path / "call_log.json"
+        call_log.write_text(json.dumps({"step1": 0, "step2": 0, "should_fail": True}))
+
+        class MyExperiment(Experiment):
+            step1_result: int
+            step2_result: int
+
+            @chkpt
+            def step1(self):
+                log = json.loads(call_log.read_text())
+                log["step1"] += 1
+                call_log.write_text(json.dumps(log))
+                self.step1_result = 100
+
+            @chkpt
+            def step2(self):
+                log = json.loads(call_log.read_text())
+                log["step2"] += 1
+                call_log.write_text(json.dumps(log))
+                if log.get("should_fail", False):
+                    raise ValueError("Step 2 failed")
+                self.step2_result = 200
+
+            def experiment(self):
+                self.step1()
+                self.step2()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0]
+
+        # First run - step1 succeeds, step2 fails (disable retries to simplify)
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path, retry=0)
+            result1 = runner.run(executor="inline")
+
+        log = json.loads(call_log.read_text())
+        assert log["step1"] == 1
+        assert log["step2"] == 1
+        assert result1.error is not None
+
+        # Get timestamp
+        exp_dir = tmp_path / "MyExperiment"
+        timestamps = [d for d in exp_dir.iterdir() if d.is_dir()]
+        timestamp = timestamps[0].name
+
+        # Delete experiment.pkl but keep checkpoints
+        for exp_pkl in exp_dir.rglob("experiment.pkl"):
+            exp_pkl.unlink()
+
+        # Verify step1 checkpoint exists, step2 does not
+        checkpoint_dir = list(exp_dir.rglob(".checkpoints"))[0]
+        assert (checkpoint_dir / "step1.pkl").exists()
+        assert not (checkpoint_dir / "step2.pkl").exists()
+
+        # Fix step2 and resume
+        log["should_fail"] = False
+        call_log.write_text(json.dumps(log))
+
+        with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
+            result2 = runner.run(executor="inline")
+
+        log = json.loads(call_log.read_text())
+        # step1 should NOT be called again (checkpoint hit)
+        assert log["step1"] == 1  # Still 1, not re-run
+        # step2 should be called again (no checkpoint due to previous failure)
+        assert log["step2"] == 2  # Called again
+        assert result2.step1_result == 100
+        assert result2.step2_result == 200
+
+    def test_chkpt_with_complex_state(self, tmp_path):
+        """@chkpt handles complex state (nested dicts, lists)."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            model: dict
+            history: list
+            metadata: dict
+
+            @chkpt
+            def train(self):
+                self.model = {
+                    "layers": [{"weights": [1, 2, 3]}, {"weights": [4, 5, 6]}],
+                    "config": {"lr": 0.01, "epochs": 100},
+                }
+                self.history = [0.5, 0.4, 0.3, 0.2]
+                self.metadata = {"version": "1.0", "tags": ["test", "experiment"]}
+
+            def experiment(self):
+                self.train()
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                exp = results[0]
+                return {
+                    "model": exp.model,
+                    "history": exp.history,
+                    "metadata": exp.metadata,
+                }
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result["model"]["layers"][0]["weights"] == [1, 2, 3]
+        assert result["history"] == [0.5, 0.4, 0.3, 0.2]
+        assert result["metadata"]["tags"] == ["test", "experiment"]
+
+    def test_chkpt_multiple_configs(self, tmp_path):
+        """@chkpt works correctly with multiple configs."""
+        from pyexp import chkpt
+
+        class MyExperiment(Experiment):
+            lr_used: float
+
+            @chkpt
+            def train(self):
+                self.lr_used = self.cfg.lr
+
+            def experiment(self):
+                self.train()
+
+            @staticmethod
+            def configs():
+                return [
+                    {"name": "fast", "lr": 0.1},
+                    {"name": "slow", "lr": 0.01},
+                ]
+
+            @staticmethod
+            def report(results, out):
+                return [exp.lr_used for exp in results]
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        # Verify results are correct
+        assert result == [0.1, 0.01]
+
+        # Check each config has its own checkpoint directory
+        exp_dir = tmp_path / "MyExperiment"
+        checkpoint_dirs = list(exp_dir.rglob(".checkpoints"))
+        assert len(checkpoint_dirs) == 2
+
+        # Verify each checkpoint directory has train.pkl
+        for checkpoint_dir in checkpoint_dirs:
+            assert (checkpoint_dir / "train.pkl").exists()
