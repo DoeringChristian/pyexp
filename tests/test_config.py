@@ -344,58 +344,89 @@ class TestRegistry:
         assert obj.size == 256
 
 
-class TestResult:
-    """Tests for Result class for structured experiment results."""
+class TestExperiment:
+    """Tests for the Experiment base class."""
 
-    def test_result_dot_notation_access(self):
-        """Result provides dot notation access to config, result, error, log."""
-        from pyexp import Result
+    def test_experiment_properties_raise_before_init(self):
+        """Experiment properties raise RuntimeError before initialization."""
+        from pyexp import Experiment
 
-        r = Result(
-            config={"name": "test", "lr": 0.01},
-            result={"accuracy": 0.95},
-            error=None,
-            log="output logs",
-        )
+        class MyExp(Experiment):
+            def experiment(self):
+                pass
 
-        assert r.config["name"] == "test"
-        assert r.config["lr"] == 0.01
-        assert r.result["accuracy"] == 0.95
-        assert r.error is None
-        assert r.log == "output logs"
+            @staticmethod
+            def configs():
+                return []
 
-    def test_result_config_is_config_type(self):
-        """Result.config is a Config object with dot notation."""
-        from pyexp import Result
+            @staticmethod
+            def report(results, out):
+                pass
 
-        r = Result(config={"name": "test", "nested": {"a": 1}}, result=None)
+        exp = MyExp()
 
-        assert isinstance(r.config, Config)
-        assert r.config.name == "test"
-        assert r.config.nested.a == 1
+        import pytest
+        with pytest.raises(RuntimeError, match="not initialized"):
+            _ = exp.cfg
 
-    def test_result_with_error(self):
-        """Result can store error information."""
-        from pyexp import Result
+        with pytest.raises(RuntimeError, match="not initialized"):
+            _ = exp.out
 
-        r = Result(
-            config={"name": "failing"},
-            result=None,
-            error="ValueError: something went wrong",
-            log="traceback output",
-        )
+    def test_experiment_properties_after_init(self):
+        """Experiment properties work after initialization by runner."""
+        from pathlib import Path
+        from pyexp import Experiment, Config
 
-        assert r.result is None
-        assert r.error is not None
-        assert "ValueError" in r.error
-        assert r.log == "traceback output"
+        class MyExp(Experiment):
+            def experiment(self):
+                pass
 
-    def test_result_default_values(self):
-        """Result has sensible defaults."""
-        from pyexp import Result
+            @staticmethod
+            def configs():
+                return []
 
-        r = Result(config={"name": "test"})
+            @staticmethod
+            def report(results, out):
+                pass
 
-        assert r.result is None
-        assert r.error is None
-        assert r.log == ""
+        exp = MyExp()
+        # Simulate runner setting private attributes
+        exp._Experiment__cfg = Config({"name": "test", "lr": 0.01})
+        exp._Experiment__out = Path("/tmp/test")
+        exp._Experiment__error = None
+        exp._Experiment__log = "some log"
+
+        assert exp.cfg["name"] == "test"
+        assert exp.cfg.lr == 0.01
+        assert exp.out == Path("/tmp/test")
+        assert exp.error is None
+        assert exp.log == "some log"
+        assert exp.name == "test"
+
+    def test_experiment_name_shorthand(self):
+        """Experiment.name is shorthand for cfg.get('name', '')."""
+        from pyexp import Experiment, Config
+
+        class MyExp(Experiment):
+            def experiment(self):
+                pass
+
+            @staticmethod
+            def configs():
+                return []
+
+            @staticmethod
+            def report(results, out):
+                pass
+
+        exp = MyExp()
+        # Name returns empty string if cfg not set
+        assert exp.name == ""
+
+        # Name returns config name if set
+        exp._Experiment__cfg = Config({"name": "my_experiment"})
+        assert exp.name == "my_experiment"
+
+        # Name returns empty string if config has no name
+        exp._Experiment__cfg = Config({"lr": 0.01})
+        assert exp.name == ""

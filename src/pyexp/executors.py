@@ -13,7 +13,7 @@ Custom executors can be created by subclassing Executor.
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, TYPE_CHECKING
 import os
 import pickle
 import subprocess
@@ -23,7 +23,8 @@ import traceback
 
 import cloudpickle
 
-from .config import Config
+if TYPE_CHECKING:
+    from .experiment import Experiment
 
 # Valid executor names
 ExecutorName = Literal["inline", "subprocess", "fork", "ray"]
@@ -38,26 +39,24 @@ class Executor(ABC):
     @abstractmethod
     def run(
         self,
-        fn: Callable[[Config], Any],
-        config: Config,
+        instance: "Experiment",
         result_path: Path,
         capture: bool = True,
-        wants_logger: bool = False,
         stash: bool = True,
-    ) -> dict:
-        """Run a single experiment and return the result.
+    ) -> None:
+        """Run a single experiment and pickle the result.
 
         Args:
-            fn: The experiment function to execute.
-            config: The experiment config (already has 'out' set).
-            result_path: Path where result should be cached.
+            instance: The experiment instance (cfg/out already set).
+            result_path: Path where the pickled instance should be saved.
             capture: If True (default), capture output. If False, show output live.
-            wants_logger: If True, create a Logger and pass it to the experiment function.
             stash: If True, capture git commit hash at the start of the experiment.
 
-        Returns:
-            The experiment result dict. If execution failed, should contain
-            '__error__': True along with 'type', 'message', and optionally 'traceback'.
+        The executor should:
+        1. Call instance.experiment()
+        2. On error: set instance._Experiment__error
+        3. Set instance._Experiment__log with captured stdout/stderr
+        4. Pickle the entire instance to result_path
         """
         pass
 
@@ -71,51 +70,16 @@ class InlineExecutor(Executor):
 
     def run(
         self,
-        fn: Callable[[Config], Any],
-        config: Config,
+        instance: "Experiment",
         result_path: Path,
         capture: bool = True,
-        wants_logger: bool = False,
         stash: bool = True,
-    ) -> dict:
-        """Run experiment inline and cache result.
-
-        Returns:
-            Structured dict with keys: result, error, log
-        """
+    ) -> None:
+        """Run experiment inline and cache result."""
         import io
         import sys
 
         result_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger = None
-
-        if wants_logger:
-            from pyexp.log import Logger
-            import yaml
-
-            # Create logger for this experiment
-            logger = Logger(config["out"])
-
-            # Log config as YAML at iteration 0
-            config_to_log = {
-                k: v
-                for k, v in config.items()
-                if k not in ("out", "logger")
-            }
-            logger.add_text(
-                "config", yaml.dump(config_to_log, default_flow_style=False)
-            )
-
-            # Log git commit hash if stash enabled
-            if stash:
-                try:
-                    from pyexp.utils import stash as git_stash
-
-                    commit_hash = git_stash()
-                    logger.add_text("git_commit", commit_hash)
-                except Exception:
-                    pass  # Silently ignore if not in a git repo
 
         # Capture output if requested
         log = ""
@@ -125,26 +89,20 @@ class InlineExecutor(Executor):
             sys.stderr = io.StringIO()
 
         try:
-            if wants_logger:
-                result = fn(config, logger)
-            else:
-                result = fn(config)
-            structured = {"result": result, "error": None}
+            instance.experiment()
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            structured = {"result": None, "error": error_msg}
+            instance._Experiment__error = error_msg
         finally:
-            # Always flush the logger if it exists
-            if logger:
-                logger.flush()
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
 
-        structured["log"] = log
+        instance._Experiment__log = log
+
+        # Pickle entire instance using cloudpickle for dynamic classes
         with open(result_path, "wb") as f:
-            pickle.dump(structured, f)
-        return structured
+            cloudpickle.dump(instance, f)
 
 
 class SubprocessExecutor(Executor):
@@ -153,33 +111,25 @@ class SubprocessExecutor(Executor):
     This provides strong isolation - crashes (including segfaults) won't affect
     the main process. Works cross-platform (Windows, macOS, Linux).
 
-    The experiment function is serialized using cloudpickle, which captures
-    the function's bytecode. However, imported modules are serialized by
+    The experiment instance is serialized using cloudpickle, which captures
+    the instance's state. However, imported modules are serialized by
     reference and will be re-imported in the subprocess.
     """
 
     def run(
         self,
-        fn: Callable[[Config], Any],
-        config: Config,
+        instance: "Experiment",
         result_path: Path,
         capture: bool = True,
-        wants_logger: bool = False,
         stash: bool = True,
-    ) -> dict:
-        """Run experiment in subprocess via cloudpickle serialization.
-
-        Returns:
-            Structured dict with keys: result, error, log
-        """
+    ) -> None:
+        """Run experiment in subprocess via cloudpickle serialization."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create payload with serialized function
+        # Create payload with serialized instance
         payload = {
-            "fn": fn,
-            "config": config,
+            "instance": instance,
             "result_path": str(result_path),
-            "wants_logger": wants_logger,
             "stash": stash,
         }
 
@@ -214,21 +164,19 @@ class SubprocessExecutor(Executor):
 
             # Check if result was written
             if result_path.exists():
+                # Load and update with log
                 with open(result_path, "rb") as f:
-                    structured = pickle.load(f)
-                # Add log to structured result
-                structured["log"] = log
+                    instance = pickle.load(f)
+                instance._Experiment__log = log
                 # Re-save with log included
                 with open(result_path, "wb") as f:
-                    pickle.dump(structured, f)
-                return structured
+                    cloudpickle.dump(instance, f)
             else:
                 # Subprocess crashed before writing result
-                error_msg = f"SubprocessError: exited with code {proc.returncode}"
-                structured = {"result": None, "error": error_msg, "log": log}
+                instance._Experiment__error = f"SubprocessError: exited with code {proc.returncode}"
+                instance._Experiment__log = log
                 with open(result_path, "wb") as f:
-                    pickle.dump(structured, f)
-                return structured
+                    cloudpickle.dump(instance, f)
         finally:
             # Clean up payload file
             Path(payload_path).unlink(missing_ok=True)
@@ -244,7 +192,7 @@ class ForkExecutor(Executor):
     Advantages over SubprocessExecutor:
     - All processes share exact same module state (no re-importing)
     - Faster startup (no need to re-import modules)
-    - No serialization of the function needed
+    - No serialization of the instance needed
 
     Limitations:
     - Unix only (Linux, macOS) - not available on Windows
@@ -258,18 +206,12 @@ class ForkExecutor(Executor):
 
     def run(
         self,
-        fn: Callable[[Config], Any],
-        config: Config,
+        instance: "Experiment",
         result_path: Path,
         capture: bool = True,
-        wants_logger: bool = False,
         stash: bool = True,
-    ) -> dict:
-        """Run experiment in a forked process.
-
-        Returns:
-            Structured dict with keys: result, error, log
-        """
+    ) -> None:
+        """Run experiment in a forked process."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create pipe for capturing output
@@ -280,7 +222,6 @@ class ForkExecutor(Executor):
 
         if pid == 0:
             # Child process
-            logger = None
             try:
                 if capture:
                     os.close(read_fd)
@@ -288,59 +229,18 @@ class ForkExecutor(Executor):
                     os.dup2(write_fd, 2)  # stderr
                     os.close(write_fd)
 
-                if wants_logger:
-                    # Create logger for this experiment
-                    from pyexp.log import Logger
-                    import yaml
+                instance.experiment()
 
-                    logger = Logger(config["out"])
-
-                    # Log config as YAML at iteration 0
-                    config_to_log = {
-                        k: v
-                        for k, v in config.items()
-                        if k not in ("out", "logger")
-                    }
-                    logger.add_text(
-                        "config", yaml.dump(config_to_log, default_flow_style=False)
-                    )
-
-                    # Log git commit hash if stash enabled
-                    if stash:
-                        try:
-                            from pyexp.utils import stash as git_stash
-
-                            commit_hash = git_stash()
-                            logger.add_text("git_commit", commit_hash)
-                        except Exception:
-                            pass  # Silently ignore if not in a git repo
-
-                if wants_logger:
-                    result = fn(config, logger)
-                else:
-                    result = fn(config)
-
-                # Flush logger before writing result
-                if logger:
-                    logger.flush()
-
-                structured = {"result": result, "error": None}
                 with open(result_path, "wb") as f:
-                    pickle.dump(structured, f)
+                    cloudpickle.dump(instance, f)
                 os._exit(0)
             except Exception as e:
-                # Flush logger if it exists
-                if logger:
-                    try:
-                        logger.flush()
-                    except Exception:
-                        pass
                 # Write error information
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                structured = {"result": None, "error": error_msg}
+                instance._Experiment__error = error_msg
                 try:
                     with open(result_path, "wb") as f:
-                        pickle.dump(structured, f)
+                        cloudpickle.dump(instance, f)
                 except Exception:
                     pass
                 os._exit(1)
@@ -365,18 +265,16 @@ class ForkExecutor(Executor):
 
             if result_path.exists():
                 with open(result_path, "rb") as f:
-                    structured = pickle.load(f)
-                structured["log"] = log
+                    instance = pickle.load(f)
+                instance._Experiment__log = log
                 with open(result_path, "wb") as f:
-                    pickle.dump(structured, f)
-                return structured
+                    cloudpickle.dump(instance, f)
             else:
                 # Child crashed before writing result
-                error_msg = f"ForkError: exited with code {exit_code}"
-                structured = {"result": None, "error": error_msg, "log": log}
+                instance._Experiment__error = f"ForkError: exited with code {exit_code}"
+                instance._Experiment__log = log
                 with open(result_path, "wb") as f:
-                    pickle.dump(structured, f)
-                return structured
+                    cloudpickle.dump(instance, f)
 
 
 class RayExecutor(Executor):
@@ -408,17 +306,6 @@ class RayExecutor(Executor):
 
         # Specify resources
         executor = RayExecutor(num_cpus=4, num_gpus=1)
-
-    Advantages:
-    - Can distribute work across multiple machines
-    - Efficient multi-core utilization
-    - Built-in fault tolerance and retry mechanisms
-    - Good for long-running experiments
-
-    Limitations:
-    - Requires Ray to be installed (`pip install pyexp[ray]`)
-    - Additional overhead for simple single-machine workloads
-    - Ray cluster setup required for multi-machine execution
     """
 
     def __init__(
@@ -460,60 +347,25 @@ class RayExecutor(Executor):
 
     def run(
         self,
-        fn: Callable[[Config], Any],
-        config: Config,
+        instance: "Experiment",
         result_path: Path,
         capture: bool = True,
-        wants_logger: bool = False,
         stash: bool = True,
-    ) -> dict:
-        """Run experiment as a Ray task.
-
-        Returns:
-            Structured dict with keys: result, error, log
-        """
+    ) -> None:
+        """Run experiment as a Ray task."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         @self._ray.remote
-        def _run_experiment(fn, config, result_path_str, capture, wants_logger, stash):
+        def _run_experiment(instance, result_path_str, capture):
             """Ray remote function to execute experiment."""
             import io
-            import pickle
             import sys
             import traceback
             from pathlib import Path
-            from pyexp.config import Config
+            import cloudpickle
 
             result_path = Path(result_path_str)
             log = ""
-            logger = None
-
-            if wants_logger:
-                from pyexp.log import Logger
-                import yaml
-
-                # Create logger for this experiment
-                logger = Logger(config["out"])
-
-                # Log config as YAML at iteration 0
-                config_to_log = {
-                    k: v
-                    for k, v in config.items()
-                    if k not in ("out", "logger")
-                }
-                logger.add_text(
-                    "config", yaml.dump(config_to_log, default_flow_style=False)
-                )
-
-                # Log git commit hash if stash enabled
-                if stash:
-                    try:
-                        from pyexp.utils import stash as git_stash
-
-                        commit_hash = git_stash()
-                        logger.add_text("git_commit", commit_hash)
-                    except Exception:
-                        pass  # Silently ignore if not in a git repo
 
             # Capture output
             if capture:
@@ -522,38 +374,30 @@ class RayExecutor(Executor):
                 sys.stderr = io.StringIO()
 
             try:
-                if wants_logger:
-                    result = fn(config, logger)
-                else:
-                    result = fn(config)
-                structured = {"result": result, "error": None}
+                instance.experiment()
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                structured = {"result": None, "error": error_msg}
+                instance._Experiment__error = error_msg
             finally:
-                # Always flush the logger if it exists
-                if logger:
-                    logger.flush()
                 if capture:
                     log = sys.stdout.getvalue() + sys.stderr.getvalue()
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
-            structured["log"] = log
+            instance._Experiment__log = log
             with open(result_path, "wb") as f:
-                pickle.dump(structured, f)
-            return structured
+                cloudpickle.dump(instance, f)
+            return instance
 
         # Submit task and wait for result
-        future = _run_experiment.remote(fn, config, str(result_path), capture, wants_logger, stash)
+        future = _run_experiment.remote(instance, str(result_path), capture)
         try:
-            result = self._ray.get(future)
-            return result
+            self._ray.get(future)
         except Exception as e:
-            error_msg = f"RayError: {e}\n{traceback.format_exc()}"
-            structured = {"result": None, "error": error_msg, "log": ""}
+            # Task failed at Ray level
+            instance._Experiment__error = f"RayError: {e}\n{traceback.format_exc()}"
+            instance._Experiment__log = ""
             with open(result_path, "wb") as f:
-                pickle.dump(structured, f)
-            return structured
+                cloudpickle.dump(instance, f)
 
 
 # Registry of built-in executors

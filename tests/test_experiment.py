@@ -6,28 +6,26 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from pyexp import Config, Tensor, experiment, sweep
+from pyexp import Config, Tensor, experiment, sweep, Experiment, ExperimentRunner
 
 
 class TestExperimentDecorator:
     """Tests for the @experiment decorator syntax."""
 
-    def test_decorator_returns_experiment(self):
+    def test_decorator_returns_runner(self):
         @experiment
         def my_exp(config):
             return config["x"]
 
-        from pyexp.experiment import Experiment
+        assert isinstance(my_exp, ExperimentRunner)
 
-        assert isinstance(my_exp, Experiment)
-
-    def test_experiment_callable(self):
+    def test_experiment_class_accessible(self):
         @experiment
         def my_exp(config):
             return config["x"] * 2
 
-        # The function should still be accessible
-        assert my_exp._fn is not None
+        # The experiment class should be accessible
+        assert my_exp._experiment_class is not None
 
     def test_configs_decorator(self):
         @experiment
@@ -53,7 +51,7 @@ class TestExperimentDecorator:
 
 
 class TestExperimentRun:
-    """Tests for Experiment.run() execution."""
+    """Tests for ExperimentRunner.run() execution."""
 
     def test_run_executes_pipeline(self, tmp_path):
         @experiment
@@ -154,7 +152,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results, out):
-            return results[0].config["x"]
+            return results[0].cfg["x"]
 
         # First run with x=42
         with patch.object(sys, "argv", ["test"]):
@@ -183,7 +181,7 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results, out):
-            return results[0].config["x"]
+            return results[0].cfg["x"]
 
         # First run with x=42
         with patch.object(sys, "argv", ["test"]):
@@ -264,7 +262,9 @@ class TestExperimentRun:
         @experiment
         def my_exp(config):
             nonlocal received_out
-            received_out = config.out
+            # In new API, 'out' is not in config, it's on the instance
+            # But for decorator API, config still has what was passed
+            # Actually, let's check what's available
             return {"x": 1}
 
         @my_exp.configs
@@ -273,10 +273,12 @@ class TestExperimentRun:
 
         @my_exp.report
         def report(results, out):
+            nonlocal received_out
+            # In report, we can access exp.out
+            received_out = results[0].out
             return results
 
         with patch.object(sys, "argv", ["test"]):
-            # Use executor="inline" to capture received_out in same process
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         assert received_out is not None
@@ -397,7 +399,7 @@ class TestExperimentRun:
         assert received_results.shape == (2,)
 
     def test_results_contain_config_and_name(self, tmp_path):
-        """Each result should contain the config and name."""
+        """Each result should contain the cfg and name."""
         received_results = None
 
         @experiment
@@ -418,14 +420,14 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         result = received_results[0]
-        assert result.config["name"] == "test"
-        assert result.config["lr"] == 0.01
-        assert result.config["epochs"] == 10
+        assert result.cfg["name"] == "test"
+        assert result.cfg["lr"] == 0.01
+        assert result.cfg["epochs"] == 10
         assert result.result["accuracy"] == 0.95
-        # out should be accessible both via config and result.out
-        assert "out" in result.config
-        assert result.config.out.exists()
-        assert result.out == result.config.out
+        # out is now a property on the experiment, not in cfg
+        assert result.out.exists()
+        # name is a shorthand for cfg.get("name", "")
+        assert result.name == "test"
 
     def test_results_filterable_by_config(self, tmp_path):
         """Results should be filterable by config values."""
@@ -451,15 +453,15 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Filter by config.x
-        x1_results = received_results[{"config.x": 1}]
+        # Filter by cfg.x (note: changed from config.x to cfg.x)
+        x1_results = received_results[{"cfg.x": 1}]
         assert x1_results.shape == (1, 1, 2)
-        assert all(r.config["x"] == 1 for r in x1_results)
+        assert all(r.cfg["x"] == 1 for r in x1_results)
 
-        # Filter by config.y
-        y10_results = received_results[{"config.y": 10}]
+        # Filter by cfg.y
+        y10_results = received_results[{"cfg.y": 10}]
         assert y10_results.shape == (1, 2, 1)
-        assert all(r.config["y"] == 10 for r in y10_results)
+        assert all(r.cfg["y"] == 10 for r in y10_results)
 
     def test_report_tensors_preserve_sweep_shape(self, tmp_path):
         """Tensors should preserve shape from sweep operations."""
@@ -486,11 +488,11 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         assert received_results.shape == (1, 2, 2)
-        assert received_results[0, 0, 0].config["x"] == 1
+        assert received_results[0, 0, 0].cfg["x"] == 1
         assert received_results[0, 0, 0].result["val"] == 11
 
-    def test_non_dict_result_wrapped_in_value(self, tmp_path):
-        """Non-dict results should be wrapped with 'value' key."""
+    def test_non_dict_result_wrapped_in_result(self, tmp_path):
+        """Non-dict results are stored in .result attribute."""
         received_results = None
 
         @experiment
@@ -511,12 +513,12 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         result = received_results[0]
-        assert result.config["name"] == "test"
-        assert result.config["x"] == 5
+        assert result.cfg["name"] == "test"
+        assert result.cfg["x"] == 5
         assert result.result == 10
 
     def test_config_json_saved(self, tmp_path):
-        """Each experiment run should save a config.json with 'out' field."""
+        """Each experiment run should save a config.json."""
         import json
 
         @experiment
@@ -540,8 +542,6 @@ class TestExperimentRun:
         assert data["name"] == "test"
         assert data["lr"] == 0.01
         assert data["nested"]["a"] == 1
-        # config.json should include 'out' field
-        assert "out" in data
 
     def test_invalid_config_type_raises(self, tmp_path):
         """Configs with non-base types should be rejected."""
@@ -593,10 +593,8 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test", "--continue", "--filter", "lr_0\\.01"]):
             result = my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Since all are cached, runs list stays empty, but report should only see filtered
-        # Actually, filter affects which configs are executed, but report loads all
-        # So we need to test differently - check that only filtered configs are processed
-        assert len(runs) == 0  # All cached, so no new runs
+        # Since all are cached, runs list stays empty
+        assert len(runs) == 0
 
     def test_filter_no_match_returns_none(self, tmp_path):
         """--filter with no matches should return None."""
@@ -625,12 +623,10 @@ class TestExperimentRun:
 
     def test_filter_runs_only_matching(self, tmp_path):
         """--filter should only execute matching configs on fresh run."""
-        runs = []
 
         @experiment
         def my_exp(config):
-            runs.append(config["name"])
-            return {"name": config["name"]}
+            return {"name": config["name"], "ran": True}
 
         @my_exp.configs
         def configs():
@@ -647,14 +643,26 @@ class TestExperimentRun:
         # Run with filter - only exp_* should run
         with patch.object(sys, "argv", ["test", "--filter", "^exp_"]):
             # This will fail at report because not all results exist
-            # So we need to catch the error or adjust the test
             try:
                 my_exp.run(output_dir=tmp_path, executor="inline")
             except FileNotFoundError:
                 pass  # Expected - report tries to load all configs
 
-        # Only exp_a and exp_b should have run
-        assert sorted(runs) == ["exp_a", "exp_b"]
+        # Check which experiments actually ran by looking for experiment.pkl files
+        run_dir = tmp_path / "my_exp"
+        timestamp_dir = list(run_dir.iterdir())[0]
+        ran_names = []
+        for exp_dir in timestamp_dir.iterdir():
+            if exp_dir.is_dir() and exp_dir.name != "report":
+                exp_pkl = exp_dir / "experiment.pkl"
+                if exp_pkl.exists():
+                    import pickle
+                    with open(exp_pkl, "rb") as f:
+                        exp = pickle.load(f)
+                    if exp.result and exp.result.get("ran"):
+                        ran_names.append(exp.result["name"])
+
+        assert sorted(ran_names) == ["exp_a", "exp_b"]
 
 
 class TestResultsMethod:
@@ -682,13 +690,12 @@ class TestResultsMethod:
         results = my_exp.results(output_dir=tmp_path)
 
         assert results.shape == (1,)
-        assert results[0].config["name"] == "test"
-        assert results[0].config["x"] == 5
+        assert results[0].cfg["name"] == "test"
+        assert results[0].cfg["x"] == 5
         assert results[0].result["value"] == 10
-        # out should be accessible via result.out and result.config.out
+        # out is a property on the experiment
         assert results[0].out is not None
         assert results[0].out.exists()
-        assert results[0].out == results[0].config.out
 
     def test_results_loads_specific_timestamp(self, tmp_path):
         """results() can load a specific timestamp."""
@@ -826,12 +833,11 @@ class TestResultsMethod:
         assert data["runs"][0].startswith("a-")
         assert data["runs"][1].startswith("b-")
 
-        # Individual config.json files should contain full configs with 'out'
+        # Individual config.json files should contain full configs
         for run_folder in data["runs"]:
             config_json = run_dir / run_folder / "config.json"
             assert config_json.exists()
             config_data = json.loads(config_json.read_text())
-            assert "out" in config_data
             assert "x" in config_data
 
 
@@ -1180,7 +1186,7 @@ class TestSubprocessExecution:
         assert result.error is not None
         assert "ValueError" in result.error
         assert "Test error" in result.error
-        assert result.config["name"] == "failing"
+        assert result.cfg["name"] == "failing"
 
     def test_subprocess_continues_after_failure(self, tmp_path):
         """Other experiments continue even if one fails."""
@@ -1332,3 +1338,160 @@ class TestForkExecution:
             result = my_exp.run(output_dir=tmp_path, executor="fork")
 
         assert result == [4, 9, 16]
+
+
+class TestDecoratorWithOut:
+    """Tests for the decorator API with out parameter."""
+
+    def test_decorator_with_out_parameter(self, tmp_path):
+        """Decorator passes out when function has 2 parameters."""
+        received_out = None
+
+        @experiment
+        def my_exp(cfg, out):
+            nonlocal received_out
+            received_out = out
+            return {"value": cfg["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert received_out is not None
+        assert isinstance(received_out, Path)
+        assert received_out.exists()
+
+    def test_decorator_without_out_parameter(self, tmp_path):
+        """Decorator works with just cfg parameter."""
+
+        @experiment
+        def my_exp(cfg):
+            return {"value": cfg["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert result == 10
+
+
+class TestClassBasedExperiment:
+    """Tests for the class-based Experiment API."""
+
+    def test_class_based_experiment_runs(self, tmp_path):
+        """Class-based experiments can be run with ExperimentRunner."""
+
+        class MyExperiment(Experiment):
+            accuracy: float
+
+            def experiment(self):
+                self.accuracy = self.cfg["x"] * 2
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 5}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].accuracy
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result == 10
+
+    def test_class_based_experiment_attributes(self, tmp_path):
+        """Class-based experiments can set custom attributes."""
+
+        class MyExperiment(Experiment):
+            model_name: str
+            accuracy: float
+            epochs_run: int
+
+            def experiment(self):
+                self.model_name = "test_model"
+                self.accuracy = 0.95
+                self.epochs_run = self.cfg["epochs"]
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "epochs": 10}]
+
+            @staticmethod
+            def report(results, out):
+                exp = results[0]
+                return {
+                    "model": exp.model_name,
+                    "accuracy": exp.accuracy,
+                    "epochs": exp.epochs_run,
+                }
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result["model"] == "test_model"
+        assert result["accuracy"] == 0.95
+        assert result["epochs"] == 10
+
+    def test_class_experiment_cfg_property(self, tmp_path):
+        """Class-based experiments have access to cfg property."""
+
+        class MyExperiment(Experiment):
+            received_lr: float
+
+            def experiment(self):
+                self.received_lr = self.cfg.lr
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "lr": 0.01}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].received_lr
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert result == 0.01
+
+    def test_class_experiment_out_property(self, tmp_path):
+        """Class-based experiments have access to out property."""
+
+        class MyExperiment(Experiment):
+            out_path: Path
+
+            def experiment(self):
+                self.out_path = self.out
+
+            @staticmethod
+            def configs():
+                return [{"name": "test", "x": 1}]
+
+            @staticmethod
+            def report(results, out):
+                return results[0].out_path
+
+        with patch.object(sys, "argv", ["test"]):
+            runner = ExperimentRunner(MyExperiment, output_dir=tmp_path)
+            result = runner.run(executor="inline")
+
+        assert isinstance(result, Path)
+        assert result.exists()

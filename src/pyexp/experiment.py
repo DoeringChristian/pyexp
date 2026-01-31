@@ -1,29 +1,142 @@
-"""Experiment runner: Experiment class and decorators."""
+"""Experiment runner: Experiment base class, ExperimentRunner, and decorators."""
 
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from typing import Callable, Any
+from typing import Callable, Any, TYPE_CHECKING
 import argparse
 import hashlib
-import inspect
 import json
 import os
 import pickle
 import re
 import sys
 
-from .config import Config, Result, Tensor
+from .config import Config, Tensor
 from .executors import Executor, ExecutorName, get_executor
 from .log import LogReader
 
+if TYPE_CHECKING:
+    from .log import Logger
 
-def _wants_logger(fn: Callable) -> bool:
-    """Check if the experiment function wants a logger parameter."""
-    sig = inspect.signature(fn)
-    params = list(sig.parameters.keys())
-    # If function has 2+ parameters, second one is the logger
-    return len(params) >= 2
+
+class Experiment:
+    """Base class for experiments. Users subclass this to define experiments.
+
+    The experiment instance IS the result - it gets pickled entirely after
+    running, so you can access any attributes you set in experiment().
+
+    Read-only properties (set by runner via name-mangled attrs):
+        cfg: The config for this run (Config object with dot notation access)
+        out: Output directory for this experiment run
+        error: Populated after failure with error message
+        log: Populated after run with stdout/stderr output
+        name: Shorthand for cfg.get("name", "")
+
+    Example:
+        class MyExperiment(Experiment):
+            accuracy: float
+            model: Any
+
+            def experiment(self):
+                self.model = train(self.cfg.lr)
+                self.accuracy = evaluate(self.model)
+
+            @staticmethod
+            def configs():
+                return [{"name": "fast", "lr": 0.01}]
+
+            @staticmethod
+            def report(results: Tensor["MyExperiment"], out: Path):
+                for exp in results:
+                    print(f"{exp.name}: {exp.accuracy}")
+
+        runner = ExperimentRunner(MyExperiment)
+        runner.run()
+    """
+
+    # Private attributes (set by runner via name mangling)
+    _Experiment__cfg: Config | None = None
+    _Experiment__out: Path | None = None
+    _Experiment__error: str | None = None
+    _Experiment__log: str = ""
+
+    @property
+    def cfg(self) -> Config:
+        """The configuration for this experiment run."""
+        if self._Experiment__cfg is None:
+            raise RuntimeError(
+                "Experiment not initialized. cfg is only available inside experiment()."
+            )
+        return self._Experiment__cfg
+
+    @property
+    def out(self) -> Path:
+        """Output directory for this experiment run."""
+        if self._Experiment__out is None:
+            raise RuntimeError(
+                "Experiment not initialized. out is only available inside experiment()."
+            )
+        return self._Experiment__out
+
+    @property
+    def error(self) -> str | None:
+        """Error message if experiment failed, None otherwise."""
+        return self._Experiment__error
+
+    @property
+    def log(self) -> str:
+        """Captured stdout/stderr from the experiment run."""
+        return self._Experiment__log
+
+    @property
+    def name(self) -> str:
+        """Shorthand for cfg.get('name', '')."""
+        if self._Experiment__cfg is None:
+            return ""
+        return self._Experiment__cfg.get("name", "")
+
+    def experiment(self) -> None:
+        """User implements this to define the experiment.
+
+        Set attributes on self to store results. These will be accessible
+        after loading the experiment from disk.
+
+        Example:
+            def experiment(self):
+                self.accuracy = train_and_evaluate(self.cfg)
+        """
+        raise NotImplementedError("Subclass must implement experiment()")
+
+    @staticmethod
+    def configs() -> list[dict] | Tensor:
+        """Return list of configs to run, or a Tensor of configs.
+
+        Example:
+            @staticmethod
+            def configs():
+                return [
+                    {"name": "fast", "lr": 0.01},
+                    {"name": "slow", "lr": 0.001},
+                ]
+        """
+        raise NotImplementedError("Subclass must implement configs()")
+
+    @staticmethod
+    def report(results: Tensor, out: Path) -> Any:
+        """Generate report from experiment results.
+
+        Args:
+            results: Tensor of experiment instances with full type info
+            out: Path to report directory for saving outputs
+
+        Example:
+            @staticmethod
+            def report(results: Tensor["MyExperiment"], out: Path):
+                for exp in results:
+                    print(f"{exp.name}: {exp.accuracy}")
+        """
+        raise NotImplementedError("Subclass must implement report()")
 
 
 _VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
@@ -144,77 +257,38 @@ def _load_configs_json(run_dir: Path) -> tuple[list[Path], tuple]:
     if not configs_path.exists():
         raise FileNotFoundError(f"No configs.json found in {run_dir}")
     data = json.loads(configs_path.read_text())
-
-    # Handle both old format (configs list) and new format (runs list)
-    if "runs" in data:
-        # New format: just paths to run folders
-        paths = [run_dir / run for run in data["runs"]]
-    else:
-        # Old format: full configs with 'out' field
-        paths = []
-        for config in data["configs"]:
-            if "out" in config:
-                paths.append(run_dir / config["out"])
-            else:
-                # Very old format: compute from hash
-                paths.append(_get_experiment_dir(config, run_dir))
-
+    paths = [run_dir / run for run in data["runs"]]
     return paths, tuple(data["shape"])
 
 
-def _load_results_from_dir(
-    run_dir: Path,
-    wants_logger: bool = False,
-) -> Tensor:
-    """Load results from a run directory using configs.json.
+def _load_experiments_from_dir(run_dir: Path) -> Tensor[Experiment]:
+    """Load experiment instances from a run directory using configs.json.
 
     Args:
         run_dir: Path to the run directory containing configs.json and experiment dirs.
-        wants_logger: Whether to attach LogReader to results.
 
     Returns:
-        Tensor of Result objects with the original shape.
+        Tensor of Experiment instances with the original shape.
     """
     experiment_dirs, shape = _load_configs_json(run_dir)
 
     results = []
     for experiment_dir in experiment_dirs:
-        # Load config from individual config.json
-        config_path = experiment_dir / "config.json"
-        if config_path.exists():
-            config = json.loads(config_path.read_text())
-            # Convert 'out' string back to Path if present
-            if "out" in config:
-                config["out"] = Path(config["out"])
+        experiment_path = experiment_dir / "experiment.pkl"
+
+        if experiment_path.exists():
+            with open(experiment_path, "rb") as f:
+                instance = pickle.load(f)
+            results.append(instance)
         else:
-            config = {}
-
-        # Ensure 'out' is set to the experiment directory
-        config["out"] = experiment_dir
-
-        result_path = experiment_dir / "result.pkl"
-
-        if not result_path.exists():
+            config_path = experiment_dir / "config.json"
+            config_name = "unknown"
+            if config_path.exists():
+                config = json.loads(config_path.read_text())
+                config_name = config.get("name", config_name)
             raise FileNotFoundError(
-                f"No result found for config '{config.get('name', config)}' at {result_path}"
+                f"No experiment found for config '{config_name}' at {experiment_dir}"
             )
-
-        with open(result_path, "rb") as f:
-            structured = pickle.load(f)
-
-        # Add LogReader if requested
-        log_reader = None
-        if wants_logger:
-            log_reader = LogReader(experiment_dir)
-
-        result_obj = Result(
-            config=config,
-            result=structured.get("result"),
-            error=structured.get("error"),
-            log=structured.get("log", ""),
-            logger=log_reader,
-        )
-        results.append(result_obj)
 
     return Tensor(results, shape)
 
@@ -268,12 +342,12 @@ def _list_runs(base_dir: Path) -> None:
         completed = 0
         failed = 0
         for config_dir in config_dirs:
-            result_path = config_dir / "result.pkl"
-            if result_path.exists():
+            experiment_path = config_dir / "experiment.pkl"
+            if experiment_path.exists():
                 try:
-                    with open(result_path, "rb") as f:
-                        structured = pickle.load(f)
-                    if structured.get("error"):
+                    with open(experiment_path, "rb") as f:
+                        instance = pickle.load(f)
+                    if instance.error:
                         failed += 1
                     else:
                         completed += 1
@@ -465,12 +539,46 @@ def _resolve_executor(
     return get_executor(executor)
 
 
-class Experiment:
-    """An experiment that can be run with configs and report functions."""
+class ExperimentRunner:
+    """Runner for executing experiments defined as Experiment subclasses or decorated functions.
+
+    This class handles:
+    - CLI argument parsing
+    - Config generation and validation
+    - Experiment execution via executors
+    - Result caching and loading
+    - Report generation
+
+    Can be used with either class-based or decorator-based experiments:
+
+    Class-based:
+        class MyExperiment(Experiment):
+            def experiment(self):
+                self.accuracy = train(self.cfg)
+
+            @staticmethod
+            def configs():
+                return [{"name": "exp1", "lr": 0.01}]
+
+            @staticmethod
+            def report(results, out):
+                for exp in results:
+                    print(exp.accuracy)
+
+        runner = ExperimentRunner(MyExperiment)
+        runner.run()
+
+    Decorator-based:
+        @pyexp.experiment
+        def my_experiment(cfg):
+            return {"accuracy": train(cfg)}
+
+        my_experiment.run()  # ExperimentRunner is created internally
+    """
 
     def __init__(
         self,
-        fn: Callable[[dict], Any],
+        experiment_class: type[Experiment],
         *,
         name: str | None = None,
         output_dir: str | Path | None = None,
@@ -480,49 +588,45 @@ class Experiment:
         viewer_port: int = 8765,
         stash: bool = True,
     ):
-        self._fn = fn
-        self._name = name or fn.__name__
+        """Create an ExperimentRunner.
 
-        # Determine the default output directory relative to the experiment file
+        Args:
+            experiment_class: Experiment subclass to run.
+            name: Experiment name for output folder. Defaults to class name.
+            output_dir: Base directory for results. Defaults to "out" relative to caller.
+            executor: Execution strategy ("subprocess", "fork", "inline", "ray", etc.)
+            retry: Number of retries on failure.
+            viewer: Start viewer after experiments complete.
+            viewer_port: Port for the viewer.
+            stash: Capture git repository state.
+        """
+        self._experiment_class = experiment_class
+        self._name = name or experiment_class.__name__
+
+        # Determine the default output directory
         if output_dir is not None:
             self._output_dir_default = Path(output_dir)
         else:
-            # Use directory of the file containing the experiment function
-            fn_file = fn.__globals__.get("__file__")
-            if fn_file:
-                self._output_dir_default = Path(fn_file).parent / "out"
-            else:
-                # Fallback for interactive/REPL usage
-                self._output_dir_default = Path("out")
+            # Use current working directory / out
+            self._output_dir_default = Path("out")
 
         self._executor_default = executor
         self._retry_default = retry
         self._viewer_default = viewer
         self._viewer_port_default = viewer_port
         self._stash_default = stash
-        self._wants_logger = _wants_logger(fn)
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor, Path], Any] | None = None
-        wraps(fn)(self)
-
-    def __call__(self, config: dict) -> Any:
-        """Run the experiment function directly."""
-        return self._fn(config)
 
     def configs(self, fn: Callable[[], list[dict]]) -> Callable[[], list[dict]]:
-        """Decorator to register the configs generator function."""
+        """Decorator to register the configs generator function (for decorator API)."""
         self._configs_fn = fn
         return fn
 
     def report(
         self, fn: Callable[[Tensor, Path], Any]
     ) -> Callable[[Tensor, Path], Any]:
-        """Decorator to register the report function.
-
-        The report function receives:
-            results: A Tensor of Result objects with .config, .result, .error, .log
-            out: Path to a 'report' directory for saving outputs (plots, tables, etc.)
-        """
+        """Decorator to register the report function (for decorator API)."""
         self._report_fn = fn
         return fn
 
@@ -531,29 +635,17 @@ class Experiment:
         timestamp: str | None = None,
         output_dir: str | Path | None = None,
         name: str | None = None,
-    ) -> Tensor:
+    ) -> Tensor[Experiment]:
         """Load results from a previous experiment run.
 
         Args:
             timestamp: Timestamp of the run to load (e.g., "2026-01-28_10-30-00").
                       If None or "latest", loads the most recent run.
             output_dir: Base directory where experiment results are stored.
-                       Defaults to directory relative to experiment file.
-            name: Experiment name. Defaults to the function name.
+            name: Experiment name. Defaults to class/function name.
 
         Returns:
-            Tensor of Result objects with .config, .result, .error, .log, .logger
-
-        Example:
-            # Load latest results
-            results = my_experiment.results()
-
-            # Load specific run
-            results = my_experiment.results(timestamp="2026-01-28_10-30-00")
-
-            # Access results
-            for r in results:
-                print(f"{r.name}: {r.result}")
+            Tensor of Experiment instances with full attribute access.
         """
         exp_name = name or self._name
         resolved_output_dir = Path(output_dir) if output_dir else self._output_dir_default
@@ -569,7 +661,7 @@ class Experiment:
             if not run_dir.exists():
                 raise FileNotFoundError(f"Run not found: {run_dir}")
 
-        return _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
+        return _load_experiments_from_dir(run_dir)
 
     def run(
         self,
@@ -586,39 +678,54 @@ class Experiment:
         """Execute the full pipeline: configs -> experiments -> report.
 
         Args:
-            configs: Optional configs function. If not provided, uses @experiment.configs decorated function.
-            report: Optional report function (results, out) -> Any. If not provided, uses
-                    @experiment.report decorated function. Receives a Tensor of Results and
-                    a Path to the report directory for saving outputs.
+            configs: Optional configs function. Uses class method or @configs decorated function.
+            report: Optional report function. Uses class method or @report decorated function.
             output_dir: Base directory for caching experiment results.
-                       Defaults to "out" directory relative to experiment file.
-            executor: Execution strategy for running experiments. Can be:
-                - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
-                - "fork": Run in forked process (Unix only, guarantees same module state)
-                - "inline": Run in same process (no isolation, useful for debugging)
-                - "ray": Run using Ray locally (requires `pip install pyexp[ray]`)
-                - "ray:<address>" or "ray://host:port": Run on Ray cluster (e.g., "ray:auto", "ray://cluster:10001")
-                - An Executor instance: Use custom executor
-                Defaults to the value set in @experiment decorator ("subprocess" if not specified).
-            name: Experiment name for the output folder. Defaults to function name.
-            retry: Number of times to retry a failed experiment. Defaults to decorator value (4).
-            viewer: If True, start the viewer after experiments complete. Defaults to decorator value (False).
-            viewer_port: Port for the viewer. Defaults to decorator value (8765).
-            stash: If True, capture git repository state and log commit hash. Defaults to decorator value (True).
-
-        Output folder structure:
-            <output_dir>/<name>/<timestamp>/<config_name>-<hash>/
-            Report directory: <output_dir>/<name>/<timestamp>/report/
+            executor: Execution strategy for running experiments.
+            name: Experiment name for the output folder.
+            retry: Number of times to retry a failed experiment.
+            viewer: If True, start the viewer after experiments complete.
+            viewer_port: Port for the viewer.
+            stash: If True, capture git repository state.
         """
         args = _parse_args()
 
         # Resolve parameters with CLI override priority:
-        # CLI args > run() args > decorator args
+        # CLI args > run() args > constructor args
         resolved_executor = args.executor or executor or self._executor_default
-        configs_fn = configs or self._configs_fn
-        report_fn = report or self._report_fn
         exp_name = args.name or name or self._name
-        # Output dir: CLI > run() arg > decorator arg (file-relative default)
+
+        # Resolve configs function: run() arg > decorated > class method
+        if configs is not None:
+            configs_fn = configs
+        elif self._configs_fn is not None:
+            configs_fn = self._configs_fn
+        else:
+            # Use class's configs method
+            try:
+                _ = self._experiment_class.configs()
+                configs_fn = self._experiment_class.configs
+            except NotImplementedError:
+                configs_fn = None
+
+        # Resolve report function: run() arg > decorated > class method
+        if report is not None:
+            report_fn = report
+        elif self._report_fn is not None:
+            report_fn = self._report_fn
+        else:
+            # Use class's report method - test if it's actually implemented
+            try:
+                # Try calling with dummy args to see if it raises NotImplementedError
+                self._experiment_class.report(None, None)
+                report_fn = self._experiment_class.report
+            except NotImplementedError:
+                report_fn = None
+            except Exception:
+                # If it fails for other reasons, assume it's implemented
+                report_fn = self._experiment_class.report
+
+        # Output dir: CLI > run() arg > constructor arg
         if args.output_dir:
             resolved_output_dir = Path(args.output_dir)
         elif output_dir is not None:
@@ -626,7 +733,7 @@ class Experiment:
         else:
             resolved_output_dir = self._output_dir_default
 
-        # Retry: CLI > run() arg > decorator arg
+        # Retry: CLI > run() arg > constructor arg
         if args.retry is not None:
             max_retries = args.retry
         elif retry is not None:
@@ -634,7 +741,7 @@ class Experiment:
         else:
             max_retries = self._retry_default
 
-        # Viewer: CLI > run() arg > decorator arg
+        # Viewer: CLI > run() arg > constructor arg
         if args.viewer:
             start_viewer = True
         elif viewer is not None:
@@ -642,7 +749,7 @@ class Experiment:
         else:
             start_viewer = self._viewer_default
 
-        # Viewer port: CLI > run() arg > decorator arg
+        # Viewer port: CLI > run() arg > constructor arg
         if args.viewer_port != 8765:  # Non-default means explicitly set
             resolved_viewer_port = args.viewer_port
         elif viewer_port is not None:
@@ -650,7 +757,7 @@ class Experiment:
         else:
             resolved_viewer_port = self._viewer_port_default
 
-        # Stash: CLI > run() arg > decorator arg
+        # Stash: CLI > run() arg > constructor arg
         if args.no_stash:
             enable_stash = False
         elif stash is not None:
@@ -684,11 +791,13 @@ class Experiment:
 
         if configs_fn is None:
             raise RuntimeError(
-                "No configs function provided. Use @experiment.configs or pass configs= argument."
+                "No configs function provided. Implement configs() in your Experiment class, "
+                "use @runner.configs decorator, or pass configs= argument."
             )
         if report_fn is None:
             raise RuntimeError(
-                "No report function provided. Use @experiment.report or pass report= argument."
+                "No report function provided. Implement report() in your Experiment class, "
+                "use @runner.report decorator, or pass report= argument."
             )
 
         base_dir = Path(resolved_output_dir) / exp_name
@@ -775,24 +884,24 @@ class Experiment:
                 _get_experiment_dir(config, run_dir) for config in flat_configs
             ]
 
-            # Build configs with 'out' field
-            configs_with_out = []
+            # Build configs (without 'out' - that's set separately now)
+            configs_for_save = []
             for config, experiment_dir in zip(flat_configs, experiment_dirs):
                 assert (
                     "out" not in config
                 ), "Config cannot contain 'out' key; it is reserved"
-                configs_with_out.append(Config({**config, "out": experiment_dir}))
+                configs_for_save.append(Config(config))
 
             # Create run directory and save configs.json
             run_dir.mkdir(parents=True, exist_ok=True)
             _save_configs_json(run_dir, shape, experiment_dirs)
 
             # Create all experiment directories and save individual config.json files
-            for config_with_out, experiment_dir in zip(configs_with_out, experiment_dirs):
+            for config, experiment_dir in zip(configs_for_save, experiment_dirs):
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 config_json_path = experiment_dir / "config.json"
                 config_json_path.write_text(
-                    json.dumps(dict(config_with_out), indent=2, default=str)
+                    json.dumps(dict(config), indent=2, default=str)
                 )
 
         # =================================================================
@@ -826,36 +935,43 @@ class Experiment:
             progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
 
             for experiment_dir in experiment_dirs:
-                result_path = experiment_dir / "result.pkl"
+                experiment_path = experiment_dir / "experiment.pkl"
 
                 # Load config from saved config.json
                 config_json_path = experiment_dir / "config.json"
                 config_data = json.loads(config_json_path.read_text())
-                # Convert 'out' string back to Path
-                config_data["out"] = experiment_dir
-                config_with_out = Config(config_data)
-                config_name = config_with_out.get("name", "")
+                config = Config(config_data)
+                config_name = config.get("name", "")
 
-                if not result_path.exists():
+                if not experiment_path.exists():
                     # Show running status
                     if progress:
                         progress.start(config_name)
 
+                    # Create fresh experiment instance
+                    instance = self._experiment_class()
+                    # Set private attributes via name mangling
+                    instance._Experiment__cfg = config
+                    instance._Experiment__out = experiment_dir
+
                     # Retry loop
                     for attempt in range(max_retries + 1):
-                        structured = exec_instance.run(
-                            self._fn,
-                            config_with_out,
-                            result_path,
+                        exec_instance.run(
+                            instance,
+                            experiment_path,
                             capture=not args.no_capture,
-                            wants_logger=self._wants_logger,
                             stash=enable_stash,
                         )
-                        if not structured.get("error"):
+
+                        # Reload instance to check result
+                        with open(experiment_path, "rb") as f:
+                            instance = pickle.load(f)
+
+                        if not instance.error:
                             break  # Success, exit retry loop
 
                         # Print error immediately on each failure
-                        error_msg = structured.get("error", "")
+                        error_msg = instance.error or ""
                         remaining = max_retries - attempt
                         retry_info = (
                             f" (retrying, {remaining} left)" if remaining > 0 else ""
@@ -864,19 +980,23 @@ class Experiment:
                             f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
                         )
                         print(error_msg)
-                        if structured.get("log"):
+                        if instance.log:
                             print("--- Log output ---")
-                            print(structured["log"])
+                            print(instance.log)
                         print("---")
 
                         if attempt < max_retries:
-                            # Delete result.pkl before retry so executor writes fresh
-                            result_path.unlink(missing_ok=True)
+                            # Delete experiment.pkl before retry so executor writes fresh
+                            experiment_path.unlink(missing_ok=True)
+                            # Create fresh instance for retry
+                            instance = self._experiment_class()
+                            instance._Experiment__cfg = config
+                            instance._Experiment__out = experiment_dir
 
                     # Save log to plaintext file
                     log_path = experiment_dir / "log.out"
-                    log_path.write_text(structured.get("log", ""))
-                    status = "failed" if structured.get("error") else "passed"
+                    log_path.write_text(instance.log or "")
+                    status = "failed" if instance.error else "passed"
                 else:
                     # Ensure marker file exists for viewer discovery
                     marker_path = experiment_dir / ".pyexp"
@@ -895,12 +1015,40 @@ class Experiment:
         # PHASE 3: Report Generation (always runs)
         # =================================================================
         # Load results from disk and run report function
-        results = _load_results_from_dir(run_dir, wants_logger=self._wants_logger)
+        results = _load_experiments_from_dir(run_dir)
 
         report_dir = run_dir / "report"
         report_dir.mkdir(parents=True, exist_ok=True)
 
         return report_fn(results, report_dir)
+
+
+class _DecoratorExperiment(Experiment):
+    """Dynamic Experiment subclass created by the @experiment decorator.
+
+    Stores the function's return value in self.result.
+    """
+    result: Any = None
+    # _fn is set on the class by make_runner to be the wrapped function
+    _fn: Callable | None = None
+    # _wants_out is set by make_runner based on function signature
+    _wants_out: bool = False
+
+    def experiment(self) -> None:
+        fn = type(self)._fn
+        if fn is not None:
+            if type(self)._wants_out:
+                self.result = fn(self.cfg, self.out)
+            else:
+                self.result = fn(self.cfg)
+
+    @staticmethod
+    def configs():
+        raise NotImplementedError()
+
+    @staticmethod
+    def report(results, out):
+        raise NotImplementedError()
 
 
 def experiment(
@@ -913,113 +1061,91 @@ def experiment(
     viewer: bool = False,
     viewer_port: int = 8765,
     stash: bool = True,
-) -> Experiment | Callable[[Callable[[dict], Any]], Experiment]:
-    """Decorator to create an Experiment from a function.
+) -> "ExperimentRunner | Callable[[Callable[[dict], Any]], ExperimentRunner]":
+    """Decorator to create an ExperimentRunner from a function.
+
+    The decorated function becomes an experiment where the return value
+    is stored as exp.result on the experiment instance.
 
     Args:
         name: Experiment name for the output folder. Defaults to function name.
         output_dir: Base directory for experiment results. Defaults to "out" directory
             relative to the file containing the experiment function.
-            Can be overridden in run() or via --output-dir CLI argument.
-        executor: Default execution strategy for running experiments. Can be:
-            - "subprocess": Run in isolated subprocess using cloudpickle (default, cross-platform)
-            - "fork": Run in forked process (Unix only, guarantees same module state)
-            - "inline": Run in same process (no isolation, useful for debugging)
-            - "ray": Run using Ray locally (requires `pip install pyexp[ray]`)
-            - "ray:<address>" or "ray://host:port": Run on Ray cluster (e.g., "ray:auto", "ray://cluster:10001")
-            - An Executor instance: Use custom executor
-            Can be overridden in run().
-        retry: Number of times to retry a failed experiment. Defaults to 4.
-            Can be overridden in run() or via --retry CLI argument.
-        viewer: If True, start the viewer after experiments complete. Defaults to False.
-            Can be overridden in run() or via --viewer CLI argument.
-        viewer_port: Port for the viewer. Defaults to 8765.
-            Can be overridden in run() or via --viewer-port CLI argument.
-        stash: If True (default), capture git repository state and log commit hash at iteration 0.
-            Can be overridden in run() or via --no-stash CLI argument.
+        executor: Default execution strategy for running experiments.
+        retry: Number of times to retry a failed experiment.
+        viewer: If True, start the viewer after experiments complete.
+        viewer_port: Port for the viewer.
+        stash: If True, capture git repository state.
 
-    Output folder structure:
-        <output_dir>/<name>/<timestamp>/<config_name>-<hash>/
+    The decorated function can have one of two signatures:
+        - fn(cfg) - receives only the config
+        - fn(cfg, out) - receives config and output directory path
 
     Example usage:
 
         @pyexp.experiment
-        def my_experiment(config):
-            ...
+        def my_experiment(cfg):
+            return {"accuracy": train(cfg.lr)}
+
+        # With output directory access:
+        @pyexp.experiment
+        def my_experiment(cfg, out):
+            logger = Logger(out)
+            # ... training with logging ...
             return {"accuracy": 0.95}
-
-        # Or with arguments:
-        @pyexp.experiment(name="mnist", executor="fork")
-        def my_experiment(config):
-            ...
-
-        # Ray on remote cluster:
-        @pyexp.experiment(executor="ray://cluster:10001")
-        def my_experiment(config):
-            ...
 
         @my_experiment.configs
         def configs():
-            return [{"name": "exp", "lr": 0.01}, {"name": "exp2", "lr": 0.001}]
+            return [{"name": "exp", "lr": 0.01}]
 
         @my_experiment.report
-        def report(results, report_dir):
-            # Each result has .name, .config, .result, .error, .log, .logger
-            # Filter by config values:
-            lr_001 = results[{"config.lr": 0.001}]
-            # Access fields:
-            for r in results:
-                print(f"{r.name}: {r.result['accuracy']}")
+        def report(results, out):
+            for exp in results:
+                print(f"{exp.name}: {exp.result['accuracy']}")
 
         my_experiment.run()
-
-        # Option 2: Pass functions directly
-        my_experiment.run(configs=configs_fn, report=report_fn)
-
-        # Option 3: Override settings at runtime
-        my_experiment.run(executor="ray:auto")
-
-    CLI arguments (override decorator/run settings):
-        --name NAME           Override experiment name
-        --executor EXECUTOR   Override executor (subprocess, fork, inline, ray, ray:<address>)
-        --output-dir DIR      Override output directory
-        --continue [TIMESTAMP] Continue a previous run (latest if no timestamp given)
-        --retry N             Number of retries on failure (default: 4)
-        --report [TIMESTAMP]  Generate report from cached results (latest run or specific timestamp)
-        --list                List all previous runs with their status
-        --filter REGEX        Filter configs by name using a regex (e.g., --filter 'lr_0\\.01.*')
-        -s, --capture=no      Show subprocess output instead of progress bar
-        --viewer              Start the viewer after experiments complete
-        --viewer-port PORT    Port for the viewer (default: 8765)
-        --no-stash            Disable git stash (don't capture repository state)
-
-    Priority: CLI args > run() args > decorator args
     """
 
-    def decorator(f: Callable[[dict], Any]) -> Experiment:
-        return Experiment(
-            f,
-            name=name,
-            output_dir=output_dir,
+    def make_runner(f: Callable[[dict], Any]) -> ExperimentRunner:
+        import inspect
+
+        # Create a dynamic Experiment subclass that wraps the function
+        class DynamicExperiment(_DecoratorExperiment):
+            pass
+
+        # Store the function on the class (as regular class attribute, not staticmethod)
+        DynamicExperiment._fn = f
+
+        # Check if function wants 'out' parameter (2+ parameters means cfg + out)
+        sig = inspect.signature(f)
+        DynamicExperiment._wants_out = len(sig.parameters) >= 2
+
+        # Determine output directory relative to function's file
+        resolved_output_dir = output_dir
+        if resolved_output_dir is None:
+            fn_file = f.__globals__.get("__file__")
+            if fn_file:
+                resolved_output_dir = Path(fn_file).parent / "out"
+
+        # Create runner with the dynamic class
+        runner = ExperimentRunner(
+            DynamicExperiment,
+            name=name or f.__name__,
+            output_dir=resolved_output_dir,
             executor=executor,
             retry=retry,
             viewer=viewer,
             viewer_port=viewer_port,
             stash=stash,
         )
+
+        # Copy function metadata to runner for nice repr
+        wraps(f)(runner)
+        return runner
 
     if fn is not None:
         # Called without arguments: @experiment
-        return Experiment(
-            fn,
-            name=name,
-            output_dir=output_dir,
-            executor=executor,
-            retry=retry,
-            viewer=viewer,
-            viewer_port=viewer_port,
-            stash=stash,
-        )
+        return make_runner(fn)
     else:
         # Called with arguments: @experiment(name="mnist", executor="fork")
-        return decorator
+        return make_runner

@@ -3,17 +3,27 @@
 import math
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, "src")
 
 import pyexp
-from pyexp import Config, Logger, ResultTensor
+from pyexp import Config, Logger, Tensor
 
 
 @pyexp.experiment(name="demo_logs")
-def train(config: Config, logger: Logger):
-    """Simulated training run demonstrating logger usage."""
-    seed = config.seed
+def train(cfg: Config, out: Path):
+    """Simulated training run demonstrating logger usage.
+
+    The decorator passes cfg and out when the function has 2 parameters.
+    """
+    seed = cfg.seed
+
+    # Create logger in output directory
+    logger = Logger(out)
+
+    loss = 0.0
+    acc = 0.0
 
     for i in range(100):
         logger.set_global_it(i)
@@ -86,6 +96,9 @@ def train(config: Config, logger: Logger):
                 # matplotlib/numpy not installed, skip figures
                 pass
 
+    # Flush any pending log writes
+    logger.flush()
+
     return {"final_loss": loss, "final_accuracy": acc}
 
 
@@ -99,19 +112,21 @@ def configs():
 
 
 @train.report
-def report(results: ResultTensor, report_dir):
+def report(results: Tensor, report_dir: Path):
     """Print final results."""
+    from pyexp import LogReader
+
     print("\nResults:")
-    for r in results:
-        if r.error:
-            print(f"  {r.name}: ERROR - {r.error}")
+    for exp in results:
+        if exp.error:
+            print(f"  {exp.name}: ERROR - {exp.error}")
         else:
             # Access logged data via LogReader
-            it, loss = r.logger["loss"]
-            it, fig = r.logger["loss_landscape_3d"]
-            res = r.result
+            log_reader = LogReader(exp.out)
+            it, loss = log_reader["loss"]
+            res = exp.result
             print(
-                f"  {r.name}: loss={res['final_loss']:.4f}, accuracy={res['final_accuracy']:.4f}"
+                f"  {exp.name}: loss={res['final_loss']:.4f}, accuracy={res['final_accuracy']:.4f}"
             )
 
     print(

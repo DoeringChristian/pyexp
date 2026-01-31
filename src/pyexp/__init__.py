@@ -3,8 +3,6 @@
 from .config import (
     Config,
     ConfigTensor,
-    Result,
-    ResultTensor,
     Tensor,
     build,
     load_config,
@@ -12,7 +10,7 @@ from .config import (
     register,
     sweep,
 )
-from .experiment import Experiment, experiment
+from .experiment import Experiment, ExperimentRunner, experiment
 from .executors import (
     Executor,
     ExecutorName,
@@ -28,8 +26,6 @@ from .log import Logger, LogReader
 __all__ = [
     "Config",
     "ConfigTensor",
-    "Result",
-    "ResultTensor",
     "Tensor",
     "build",
     "load_config",
@@ -38,6 +34,7 @@ __all__ = [
     "stash",
     "sweep",
     "Experiment",
+    "ExperimentRunner",
     "experiment",
     "Executor",
     "ExecutorName",

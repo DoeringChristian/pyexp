@@ -28,12 +28,12 @@ def configs() -> list[dict]:
 def report(results, report_dir):
     """Generate report from all experiment results.
 
-    Each result has: .name, .config, .result, .error, .log, .out
+    Each experiment instance has: .name, .cfg, .result, .error, .log, .out
     """
     print("\n=== Experiment Report ===")
-    for r in results:
-        print(f"Config: {r.name} -> Accuracy: {r.result['accuracy']:.4f}")
-    best = max(results, key=lambda r: r.result["accuracy"])
+    for exp in results:
+        print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
+    best = max(results, key=lambda exp: exp.result["accuracy"])
     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
 
 
@@ -44,9 +44,8 @@ if __name__ == "__main__":
     results = experiment.results()
     print(f"\nLoaded {len(list(results))} results from latest run")
 
-    # Access output directory via result.out or result.config.out
+    # Access output directory via exp.out
     print(f"Output dir: {results[0].out}")
-    print(f"Same as config.out: {results[0].out == results[0].config.out}")
 
     # Load results from a specific timestamp
     # results = experiment.results(timestamp="2026-01-28_10-30-00")

@@ -2,11 +2,10 @@
 
 import pyexp
 from pyexp import Config, Tensor, sweep
-from pyexp import Logger
 
 
 @pyexp.experiment(name="")
-def experiment(config: Config, logger: Logger):
+def experiment(config: Config):
     """Run a single experiment with the given config."""
     lr = config.learning_rate
     epochs = config.epochs
@@ -81,18 +80,18 @@ def configs() -> list[dict]:
 def report(results: Tensor, report_dir):
     """Generate report from all experiment results.
 
-    Each result has: .name, .config, .result, .error, .log, .logger
+    Each experiment instance has: .name, .cfg, .result, .error, .log, .out
     """
     print("\n=== Experiment Report ===")
-    for r in results:
-        print(f"Config: {r.name} -> Accuracy: {r.result['accuracy']:.4f}")
+    for exp in results:
+        print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
 
     # Filter results by config values
-    lr01_results = results[{"config.learning_rate": 0.1}]
+    lr01_results = results[{"cfg.learning_rate": 0.1}]
     print(f"\nResults with lr=0.1: {lr01_results.shape}")
 
     # Find best result
-    best = max(results, key=lambda r: r.result["accuracy"])
+    best = max(results, key=lambda exp: exp.result["accuracy"])
     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
 
 

@@ -1,23 +1,20 @@
 """Subprocess worker for running isolated experiments.
 
 This module is invoked as a subprocess to run a single experiment in isolation.
-It receives a serialized payload (function + config) via a temp file, executes
-the experiment, and writes the result to the designated output path.
+It receives a serialized payload (experiment instance) via a temp file, executes
+the experiment, and writes the pickled instance to the designated output path.
 
 Usage:
     python -m pyexp.worker <payload_path>
 
 The payload file contains cloudpickle-serialized data:
     {
-        "fn": <experiment function>,
-        "config": <config dict>,
-        "result_path": <path to write result>,
-        "wants_logger": <bool>,
+        "instance": <experiment instance with cfg/out set>,
+        "result_path": <path to write pickled instance>,
         "stash": <bool>,
     }
 """
 
-import pickle
 import sys
 import traceback
 from pathlib import Path
@@ -34,82 +31,38 @@ def run_worker(payload_path: str) -> int:
     Returns:
         Exit code: 0 for success, 1 for failure.
 
-    The worker saves a structured result dict:
-        {"result": <return value or None>, "error": <error string or None>}
+    The worker saves the pickled experiment instance (with results).
     """
-    logger = None
+    instance = None
+    result_path = None
     try:
         # Load the payload
         with open(payload_path, "rb") as f:
             payload = cloudpickle.load(f)
 
-        fn = payload["fn"]
-        config = payload["config"]
+        instance = payload["instance"]
         result_path = Path(payload["result_path"])
-        wants_logger = payload.get("wants_logger", False)
-        stash = payload.get("stash", True)
-
-        if wants_logger:
-            from pyexp.log import Logger
-            import yaml
-
-            # Create logger for this experiment's output directory
-            logger = Logger(config["out"])
-
-            # Log config as YAML at iteration 0
-            config_to_log = {
-                k: v
-                for k, v in config.items()
-                if k not in ("out", "logger")
-            }
-            logger.add_text(
-                "config", yaml.dump(config_to_log, default_flow_style=False)
-            )
-
-            # Log git commit hash if stash enabled
-            if stash:
-                try:
-                    from pyexp.utils import stash as git_stash
-
-                    commit_hash = git_stash()
-                    logger.add_text("git_commit", commit_hash)
-                except Exception:
-                    pass  # Silently ignore if not in a git repo
 
         # Run the experiment
-        if wants_logger:
-            result = fn(config, logger)
-        else:
-            result = fn(config)
+        instance.experiment()
 
-        # Flush logger before writing result
-        if logger:
-            logger.flush()
-
-        # Write structured result
-        structured = {"result": result, "error": None}
+        # Write pickled instance using cloudpickle for dynamic classes
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(result_path, "wb") as f:
-            pickle.dump(structured, f)
+            cloudpickle.dump(instance, f)
 
         return 0
 
     except Exception as e:
-        # Flush logger if it exists
-        if logger:
-            try:
-                logger.flush()
-            except Exception:
-                pass
-
-        # Write error information to result path if possible
+        # Write error information to instance and save
         try:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            structured = {"result": None, "error": error_msg}
-            result_path = Path(payload["result_path"])
-            result_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(result_path, "wb") as f:
-                pickle.dump(structured, f)
+            if instance is not None:
+                instance._Experiment__error = error_msg
+                if result_path is not None:
+                    result_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(result_path, "wb") as f:
+                        cloudpickle.dump(instance, f)
         except Exception:
             # If we can't even write the error, just print it
             traceback.print_exc()

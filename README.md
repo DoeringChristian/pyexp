@@ -121,6 +121,8 @@ Results are organized by experiment name and timestamp. By default, the output d
       ...
 ```
 
+**Directory name sanitization:** Config names are automatically sanitized for use as directory names. Characters `/\:*?"<>|` are replaced with `_` to ensure cross-platform compatibility and prevent accidental subdirectory creation.
+
 ```python
 # Default: output_dir is relative to experiment file
 # If my_experiment.py is at /project/experiments/my_experiment.py:
@@ -480,6 +482,7 @@ CLI arguments can override settings from the decorator or `run()` function.
 | `--continue [TIMESTAMP]` | Continue a previous run. Without argument, continues most recent. With argument, continues that specific timestamp. |
 | `--report [TIMESTAMP]` | Generate report from cache. Without argument, uses most recent run. With argument, uses that specific timestamp. |
 | `--list` | List all previous runs with their status |
+| `--filter REGEX` | Only run configs whose names match the regex pattern |
 | `-s`, `--capture=no` | Show subprocess output instead of progress bar |
 | `--viewer` | Start the viewer after experiments complete |
 | `--viewer-port PORT` | Port for the viewer (default: 8765) |
@@ -575,7 +578,11 @@ You can also use `Logger` directly for standalone logging:
 ```python
 from pyexp import Logger
 
+# Default: protobuf format (single events.pb file, faster, smaller)
 logger = Logger("out/my_experiment/run1")
+
+# JSONL format (human-readable, multiple files)
+logger = Logger("out/my_experiment/run1", use_protobuf=False)
 
 for epoch in range(100):
     logger.set_global_it(epoch)
@@ -608,7 +615,18 @@ for epoch in range(100):
 logger.flush()
 ```
 
-**Storage structure:**
+**Storage formats:**
+
+By default, pyexp uses a protobuf-based format similar to TensorBoard for efficient storage:
+
+```
+log_dir/
+├── .pyexp                  # Marker file identifying this as a pyexp log
+└── events.pb               # All events in a single protobuf file
+```
+
+With `use_protobuf=False`, the traditional JSONL format is used:
+
 ```
 log_dir/
 ├── .pyexp                  # Marker file identifying this as a pyexp log
@@ -621,6 +639,8 @@ log_dir/
     └── checkpoints/
         └── <tag>.cpkl      # Pickled checkpoint object
 ```
+
+The protobuf format provides ~4x faster writes and ~2x smaller file sizes compared to JSONL. The `LogReader` automatically detects the format.
 
 **Automatic logging in experiments:**
 
@@ -802,7 +822,7 @@ The viewer starts as a background process before experiments begin, allowing you
 
 ### Logger Methods
 
-- `Logger(log_dir)` - Create a logger for the specified directory
+- `Logger(log_dir, use_protobuf=True)` - Create a logger for the specified directory
 - `set_global_it(it)` - Set the current iteration number
 - `add_scalar(tag, value)` - Log a scalar value
 - `add_text(tag, text)` - Log a text string

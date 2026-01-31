@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import fnmatch
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Generic, Iterator, TypeVar, overload
+from typing import Any, Generic, Iterator, TypeVar, overload
 
 import yaml
 
-if TYPE_CHECKING:
-    from .log import LogReader
+
 
 # Global registry for class instantiation from config
 _registry: dict[str, type] = {}
@@ -156,75 +155,6 @@ class Config(dict):
             del self[name]
         except KeyError:
             raise AttributeError(f"Config has no attribute '{name}'")
-
-
-class Result(dict):
-    """Structured experiment result with dot notation access.
-
-    Inherits from dict with keys: config, result, error, log, logger.
-    Also provides attribute access for convenience.
-
-    Example:
-        results = experiment.run()
-        r = results[0, 0, 0]
-        print(r.config.learning_rate)
-        print(r.result["accuracy"])
-        if r.error:
-            print(f"Failed: {r.error}")
-        print(r.log)  # stdout/stderr
-        if r.logger:
-            print(r.logger.scalar_tags)  # LogReader for this run
-    """
-
-    def __init__(
-        self,
-        config: dict,
-        result: Any = None,
-        error: str | None = None,
-        log: str = "",
-        logger: Any = None,
-    ):
-        super().__init__()
-        self["config"] = Config(config) if not isinstance(config, Config) else config
-        self["result"] = result
-        self["error"] = error
-        self["log"] = log
-        self["logger"] = logger
-        self["name"] = self["config"].get("name", "")
-
-    @property
-    def config(self) -> Config:
-        return self["config"]
-
-    @property
-    def result(self) -> Any:
-        return self["result"]
-
-    @property
-    def error(self) -> str | None:
-        return self["error"]
-
-    @property
-    def log(self) -> str:
-        return self["log"]
-
-    @property
-    def logger(self) -> LogReader | None:
-        return self["logger"]
-
-    @property
-    def name(self) -> str:
-        return self["name"]
-
-    @property
-    def out(self) -> Path | None:
-        """The experiment output directory path."""
-        return self["config"].get("out")
-
-    def __repr__(self) -> str:
-        status = "error" if self.error else "ok"
-        name = self.config.get("name", "unnamed")
-        return f"Result({name!r}, {status})"
 
 
 def _deep_copy_dict(d: dict) -> dict:
@@ -464,15 +394,15 @@ class Tensor(Generic[_T]):
         return Tensor(selected_data, new_shape)
 
     def _match_dict(self, query: dict) -> "Tensor":
-        """Match configs by key-value pairs.
+        """Match items by key-value pairs.
 
-        Returns configs where all query key-value pairs match.
-        Supports dot-notation keys (e.g., "mlp.width": 32) and nested dicts.
-        For Result objects, use "config.x" to match result["config"]["x"].
+        Returns items where all query key-value pairs match.
+        Supports dot-notation keys (e.g., "cfg.x": 1) for attribute/dict access.
+        Works with both dict items and objects with attributes.
         """
         matching_multi_indices: list[tuple[int, ...]] = []
         for flat_idx, item in enumerate(self._data):
-            if isinstance(item, dict) and self._dict_matches(item, query):
+            if self._item_matches(item, query):
                 matching_multi_indices.append(self._multi_index(flat_idx))
 
         if not matching_multi_indices:
@@ -498,31 +428,52 @@ class Tensor(Generic[_T]):
 
         return Tensor(selected_data, new_shape)
 
-    def _dict_matches(self, config: dict, query: dict) -> bool:
-        """Check if config matches all key-value pairs in query."""
+    def _item_matches(self, item: Any, query: dict) -> bool:
+        """Check if item matches all key-value pairs in query.
+
+        Supports both dict items and objects with attributes.
+        Dot notation navigates through nested dicts or object attributes.
+        """
         for key, expected in query.items():
-            if "." in key:
-                # Dot notation: navigate to nested value
-                parts = key.split(".")
-                value = config
-                for part in parts:
-                    if not isinstance(value, dict) or part not in value:
-                        return False
-                    value = value[part]
-            else:
-                if key not in config:
-                    return False
-                value = config[key]
+            try:
+                value = self._get_nested_value(item, key)
+            except (KeyError, AttributeError, TypeError):
+                return False
 
             # Compare values
             if isinstance(expected, dict) and isinstance(value, dict):
                 # Recursive dict matching
-                if not self._dict_matches(value, expected):
+                if not self._item_matches(value, expected):
                     return False
             elif value != expected:
                 return False
 
         return True
+
+    def _get_nested_value(self, item: Any, key: str) -> Any:
+        """Get a nested value from an item using dot notation.
+
+        Works with dicts (using []) and objects (using getattr).
+        """
+        if "." in key:
+            parts = key.split(".")
+        else:
+            parts = [key]
+
+        value = item
+        for part in parts:
+            if isinstance(value, dict):
+                value = value[part]
+            else:
+                value = getattr(value, part)
+        return value
+
+    def _dict_matches(self, config: dict, query: dict) -> bool:
+        """Check if config matches all key-value pairs in query.
+
+        Deprecated: use _item_matches instead which handles both dicts and objects.
+        """
+        return self._item_matches(config, query)
 
     def _select_recursive(
         self, index_lists: list[list[int]], dim: int, current: list[int], result: list
@@ -663,6 +614,5 @@ def load_config(paths: list[Path] | Path | str | list[str]) -> Config:
     return Config(result)
 
 
-# Type aliases for common Tensor types
+# Type alias for common Tensor type
 ConfigTensor = Tensor[Config]
-ResultTensor = Tensor[Result]
