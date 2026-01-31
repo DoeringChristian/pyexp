@@ -226,9 +226,7 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
     return [item for item in items if regex.search(get_name(item) or "")]
 
 
-def _save_configs_json(
-    run_dir: Path, shape: tuple, paths: list[Path]
-) -> None:
+def _save_configs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
     """Save run references and shape to a JSON file for later loading.
 
     Args:
@@ -335,8 +333,7 @@ def _list_runs(base_dir: Path) -> None:
     for run_dir in timestamp_dirs:
         # Scan config directories inside the run
         config_dirs = [
-            d for d in run_dir.iterdir()
-            if d.is_dir() and d.name != "report"
+            d for d in run_dir.iterdir() if d.is_dir() and d.name != "report"
         ]
         total = len(config_dirs)
         completed = 0
@@ -648,7 +645,9 @@ class ExperimentRunner:
             Tensor of Experiment instances with full attribute access.
         """
         exp_name = name or self._name
-        resolved_output_dir = Path(output_dir) if output_dir else self._output_dir_default
+        resolved_output_dir = (
+            Path(output_dir) if output_dir else self._output_dir_default
+        )
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
@@ -914,6 +913,7 @@ class ExperimentRunner:
 
             # Apply filter if specified
             if args.filter:
+
                 def get_config_name(exp_dir: Path) -> str:
                     config_path = exp_dir / "config.json"
                     if config_path.exists():
@@ -928,7 +928,9 @@ class ExperimentRunner:
                 if not experiment_dirs:
                     print(f"No configs match filter '{args.filter}'")
                     return None
-                print(f"Filter '{args.filter}': {len(experiment_dirs)}/{original_count} configs selected")
+                print(
+                    f"Filter '{args.filter}': {len(experiment_dirs)}/{original_count} configs selected"
+                )
 
             # Initialize progress bar if capturing output
             show_progress = not args.no_capture
@@ -1028,6 +1030,7 @@ class _DecoratorExperiment(Experiment):
 
     Stores the function's return value in self.result.
     """
+
     result: Any = None
     # _fn is set on the class by make_runner to be the wrapped function
     _fn: Callable | None = None
