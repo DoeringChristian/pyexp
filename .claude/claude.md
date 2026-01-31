@@ -52,7 +52,8 @@ def run(self, ..., my_param=None):
 
 ## Executor System
 
-- All executors must implement `run(fn, config, result_path, capture=True)`
+- All executors must implement `run(instance, result_path, capture=True, stash=True)`
+- `instance` is an `Experiment` subclass instance with `cfg` and `out` already set
 - The `capture` parameter controls output suppression
 - Custom executors should accept `**kwargs` for forward compatibility
 
@@ -144,23 +145,22 @@ results = experiment.results()
 results = experiment.results(timestamp="2024-01-25_14-30-00")
 ```
 
-### configs.json
+### runs.json
 
-Each run saves a `configs.json` file containing:
+Each run saves a `runs.json` file containing:
 - `configs`: List of config dicts (without internal `_` prefixed keys)
 - `shape`: Tensor shape from sweeps
 
 This enables `results()` to reconstruct the exact tensor structure from a previous run.
 
-## Result Object
+## Experiment Object
 
-Each `Result` object has these properties:
-- `result.name` - Config name
-- `result.config` - Full config dict (includes `out`)
-- `result.result` - Experiment return value
-- `result.error` - Error message if failed, else `None`
-- `result.log` - Captured stdout/stderr
-- `result.logger` - `LogReader` if logging was used
-- `result.out` - Path to experiment output directory (same as `result.config.out`)
+Each experiment instance has these properties:
+- `exp.name` - Config name (shorthand for `exp.cfg.get("name", "")`)
+- `exp.cfg` - Config object for this run
+- `exp.out` - Path to experiment output directory
+- `exp.error` - Error message if failed, else `None`
+- `exp.log` - Captured stdout/stderr
+- `exp.result` - Experiment return value (when using decorator API)
 
-The `out` path is available both during experiment execution (`config.out`) and in results (`result.out`, `result.config.out`).
+The `out` path is available both during experiment execution (`self.out`) and in results (`exp.out`).
