@@ -226,7 +226,7 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
     return [item for item in items if regex.search(get_name(item) or "")]
 
 
-def _save_configs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
+def _save_runs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
     """Save run references and shape to a JSON file for later loading.
 
     Args:
@@ -241,34 +241,34 @@ def _save_configs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
         "runs": runs,
         "shape": list(shape),
     }
-    configs_path = run_dir / "configs.json"
+    configs_path = run_dir / "runs.json"
     configs_path.write_text(json.dumps(data, indent=2, default=str))
 
 
-def _load_configs_json(run_dir: Path) -> tuple[list[Path], tuple]:
-    """Load run paths and shape from configs.json.
+def _load_runs_json(run_dir: Path) -> tuple[list[Path], tuple]:
+    """Load run paths and shape from runs.json.
 
     Returns:
         Tuple of (list of experiment directory paths, shape tuple).
     """
-    configs_path = run_dir / "configs.json"
+    configs_path = run_dir / "runs.json"
     if not configs_path.exists():
-        raise FileNotFoundError(f"No configs.json found in {run_dir}")
+        raise FileNotFoundError(f"No runs.json found in {run_dir}")
     data = json.loads(configs_path.read_text())
     paths = [run_dir / run for run in data["runs"]]
     return paths, tuple(data["shape"])
 
 
 def _load_experiments_from_dir(run_dir: Path) -> Tensor[Experiment]:
-    """Load experiment instances from a run directory using configs.json.
+    """Load experiment instances from a run directory using runs.json.
 
     Args:
-        run_dir: Path to the run directory containing configs.json and experiment dirs.
+        run_dir: Path to the run directory containing runs.json and experiment dirs.
 
     Returns:
         Tensor of Experiment instances with the original shape.
     """
-    experiment_dirs, shape = _load_configs_json(run_dir)
+    experiment_dirs, shape = _load_runs_json(run_dir)
 
     results = []
     for experiment_dir in experiment_dirs:
@@ -891,9 +891,9 @@ class ExperimentRunner:
                 ), "Config cannot contain 'out' key; it is reserved"
                 configs_for_save.append(Config(config))
 
-            # Create run directory and save configs.json
+            # Create run directory and save runs.json
             run_dir.mkdir(parents=True, exist_ok=True)
-            _save_configs_json(run_dir, shape, experiment_dirs)
+            _save_runs_json(run_dir, shape, experiment_dirs)
 
             # Create all experiment directories and save individual config.json files
             for config, experiment_dir in zip(configs_for_save, experiment_dirs):
@@ -908,8 +908,8 @@ class ExperimentRunner:
         # =================================================================
         # Load configs from saved config.json files and run experiments
         if not args.report:
-            # Load experiment directories and shape from configs.json
-            experiment_dirs, shape = _load_configs_json(run_dir)
+            # Load experiment directories and shape from runs.json
+            experiment_dirs, shape = _load_runs_json(run_dir)
 
             # Apply filter if specified
             if args.filter:

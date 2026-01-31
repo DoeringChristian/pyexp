@@ -65,7 +65,7 @@ The experiment framework separates execution into three phases:
 1. **Config Generation** (only on fresh start - no `--continue` or `--report`):
    - Runs the `@experiment.configs` function to generate configurations
    - Computes directory hashes and creates experiment folders
-   - Saves `configs.json` (folder references) and individual `config.json` files
+   - Saves `runs.json` (folder references) and individual `config.json` files
 
 2. **Experiment Execution** (fresh start or `--continue`, skipped for `--report`):
    - Loads configs from saved `config.json` files (not recomputed)
@@ -108,7 +108,7 @@ Results are organized by experiment name and timestamp. By default, the output d
 <experiment_file_dir>/out/
   <experiment_name>/
     <timestamp>/                    # Each run gets a new timestamp
-      configs.json                  # References to run folders and shape
+      runs.json                  # References to run folders and shape
       <config_name>-<hash>/
         config.json                 # Full config (includes 'out' path)
         result.pkl

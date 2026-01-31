@@ -797,7 +797,7 @@ class TestResultsMethod:
             my_exp.results(timestamp="1999-01-01_00-00-00", output_dir=tmp_path)
 
     def test_configs_json_saved(self, tmp_path):
-        """run() saves configs.json with run folder references and shape."""
+        """run() saves runs.json with run folder references and shape."""
         import json
 
         @experiment
@@ -822,8 +822,8 @@ class TestResultsMethod:
         base_dir = tmp_path / "my_exp"
         run_dir = sorted(base_dir.iterdir())[0]
 
-        # Check configs.json exists and has correct content
-        configs_path = run_dir / "configs.json"
+        # Check runs.json exists and has correct content
+        configs_path = run_dir / "runs.json"
         assert configs_path.exists()
 
         data = json.loads(configs_path.read_text())
