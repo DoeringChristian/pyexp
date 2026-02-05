@@ -441,6 +441,30 @@ cfgs = sweep(cfgs, [
 ])
 ```
 
+### Deep Merge with `**` Prefix
+
+By default, setting a dict value replaces the entire dict. Prefix a key with `**` to deep-merge instead, updating only the specified keys while preserving the rest:
+
+```python
+base = {"bsdf": {"type": "Diffuse", "color": 5, "roughness": 0.1}}
+
+# Without **: replaces the entire dict (roughness is lost)
+merge(base, {"bsdf": {"type": "Test", "color": 10}})
+# -> {"bsdf": {"type": "Test", "color": 10}}
+
+# With **: merges into existing dict (roughness is preserved)
+merge(base, {"**bsdf": {"type": "Test", "color": 10}})
+# -> {"bsdf": {"type": "Test", "color": 10, "roughness": 0.1}}
+```
+
+This also works with dot-notation paths and in sweeps:
+
+```python
+cfgs = sweep(cfgs, [
+    {"name": "test", "**model.encoder": {"type": "ResNet", "pretrained": True}},
+])
+```
+
 ### Result Filtering
 
 The report function receives a `Tensor` of results. Each result contains:
@@ -825,7 +849,7 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Functions
 
 - `sweep(configs, variations)` - Generate cartesian product of configs with variations
-- `merge(base, update)` - Merge dicts with dot-notation support
+- `merge(base, update)` - Merge dicts with dot-notation and `**` deep-merge support
 - `get_executor(name)` - Get executor by name or return instance
 
 ### Classes

@@ -876,11 +876,7 @@ class ExperimentRunner:
                 "No configs function provided. Implement configs() in your Experiment class, "
                 "use @runner.configs decorator, or pass configs= argument."
             )
-        if report_fn is None:
-            raise RuntimeError(
-                "No report function provided. Implement report() in your Experiment class, "
-                "use @runner.report decorator, or pass report= argument."
-            )
+        # report_fn is optional — if None, skip report phase
 
         base_dir = Path(resolved_output_dir) / exp_name
 
@@ -1097,15 +1093,15 @@ class ExperimentRunner:
                 progress.finish()
 
         # =================================================================
-        # PHASE 3: Report Generation (always runs)
+        # PHASE 3: Report Generation (optional)
         # =================================================================
-        # Load results from disk and run report function
-        results = _load_experiments_from_dir(run_dir)
+        if report_fn is not None:
+            results = _load_experiments_from_dir(run_dir)
 
-        report_dir = run_dir / "report"
-        report_dir.mkdir(parents=True, exist_ok=True)
+            report_dir = run_dir / "report"
+            report_dir.mkdir(parents=True, exist_ok=True)
 
-        return report_fn(results, report_dir)
+            return report_fn(results, report_dir)
 
 
 class _DecoratorExperiment(Experiment):

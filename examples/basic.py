@@ -24,17 +24,17 @@ def configs() -> list[dict]:
     ]
 
 
-@experiment.report
-def report(results, report_dir):
-    """Generate report from all experiment results.
-
-    Each experiment instance has: .name, .cfg, .result, .error, .log, .out
-    """
-    print("\n=== Experiment Report ===")
-    for exp in results:
-        print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
-    best = max(results, key=lambda exp: exp.result["accuracy"])
-    print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
+# @experiment.report
+# def report(results, report_dir):
+#     """Generate report from all experiment results.
+#
+#     Each experiment instance has: .name, .cfg, .result, .error, .log, .out
+#     """
+#     print("\n=== Experiment Report ===")
+#     for exp in results:
+#         print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
+#     best = max(results, key=lambda exp: exp.result["accuracy"])
+#     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
 
 
 if __name__ == "__main__":

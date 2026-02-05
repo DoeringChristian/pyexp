@@ -322,7 +322,9 @@ class TestExperimentRun:
             with pytest.raises(RuntimeError, match="No configs function"):
                 my_exp.run(output_dir=tmp_path)
 
-    def test_run_no_report_raises(self, tmp_path):
+    def test_run_no_report_succeeds(self, tmp_path):
+        """Running without a report function should succeed (report is optional)."""
+
         @experiment
         def my_exp(config):
             return 1
@@ -332,8 +334,7 @@ class TestExperimentRun:
             return [{"name": "x", "x": 1}]
 
         with patch.object(sys, "argv", ["test"]):
-            with pytest.raises(RuntimeError, match="No report function"):
-                my_exp.run(output_dir=tmp_path)
+            my_exp.run(output_dir=tmp_path)
 
     def test_out_in_config_raises(self, tmp_path):
         @experiment
