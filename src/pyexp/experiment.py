@@ -697,6 +697,66 @@ class ExperimentRunner:
         self._stash_default = stash
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Tensor, Path], Any] | None = None
+        self._current_experiment: Experiment | None = None
+        self._chkpt_counter: int = 0
+
+    def chkpt(self, fn: Callable) -> Callable:
+        """Checkpoint a function call during experiment execution.
+
+        Returns a wrapper that caches the function's return value. On the
+        first run, the function is executed and its result is saved. On
+        subsequent runs (e.g., with --continue), the cached result is
+        returned without re-executing the function.
+
+        Each call to chkpt() gets a unique checkpoint slot based on call
+        order, so the same function can be checkpointed multiple times.
+
+        Args:
+            fn: Function to checkpoint.
+
+        Returns:
+            A wrapper that behaves like fn but with checkpoint caching.
+
+        Example:
+            @pyexp.experiment
+            def my_exp(cfg):
+                result1 = my_exp.chkpt(train)(cfg.lr)
+                result2 = my_exp.chkpt(evaluate)(result1)
+                return result2
+        """
+        import cloudpickle
+
+        exp = self._current_experiment
+        if exp is None:
+            raise RuntimeError(
+                "chkpt() can only be called during experiment execution."
+            )
+
+        # Assign a unique index to this call
+        idx = self._chkpt_counter
+        self._chkpt_counter += 1
+
+        checkpoint_dir = exp.out / ".checkpoints"
+        checkpoint_path = checkpoint_dir / f"chkpt_{idx}_{fn.__name__}.pkl"
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            # Check for existing checkpoint
+            if checkpoint_path.exists():
+                with open(checkpoint_path, "rb") as f:
+                    return cloudpickle.load(f)
+
+            # Run the function
+            result = fn(*args, **kwargs)
+
+            # Save checkpoint
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            with open(checkpoint_path, "wb") as f:
+                cloudpickle.dump(result, f)
+
+            return result
+
+        return wrapper
 
     def configs(self, fn: Callable[[], list[dict]]) -> Callable[[], list[dict]]:
         """Decorator to register the configs generator function (for decorator API)."""
@@ -1115,14 +1175,26 @@ class _DecoratorExperiment(Experiment):
     _fn: Callable | None = None
     # _wants_out is set by make_runner based on function signature
     _wants_out: bool = False
+    # _runner is set by make_runner to reference the ExperimentRunner
+    _runner: "ExperimentRunner | None" = None
 
     def experiment(self) -> None:
         fn = type(self)._fn
+        runner = type(self)._runner
         if fn is not None:
-            if type(self)._wants_out:
-                self.result = fn(self.cfg, self.out)
-            else:
-                self.result = fn(self.cfg)
+            # Set current experiment on runner so chkpt() can access it
+            if runner is not None:
+                runner._current_experiment = self
+                runner._chkpt_counter = 0
+            try:
+                if type(self)._wants_out:
+                    self.result = fn(self.cfg, self.out)
+                else:
+                    self.result = fn(self.cfg)
+            finally:
+                if runner is not None:
+                    runner._current_experiment = None
+                    runner._chkpt_counter = 0
 
     @staticmethod
     def configs():
@@ -1220,6 +1292,9 @@ def experiment(
             viewer_port=viewer_port,
             stash=stash,
         )
+
+        # Link the dynamic class back to the runner for chkpt support
+        DynamicExperiment._runner = runner
 
         # Copy function metadata to runner for nice repr
         wraps(f)(runner)

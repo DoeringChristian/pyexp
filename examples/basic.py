@@ -4,17 +4,33 @@ import pyexp
 from pyexp import Config
 
 
+def dosomething():
+    print("do something")
+
+
+def somethingdifferent():
+    print("do something different")
+
+
 @pyexp.experiment
-def experiment(config: Config):
+def exp(config: Config):
     """Run a single experiment with the given config."""
     lr = config.learning_rate
     epochs = config.epochs
     print(f"Running experiment with lr={lr}, epochs={epochs}")
+
+    exp.chkpt(dosomething)()
+
+    # Should also be run the first time this script is run i.e. don't cache the function
+    exp.chkpt(dosomething)()
+
+    exp.chkpt(somethingdifferent)()
+
     # Simulate experiment result
     return {"accuracy": 0.9 + lr * epochs / 100}
 
 
-@experiment.configs
+@exp.configs
 def configs() -> list[dict]:
     """Generate experiment configurations."""
     return [
@@ -38,10 +54,10 @@ def configs() -> list[dict]:
 
 
 if __name__ == "__main__":
-    experiment.run()
+    exp.run()
 
     # Load latest results
-    results = experiment.results()
+    results = exp.results()
     print(f"\nLoaded {len(list(results))} results from latest run")
 
     # Access output directory via exp.out
