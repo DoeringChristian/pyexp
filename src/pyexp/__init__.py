@@ -9,6 +9,7 @@ from .config import (
     merge,
     register,
     sweep,
+    to_dict,
 )
 from .experiment import Experiment, ExperimentRunner, chkpt, experiment
 from .executors import (
@@ -33,6 +34,7 @@ __all__ = [
     "register",
     "stash",
     "sweep",
+    "to_dict",
     "Experiment",
     "ExperimentRunner",
     "chkpt",

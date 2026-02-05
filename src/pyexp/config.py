@@ -156,6 +156,17 @@ class Config(dict):
         except KeyError:
             raise AttributeError(f"Config has no attribute '{name}'")
 
+    def __repr__(self) -> str:
+        return yaml.dump(to_dict(self), default_flow_style=False, sort_keys=False).rstrip("\n")
+
+
+def to_dict(cfg: Config) -> dict:
+    """Convert a Config to a plain dict recursively."""
+    return {
+        k: to_dict(v) if isinstance(v, Config) else v
+        for k, v in cfg.items()
+    }
+
 
 def _deep_copy_dict(d: dict) -> dict:
     """Create a deep copy of a dict, recursively copying nested dicts."""
@@ -203,6 +214,7 @@ def merge(base: dict, update: dict) -> dict:
             result[key] = value
 
     return result
+
 
 
 class Tensor(Generic[_T]):
