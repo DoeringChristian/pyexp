@@ -120,3 +120,90 @@ class TestMerge:
         result = merge(base, update)
         assert result["mlp"]["width"] == 64
         assert result["mlp"]["encoding"] == {"type": "Sin", "octaves": 4}
+
+
+class TestStarStarMerge:
+    """Tests for ** deep-merge prefix."""
+
+    def test_deep_merge_basic(self):
+        """** should merge dict value into existing dict."""
+        base = {"bsdf": {"type": "Diffuse", "color": 5, "roughness": 0.1}}
+        result = merge(base, {"**bsdf": {"type": "Test", "color": 10}})
+        assert result == {"bsdf": {"type": "Test", "color": 10, "roughness": 0.1}}
+
+    def test_deep_merge_nested_path(self):
+        """** should work with dot-notation paths."""
+        base = {"a": {"b": {"x": 1, "y": 2, "z": 3}}}
+        result = merge(base, {"**a.b": {"x": 10, "y": 20}})
+        assert result == {"a": {"b": {"x": 10, "y": 20, "z": 3}}}
+
+    def test_deep_merge_equivalent_to_dot_notation(self):
+        """** merge should produce the same result as individual dot-notation keys."""
+        base = {"bsdf": {"bsdf": {"type": "Diffuse", "color": 5, "roughness": 0.1}}}
+        r1 = merge(base, {"**bsdf.bsdf": {"type": "Test", "color": 10}})
+        r2 = merge(base, {"bsdf.bsdf.type": "Test", "bsdf.bsdf.color": 10})
+        assert r1 == r2
+
+    def test_deep_merge_adds_new_keys(self):
+        """** should add new keys to the target dict."""
+        base = {"mlp": {"width": 32}}
+        result = merge(base, {"**mlp": {"depth": 4, "bias": True}})
+        assert result == {"mlp": {"width": 32, "depth": 4, "bias": True}}
+
+    def test_deep_merge_does_not_mutate_base(self):
+        """** merge should not mutate the base dict."""
+        base = {"mlp": {"width": 32, "depth": 2}}
+        result = merge(base, {"**mlp": {"width": 64}})
+        assert base == {"mlp": {"width": 32, "depth": 2}}
+        assert result == {"mlp": {"width": 64, "depth": 2}}
+
+    def test_deep_merge_creates_intermediate_dicts(self):
+        """** should create intermediate dicts if the path doesn't exist."""
+        base = {"a": 1}
+        result = merge(base, {"**b.c": {"x": 1, "y": 2}})
+        assert result == {"a": 1, "b": {"c": {"x": 1, "y": 2}}}
+
+    def test_deep_merge_top_level(self):
+        """** with a simple key (no dots) should merge into top-level dict."""
+        base = {"mlp": {"width": 32, "depth": 2}}
+        result = merge(base, {"**mlp": {"width": 64}})
+        assert result == {"mlp": {"width": 64, "depth": 2}}
+
+    def test_deep_merge_requires_dict_value(self):
+        """** should raise ValueError if the value is not a dict."""
+        base = {"a": {"x": 1}}
+        with pytest.raises(ValueError, match="requires a dict value"):
+            merge(base, {"**a": 42})
+
+    def test_deep_merge_mixed_with_regular_keys(self):
+        """** can be mixed with regular and dot-notation keys."""
+        base = {"mlp": {"width": 32, "depth": 2}, "lr": 0.01}
+        result = merge(base, {
+            "**mlp": {"width": 64, "bias": True},
+            "lr": 0.1,
+        })
+        assert result == {"mlp": {"width": 64, "depth": 2, "bias": True}, "lr": 0.1}
+
+    def test_deep_merge_is_shallow(self):
+        """** only merges one level deep — nested dicts are replaced, not merged."""
+        base = {
+            "bsdf": {
+                "type": "Diffuse",
+                "color": 5,
+                "mlp": {"type": "OldMLP", "width": 16, "depth": 4},
+            }
+        }
+        result = merge(base, {
+            "**bsdf": {"type": "Test", "mlp": {"type": "MLP", "width": 32}},
+        })
+        # color is preserved (** merges at the bsdf level)
+        assert result["bsdf"]["color"] == 5
+        # mlp is fully replaced (** does NOT recurse into sub-dicts)
+        assert result["bsdf"]["mlp"] == {"type": "MLP", "width": 32}
+
+    def test_without_star_star_replaces(self):
+        """Contrast: without ** the dict is replaced entirely."""
+        base = {"bsdf": {"type": "Diffuse", "color": 5, "roughness": 0.1}}
+        result = merge(base, {"bsdf": {"type": "Test", "color": 10}})
+        # roughness is gone
+        assert result == {"bsdf": {"type": "Test", "color": 10}}

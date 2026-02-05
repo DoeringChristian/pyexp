@@ -185,9 +185,15 @@ def merge(base: dict, update: dict) -> dict:
     This function does NOT deep merge nested dicts - setting a dict value
     replaces the entire dict. Use dot-notation to update individual nested keys.
 
+    Prefix a key with ** to deep-merge a dict value into the existing dict
+    at that location instead of replacing it. The merge is one level deep:
+    each key in the ** value is set individually, but nested dicts within
+    it still replace (not merge) their targets.
+
     Args:
         base: Base dictionary to merge into.
         update: Dictionary with updates. Keys can use dot-notation for nested access.
+            Keys prefixed with ** will deep-merge their dict value.
 
     Returns:
         New dictionary with updates applied (base is not mutated).
@@ -196,11 +202,22 @@ def merge(base: dict, update: dict) -> dict:
         base = {"mlp": {"width": 32, "depth": 2}}
         merge(base, {"mlp.width": 64})  # {"mlp": {"width": 64, "depth": 2}}
         merge(base, {"mlp": {"width": 64}})  # {"mlp": {"width": 64}} - depth is gone!
+        merge(base, {"**mlp": {"width": 64}})  # {"mlp": {"width": 64, "depth": 2}}
     """
     result = _deep_copy_dict(base)
 
     for key, value in update.items():
-        if "." in key:
+        # ** prefix: deep-merge the dict value into the target
+        if key.startswith("**"):
+            key = key[2:]
+            if not isinstance(value, dict):
+                raise ValueError(f"**{key} requires a dict value, got {type(value).__name__}")
+            # Expand into dot-notation updates and recurse
+            flat = {}
+            for k, v in value.items():
+                flat[f"{key}.{k}" if key else k] = v
+            result = merge(result, flat)
+        elif "." in key:
             # Dot notation: navigate to nested location
             parts = key.split(".")
             current = result
