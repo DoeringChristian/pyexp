@@ -37,10 +37,19 @@ def stash() -> str:
     """
     path = _find_git_root()
 
-    # Save current HEAD (to restore later)
-    head = (
-        subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=path).decode().strip()
-    )
+    # Try to get current HEAD (may not exist in a fresh repo with no commits)
+    try:
+        head = (
+            subprocess.check_output(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=path,
+                stderr=subprocess.DEVNULL,
+            )
+            .decode()
+            .strip()
+        )
+    except subprocess.CalledProcessError:
+        head = None
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Create temporary index and tree
@@ -61,22 +70,13 @@ def stash() -> str:
         )
 
         # Create a detached commit object (not checked out)
+        # If HEAD exists, parent the snapshot to it; otherwise create a root commit
+        cmd = ["git", "commit-tree", tree_hash, "-m", "Temporary reproducible snapshot"]
+        if head is not None:
+            cmd[3:3] = ["-p", head]
+
         commit_hash = (
-            subprocess.check_output(
-                [
-                    "git",
-                    "commit-tree",
-                    tree_hash,
-                    "-p",
-                    head,
-                    "-m",
-                    "Temporary reproducible snapshot",
-                ],
-                cwd=path,
-                env=env,
-            )
-            .decode()
-            .strip()
+            subprocess.check_output(cmd, cwd=path, env=env).decode().strip()
         )
 
     return commit_hash

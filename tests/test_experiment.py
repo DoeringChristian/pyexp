@@ -1964,6 +1964,15 @@ def _init_git_repo(path: Path) -> None:
     subprocess.check_call(["git", "commit", "-m", "init"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _init_git_repo_no_commits(path: Path) -> None:
+    """Initialize a git repo with NO commits at the given path."""
+    subprocess.check_call(["git", "init"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(["git", "config", "user.email", "test@test.com"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(["git", "config", "user.name", "Test"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Add a file but don't commit
+    (path / "README.md").write_text("init")
+
+
 @pytest.fixture
 def git_repo(tmp_path):
     """Create a temporary git repo and chdir into it."""
@@ -1975,6 +1984,27 @@ def git_repo(tmp_path):
     yield repo
     os.chdir(old_cwd)
     # Clean up worktrees to avoid git lock issues
+    try:
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+@pytest.fixture
+def git_repo_no_commits(tmp_path):
+    """Create a temporary git repo with no commits and chdir into it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_no_commits(repo)
+    old_cwd = os.getcwd()
+    os.chdir(repo)
+    yield repo
+    os.chdir(old_cwd)
     try:
         subprocess.run(
             ["git", "worktree", "prune"],
@@ -2170,3 +2200,27 @@ class TestWorktreeSnapshotting:
         captured = capsys.readouterr()
         assert "1 passed" in captured.out
         assert "(1 configs)" in captured.out
+
+    def test_worktree_works_in_repo_with_no_commits(self, git_repo_no_commits, tmp_path):
+        """Stash and worktree should work even in a repo with no prior commits."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # Find run dir and check .src exists
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        assert src_dir.exists(), ".src worktree should be created even without prior commits"
+
+        # Check commit hash is in runs.json
+        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
+        assert "commit" in runs_json
+        assert len(runs_json["commit"]) == 40
