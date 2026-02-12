@@ -17,6 +17,53 @@ MARKER_FILE = ".pyexp"  # Marker file identifying a pyexp run directory
 EVENTS_FILE = "events.pb"  # Protobuf event file
 
 
+class LazyFigure:
+    """A lazy proxy for a pickled figure. The actual figure is only loaded
+    when you access any attribute, call a method, or pass it to a function
+    that inspects it (e.g. marimo display, plt.show).
+    """
+
+    def __init__(self, loader):
+        # Use object.__setattr__ to avoid triggering __setattr__ proxy
+        object.__setattr__(self, "_loader", loader)
+        object.__setattr__(self, "_obj", None)
+        object.__setattr__(self, "_loaded", False)
+
+    def _resolve(self):
+        if not object.__getattribute__(self, "_loaded"):
+            obj = object.__getattribute__(self, "_loader")()
+            object.__setattr__(self, "_obj", obj)
+            object.__setattr__(self, "_loaded", True)
+        return object.__getattribute__(self, "_obj")
+
+    def __getattr__(self, name):
+        return getattr(self._resolve(), name)
+
+    def __setattr__(self, name, value):
+        setattr(self._resolve(), name, value)
+
+    def __repr__(self):
+        return repr(self._resolve())
+
+    def __str__(self):
+        return str(self._resolve())
+
+    def __iter__(self):
+        return iter(self._resolve())
+
+    def __call__(self, *args, **kwargs):
+        return self._resolve()(*args, **kwargs)
+
+    def __getitem__(self, key):
+        return self._resolve()[key]
+
+    def __len__(self):
+        return len(self._resolve())
+
+    def __bool__(self):
+        return bool(self._resolve())
+
+
 class LogReader:
     """Reader for exploring and loading pyexp logs.
 
@@ -284,6 +331,19 @@ class LogReader:
             raise ValueError("Not a run directory. Use get_run() first.")
         return self._load_scalars().get(tag, [])
 
+    def scalars(self, tag: str) -> tuple[list[int], list[float]]:
+        """Load scalar values as separate iteration and value lists.
+
+        Example:
+            its, losses = reader.scalars("loss")
+            plt.plot(its, losses)
+        """
+        data = self.load_scalars(tag)
+        if not data:
+            return [], []
+        its, vals = zip(*data)
+        return list(its), list(vals)
+
     def load_text(self, tag: str) -> list[tuple[int, str]]:
         """Load text values for a tag as (iteration, text) pairs."""
         if not self.is_run:
@@ -326,6 +386,20 @@ class LogReader:
             if fig_path.exists():
                 iterations.append(it)
         return iterations
+
+    def figures(self, tag: str) -> tuple[list[int], list[LazyFigure]]:
+        """Load figures as separate iteration and lazy-figure lists.
+
+        Figures are not deserialized until accessed, so this is cheap to call
+        even for many iterations.
+
+        Example:
+            its, figs = reader.figures("loss_landscape_3d")
+            figs[-1].savefig("last.png")  # only this one gets unpickled
+        """
+        iters = self.figure_iterations(tag)
+        figs = [LazyFigure(lambda it=it: self.load_figure(tag, it)) for it in iters]
+        return iters, figs
 
     def __getitem__(self, tag: str) -> tuple[int, Any]:
         """Get the last logged value for a tag.

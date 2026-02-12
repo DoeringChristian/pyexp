@@ -1,6 +1,8 @@
 """Tests for experiment framework."""
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -1949,3 +1951,222 @@ class TestCheckpointDecorator:
         # Verify each checkpoint directory has train.pkl
         for checkpoint_dir in checkpoint_dirs:
             assert (checkpoint_dir / "train.pkl").exists()
+
+
+def _init_git_repo(path: Path) -> None:
+    """Initialize a git repo with an initial commit at the given path."""
+    subprocess.check_call(["git", "init"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(["git", "config", "user.email", "test@test.com"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(["git", "config", "user.name", "Test"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Create a file and initial commit
+    (path / "README.md").write_text("init")
+    subprocess.check_call(["git", "add", "."], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.check_call(["git", "commit", "-m", "init"], cwd=path, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@pytest.fixture
+def git_repo(tmp_path):
+    """Create a temporary git repo and chdir into it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo(repo)
+    old_cwd = os.getcwd()
+    os.chdir(repo)
+    yield repo
+    os.chdir(old_cwd)
+    # Clean up worktrees to avoid git lock issues
+    try:
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+class TestWorktreeSnapshotting:
+    """Tests for git worktree-based source code snapshotting."""
+
+    def test_worktree_created_on_fresh_run(self, git_repo, tmp_path):
+        """Worktree .src dir should be created on a fresh run with stash enabled."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # Find run dir and check .src exists
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        assert src_dir.exists(), ".src worktree directory should be created"
+        assert src_dir.is_dir()
+
+    def test_no_stash_prevents_worktree(self, git_repo, tmp_path):
+        """--no-stash should prevent worktree creation."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Find run dir and check .src does NOT exist
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        assert not src_dir.exists(), ".src should not be created with --no-stash"
+
+    def test_commit_hash_in_runs_json(self, git_repo, tmp_path):
+        """Commit hash should be stored in runs.json."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # Find run dir and check runs.json
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
+        assert "commit" in runs_json, "runs.json should contain commit hash"
+        assert len(runs_json["commit"]) == 40, "commit hash should be 40 chars"
+
+    def test_no_commit_hash_without_stash(self, git_repo, tmp_path):
+        """runs.json should not contain commit hash when stash is disabled."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
+        assert "commit" not in runs_json
+
+    def test_worktree_persists_after_run(self, git_repo, tmp_path):
+        """Worktree should persist after run completes (kept as artifact)."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        assert result == 1
+
+        # Worktree should still exist after run
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        assert src_dir.exists(), ".src should persist after run completes"
+
+    def test_worktree_contains_repo_files(self, git_repo, tmp_path):
+        """Worktree should contain copies of repository files."""
+        # Add a source file to the repo
+        (git_repo / "source.py").write_text("x = 42")
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # Check worktree has the source file
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        assert (src_dir / "source.py").exists()
+        assert (src_dir / "source.py").read_text() == "x = 42"
+
+    def test_continue_reuses_existing_worktree(self, git_repo, tmp_path):
+        """--continue should detect and reuse existing .src worktree."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0].result["value"]
+
+        # First run creates worktree
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        timestamp = timestamp_dir.name
+        src_dir = timestamp_dir / ".src"
+        assert src_dir.exists()
+
+        # Continue run should reuse worktree (not fail)
+        with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
+            result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        assert result == 1
+        assert src_dir.exists()
+
+    def test_list_runs_excludes_src(self, git_repo, tmp_path, capsys):
+        """--list should not count .src as a config directory."""
+        @experiment(name="test_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "cfg", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results
+
+        # Create a run (with worktree)
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # List runs
+        with patch.object(sys, "argv", ["test", "--list"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        captured = capsys.readouterr()
+        assert "1 passed" in captured.out
+        assert "(1 configs)" in captured.out

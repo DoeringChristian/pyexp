@@ -309,13 +309,16 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
     return [item for item in items if regex.search(get_name(item) or "")]
 
 
-def _save_runs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
+def _save_runs_json(
+    run_dir: Path, shape: tuple, paths: list[Path], commit: str | None = None
+) -> None:
     """Save run references and shape to a JSON file for later loading.
 
     Args:
         run_dir: The run directory.
         shape: Shape of the config tensor.
         paths: List of paths to the experiment directories (one per config).
+        commit: Optional git commit hash of the source snapshot.
     """
     # Store just the relative paths to run folders
     runs = [str(p.relative_to(run_dir)) for p in paths]
@@ -324,6 +327,8 @@ def _save_runs_json(run_dir: Path, shape: tuple, paths: list[Path]) -> None:
         "runs": runs,
         "shape": list(shape),
     }
+    if commit is not None:
+        data["commit"] = commit
     configs_path = run_dir / "runs.json"
     configs_path.write_text(json.dumps(data, indent=2, default=str))
 
@@ -416,7 +421,9 @@ def _list_runs(base_dir: Path) -> None:
     for run_dir in timestamp_dirs:
         # Scan config directories inside the run
         config_dirs = [
-            d for d in run_dir.iterdir() if d.is_dir() and d.name != "report"
+            d
+            for d in run_dir.iterdir()
+            if d.is_dir() and d.name not in ("report", ".src")
         ]
         total = len(config_dirs)
         completed = 0
@@ -950,6 +957,10 @@ class ExperimentRunner:
         if args.report is not None and not args.continue_run:
             args.continue_run = args.report
 
+        # Track worktree state
+        worktree_path: Path | None = None
+        commit_hash: str | None = None
+
         # Determine the run directory (always timestamped)
         if args.continue_run:
             if args.continue_run == "latest":
@@ -963,6 +974,11 @@ class ExperimentRunner:
                 run_dir = base_dir / args.continue_run
                 if not run_dir.exists():
                     raise RuntimeError(f"Run not found: {run_dir}")
+
+            # Detect existing worktree from previous run
+            src_dir = run_dir / ".src"
+            if src_dir.exists():
+                worktree_path = src_dir
         else:
             # Generate new timestamp
             run_dir = base_dir / _generate_timestamp()
@@ -1030,9 +1046,25 @@ class ExperimentRunner:
                 ), "Config cannot contain 'out' key; it is reserved"
                 configs_for_save.append(Config(config))
 
-            # Create run directory and save runs.json
+            # Create run directory
             run_dir.mkdir(parents=True, exist_ok=True)
-            _save_runs_json(run_dir, shape, experiment_dirs)
+
+            # Create source snapshot worktree if stash is enabled
+            if enable_stash:
+                try:
+                    from .utils import stash_and_worktree
+
+                    commit_hash, worktree_path = stash_and_worktree(
+                        run_dir / ".src"
+                    )
+                    print(f"Source snapshot: {commit_hash[:12]} -> {worktree_path}")
+                except Exception as e:
+                    print(f"Warning: Could not create source snapshot: {e}")
+                    worktree_path = None
+                    commit_hash = None
+
+            # Save runs.json (with commit hash if available)
+            _save_runs_json(run_dir, shape, experiment_dirs, commit=commit_hash)
 
             # Create all experiment directories and save individual config.json files
             for config, experiment_dir in zip(configs_for_save, experiment_dirs):
@@ -1102,6 +1134,7 @@ class ExperimentRunner:
                             experiment_path,
                             capture=not args.no_capture,
                             stash=enable_stash,
+                            worktree_path=worktree_path,
                         )
 
                         # Reload instance to check result
