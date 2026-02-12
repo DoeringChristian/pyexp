@@ -1,7 +1,6 @@
 """Utility functions for pyexp."""
 
 import os
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -24,33 +23,6 @@ def _find_git_root() -> Path:
         .strip()
     )
     return Path(root)
-
-
-def _find_submodule_paths(root: Path) -> list[Path]:
-    """Find relative paths of submodules / embedded repos inside a git repo.
-
-    Detects both:
-    - Proper submodules (.git file with gitdir pointer)
-    - Embedded repos (.git directory)
-
-    Returns:
-        List of relative paths (from root) to submodule directories.
-    """
-    paths = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        # Never descend into the root .git itself
-        if dirpath == str(root):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
-            continue
-        # .git as a directory (embedded repo)
-        if ".git" in dirnames:
-            paths.append(Path(dirpath).relative_to(root))
-            dirnames.clear()
-        # .git as a file (proper submodule with gitdir pointer)
-        elif ".git" in filenames:
-            paths.append(Path(dirpath).relative_to(root))
-            dirnames.clear()
-    return paths
 
 
 def stash() -> str:
@@ -131,9 +103,6 @@ def stash() -> str:
 def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
     """Create a git worktree at the given directory for the specified commit.
 
-    Submodules and embedded repos are replaced with symlinks back to their
-    original directories in the working tree.
-
     Args:
         commit_hash: Git commit hash to check out in the worktree.
         worktree_dir: Path where the worktree should be created.
@@ -145,11 +114,6 @@ def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
         subprocess.CalledProcessError: If git worktree creation fails.
     """
     git_root = _find_git_root()
-
-    # Find submodules before creating the main worktree
-    submodule_paths = _find_submodule_paths(git_root)
-
-    # Create the main worktree
     worktree_dir = worktree_dir.resolve()
     subprocess.check_call(
         ["git", "worktree", "add", "--detach", str(worktree_dir), commit_hash],
@@ -157,21 +121,6 @@ def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-
-    # Replace submodule placeholders with symlinks to the originals
-    for rel_path in submodule_paths:
-        original = (git_root / rel_path).resolve()
-        link = worktree_dir / rel_path
-        try:
-            # Remove the empty gitlink placeholder created by worktree checkout
-            if link.is_dir():
-                shutil.rmtree(link)
-            elif link.exists() or link.is_symlink():
-                link.unlink()
-            link.symlink_to(original)
-        except OSError:
-            pass  # Best-effort
-
     return worktree_dir
 
 
