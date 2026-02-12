@@ -100,57 +100,50 @@ def stash() -> str:
     return commit_hash
 
 
-def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
-    """Create a git worktree at the given directory for the specified commit.
+def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
+    """Check out a snapshot commit into a plain directory (no git metadata).
+
+    Uses `git archive` to extract the committed tree into dest, avoiding
+    worktrees and any impact on git history or refs.
 
     Args:
-        commit_hash: Git commit hash to check out in the worktree.
-        worktree_dir: Path where the worktree should be created.
+        commit_hash: Git commit hash to extract.
+        dest: Directory to populate with the snapshot files.
 
     Returns:
-        Path to the created worktree directory.
-
-    Raises:
-        subprocess.CalledProcessError: If git worktree creation fails.
+        Path to the created directory.
     """
     git_root = _find_git_root()
-    worktree_dir = worktree_dir.resolve()
-    subprocess.check_call(
-        ["git", "worktree", "add", "--detach", str(worktree_dir), commit_hash],
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.Popen(
+        ["git", "archive", "--format=tar", commit_hash],
         cwd=git_root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    subprocess.check_call(
+        ["tar", "xf", "-"],
+        cwd=dest,
+        stdin=archive.stdout,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return worktree_dir
+    archive.wait()
+    if archive.returncode != 0:
+        raise subprocess.CalledProcessError(archive.returncode, "git archive")
+    return dest
 
 
-def remove_worktree(worktree_dir: Path) -> None:
-    """Remove a git worktree.
-
-    Args:
-        worktree_dir: Path to the worktree to remove.
-
-    Raises:
-        subprocess.CalledProcessError: If git worktree removal fails.
-    """
-    git_root = _find_git_root()
-    subprocess.check_call(
-        ["git", "worktree", "remove", "--force", str(worktree_dir.resolve())],
-        cwd=git_root,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
-
-def stash_and_worktree(worktree_dir: Path) -> tuple[str, Path]:
-    """Convenience: stash current state and create a worktree from that snapshot.
+def stash_and_snapshot(dest: Path) -> tuple[str, Path]:
+    """Stash current repo state and extract a file snapshot into dest.
 
     Args:
-        worktree_dir: Path where the worktree should be created.
+        dest: Directory to populate with the snapshot files.
 
     Returns:
-        Tuple of (commit_hash, worktree_path).
+        Tuple of (commit_hash, snapshot_path).
     """
     commit_hash = stash()
-    worktree_path = create_worktree(commit_hash, worktree_dir)
-    return commit_hash, worktree_path
+    snapshot_path = checkout_snapshot(commit_hash, dest)
+    return commit_hash, snapshot_path

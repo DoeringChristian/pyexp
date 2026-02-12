@@ -1983,16 +1983,6 @@ def git_repo(tmp_path):
     os.chdir(repo)
     yield repo
     os.chdir(old_cwd)
-    # Clean up worktrees to avoid git lock issues
-    try:
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
 
 
 @pytest.fixture
@@ -2005,22 +1995,13 @@ def git_repo_no_commits(tmp_path):
     os.chdir(repo)
     yield repo
     os.chdir(old_cwd)
-    try:
-        subprocess.run(
-            ["git", "worktree", "prune"],
-            cwd=repo,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
 
 
-class TestWorktreeSnapshotting:
-    """Tests for git worktree-based source code snapshotting."""
+class TestSourceSnapshotting:
+    """Tests for git-based source code snapshotting."""
 
-    def test_worktree_created_on_fresh_run(self, git_repo, tmp_path):
-        """Worktree .src dir should be created on a fresh run with stash enabled."""
+    def test_snapshot_created_on_fresh_run(self, git_repo, tmp_path):
+        """.src snapshot dir should be created on a fresh run with stash enabled."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2036,11 +2017,11 @@ class TestWorktreeSnapshotting:
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
-        assert src_dir.exists(), ".src worktree directory should be created"
+        assert src_dir.exists(), ".src snapshot directory should be created"
         assert src_dir.is_dir()
 
-    def test_no_stash_prevents_worktree(self, git_repo, tmp_path):
-        """--no-stash should prevent worktree creation."""
+    def test_no_stash_prevents_snapshot(self, git_repo, tmp_path):
+        """--no-stash should prevent snapshot creation."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2096,8 +2077,8 @@ class TestWorktreeSnapshotting:
         runs_json = json.loads((timestamp_dir / "runs.json").read_text())
         assert "commit" not in runs_json
 
-    def test_worktree_persists_after_run(self, git_repo, tmp_path):
-        """Worktree should persist after run completes (kept as artifact)."""
+    def test_snapshot_persists_after_run(self, git_repo, tmp_path):
+        """Snapshot should persist after run completes (kept as artifact)."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2115,14 +2096,14 @@ class TestWorktreeSnapshotting:
 
         assert result == 1
 
-        # Worktree should still exist after run
+        # Snapshot should still exist after run
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
         assert src_dir.exists(), ".src should persist after run completes"
 
-    def test_worktree_contains_repo_files(self, git_repo, tmp_path):
-        """Worktree should contain copies of repository files."""
+    def test_snapshot_contains_repo_files(self, git_repo, tmp_path):
+        """Snapshot should contain copies of repository files."""
         # Add a source file to the repo
         (git_repo / "source.py").write_text("x = 42")
 
@@ -2137,15 +2118,15 @@ class TestWorktreeSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # Check worktree has the source file
+        # Check snapshot has the source file
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
         assert (src_dir / "source.py").exists()
         assert (src_dir / "source.py").read_text() == "x = 42"
 
-    def test_continue_reuses_existing_worktree(self, git_repo, tmp_path):
-        """--continue should detect and reuse existing .src worktree."""
+    def test_continue_reuses_existing_snapshot(self, git_repo, tmp_path):
+        """--continue should detect and reuse existing .src snapshot."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2158,7 +2139,7 @@ class TestWorktreeSnapshotting:
         def report(results, out):
             return results[0].result["value"]
 
-        # First run creates worktree
+        # First run creates snapshot
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
@@ -2168,7 +2149,7 @@ class TestWorktreeSnapshotting:
         src_dir = timestamp_dir / ".src"
         assert src_dir.exists()
 
-        # Continue run should reuse worktree (not fail)
+        # Continue run should reuse snapshot (not fail)
         with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
             result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
@@ -2189,7 +2170,7 @@ class TestWorktreeSnapshotting:
         def report(results, out):
             return results
 
-        # Create a run (with worktree)
+        # Create a run (with snapshot)
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
@@ -2201,8 +2182,8 @@ class TestWorktreeSnapshotting:
         assert "1 passed" in captured.out
         assert "(1 configs)" in captured.out
 
-    def test_worktree_works_in_repo_with_no_commits(self, git_repo_no_commits, tmp_path):
-        """Stash and worktree should work even in a repo with no prior commits."""
+    def test_snapshot_works_in_repo_with_no_commits(self, git_repo_no_commits, tmp_path):
+        """Stash and snapshot should work even in a repo with no prior commits."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2218,7 +2199,7 @@ class TestWorktreeSnapshotting:
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
-        assert src_dir.exists(), ".src worktree should be created even without prior commits"
+        assert src_dir.exists(), ".src snapshot should be created even without prior commits"
 
         # Check commit hash is in runs.json
         runs_json = json.loads((timestamp_dir / "runs.json").read_text())

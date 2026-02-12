@@ -43,7 +43,7 @@ class Executor(ABC):
         result_path: Path,
         capture: bool = True,
         stash: bool = True,
-        worktree_path: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         """Run a single experiment and pickle the result.
 
@@ -52,7 +52,7 @@ class Executor(ABC):
             result_path: Path where the pickled instance should be saved.
             capture: If True (default), capture output. If False, show output live.
             stash: If True, capture git commit hash at the start of the experiment.
-            worktree_path: If set, run experiment from this worktree directory.
+            snapshot_path: If set, run experiment from this snapshot directory.
 
         The executor should:
         1. Call instance.experiment()
@@ -76,7 +76,7 @@ class InlineExecutor(Executor):
         result_path: Path,
         capture: bool = True,
         stash: bool = True,
-        worktree_path: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         """Run experiment inline and cache result."""
         import io
@@ -125,7 +125,7 @@ class SubprocessExecutor(Executor):
         result_path: Path,
         capture: bool = True,
         stash: bool = True,
-        worktree_path: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         """Run experiment in subprocess via cloudpickle serialization."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,27 +146,27 @@ class SubprocessExecutor(Executor):
             # Run worker subprocess with inherited sys.path via PYTHONPATH
             env = os.environ.copy()
 
-            # When worktree_path is set, remap repo-local sys.path entries
-            # to their worktree equivalents
+            # When snapshot_path is set, remap repo-local sys.path entries
+            # to their snapshot equivalents
             cwd = None
-            if worktree_path is not None:
+            if snapshot_path is not None:
                 try:
                     from .utils import _find_git_root
 
                     git_root = _find_git_root()
                     git_root_str = str(git_root.resolve())
-                    worktree_str = str(worktree_path.resolve())
+                    snapshot_str = str(snapshot_path.resolve())
 
                     remapped = []
                     for p in sys.path:
                         resolved = str(Path(p).resolve()) if p else ""
                         if resolved.startswith(git_root_str):
                             relative = resolved[len(git_root_str) :]
-                            remapped.append(worktree_str + relative)
+                            remapped.append(snapshot_str + relative)
                         else:
                             remapped.append(p)
                     pythonpath = os.pathsep.join(remapped)
-                    cwd = worktree_path
+                    cwd = snapshot_path
                 except Exception:
                     # Fall back to normal sys.path if remapping fails
                     pythonpath = os.pathsep.join(sys.path)
@@ -244,7 +244,7 @@ class ForkExecutor(Executor):
         result_path: Path,
         capture: bool = True,
         stash: bool = True,
-        worktree_path: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         """Run experiment in a forked process."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -264,25 +264,25 @@ class ForkExecutor(Executor):
                     os.dup2(write_fd, 2)  # stderr
                     os.close(write_fd)
 
-                # Best-effort sys.path manipulation for worktree
-                if worktree_path is not None:
+                # Best-effort sys.path manipulation for snapshot
+                if snapshot_path is not None:
                     try:
                         from .utils import _find_git_root
 
                         git_root = _find_git_root()
                         git_root_str = str(git_root.resolve())
-                        worktree_str = str(worktree_path.resolve())
+                        snapshot_str = str(snapshot_path.resolve())
 
                         new_path = []
                         for p in sys.path:
                             resolved = str(Path(p).resolve()) if p else ""
                             if resolved.startswith(git_root_str):
                                 relative = resolved[len(git_root_str):]
-                                new_path.append(worktree_str + relative)
+                                new_path.append(snapshot_str + relative)
                             else:
                                 new_path.append(p)
                         sys.path[:] = new_path
-                        os.chdir(worktree_path)
+                        os.chdir(snapshot_path)
                     except Exception:
                         pass  # Best-effort: continue without remapping
 
@@ -408,7 +408,7 @@ class RayExecutor(Executor):
         result_path: Path,
         capture: bool = True,
         stash: bool = True,
-        worktree_path: Path | None = None,
+        snapshot_path: Path | None = None,
     ) -> None:
         """Run experiment as a Ray task."""
         result_path.parent.mkdir(parents=True, exist_ok=True)

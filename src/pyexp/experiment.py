@@ -957,8 +957,8 @@ class ExperimentRunner:
         if args.report is not None and not args.continue_run:
             args.continue_run = args.report
 
-        # Track worktree state
-        worktree_path: Path | None = None
+        # Track snapshot state
+        snapshot_path: Path | None = None
         commit_hash: str | None = None
 
         # Determine the run directory (always timestamped)
@@ -975,10 +975,10 @@ class ExperimentRunner:
                 if not run_dir.exists():
                     raise RuntimeError(f"Run not found: {run_dir}")
 
-            # Detect existing worktree from previous run
+            # Detect existing snapshot from previous run
             src_dir = run_dir / ".src"
             if src_dir.exists():
-                worktree_path = src_dir
+                snapshot_path = src_dir
         else:
             # Generate new timestamp
             run_dir = base_dir / _generate_timestamp()
@@ -1049,18 +1049,18 @@ class ExperimentRunner:
             # Create run directory
             run_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create source snapshot worktree if stash is enabled
+            # Create source snapshot if stash is enabled
             if enable_stash:
                 try:
-                    from .utils import stash_and_worktree
+                    from .utils import stash_and_snapshot
 
-                    commit_hash, worktree_path = stash_and_worktree(
+                    commit_hash, snapshot_path = stash_and_snapshot(
                         run_dir / ".src"
                     )
-                    print(f"Source snapshot: {commit_hash[:12]} -> {worktree_path}")
+                    print(f"Source snapshot: {commit_hash[:12]} -> {snapshot_path}")
                 except Exception as e:
                     print(f"Warning: Could not create source snapshot: {e}")
-                    worktree_path = None
+                    snapshot_path = None
                     commit_hash = None
 
             # Save runs.json (with commit hash if available)
@@ -1134,7 +1134,7 @@ class ExperimentRunner:
                             experiment_path,
                             capture=not args.no_capture,
                             stash=enable_stash,
-                            worktree_path=worktree_path,
+                            snapshot_path=snapshot_path,
                         )
 
                         # Reload instance to check result

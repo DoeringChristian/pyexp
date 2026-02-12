@@ -21,7 +21,7 @@ from .executors import (
     SubprocessExecutor,
     get_executor,
 )
-from .utils import create_worktree, remove_worktree, stash, stash_and_worktree
+from .utils import checkout_snapshot, stash, stash_and_snapshot
 from .log import LazyFigure, Logger, LogReader
 
 __all__ = [
@@ -32,10 +32,9 @@ __all__ = [
     "load_config",
     "merge",
     "register",
-    "create_worktree",
-    "remove_worktree",
+    "checkout_snapshot",
     "stash",
-    "stash_and_worktree",
+    "stash_and_snapshot",
     "sweep",
     "to_dict",
     "Experiment",
