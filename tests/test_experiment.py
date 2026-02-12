@@ -2224,3 +2224,33 @@ class TestWorktreeSnapshotting:
         runs_json = json.loads((timestamp_dir / "runs.json").read_text())
         assert "commit" in runs_json
         assert len(runs_json["commit"]) == 40
+
+    def test_embedded_repo_contents_captured(self, git_repo, tmp_path):
+        """Embedded git repos (subrepos) should be captured as full file trees, not empty gitlinks."""
+        # Create an embedded repo inside the main repo
+        subrepo = git_repo / "libs" / "mylib"
+        subrepo.mkdir(parents=True)
+        (subrepo / "module.py").write_text("VALUE = 123")
+        _init_git_repo(subrepo)
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # The subrepo files should appear in .src with full contents
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        captured_module = src_dir / "libs" / "mylib" / "module.py"
+        assert captured_module.exists(), "Subrepo file should be captured in worktree"
+        assert captured_module.read_text() == "VALUE = 123"
+
+        # The nested .git should have been restored in the original repo
+        assert (subrepo / ".git").exists(), "Nested .git should be restored after stash"

@@ -25,12 +25,34 @@ def _find_git_root() -> Path:
     return Path(root)
 
 
+def _find_nested_git_dirs(root: Path) -> list[Path]:
+    """Find .git directories inside subdirectories (embedded repos / submodules).
+
+    Skips the root-level .git itself. Only finds .git *directories* (not .git
+    files used by worktrees).
+    """
+    nested = []
+    for dirpath, dirnames, _ in os.walk(root):
+        # Skip the root .git itself
+        if dirpath == str(root):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            continue
+        if ".git" in dirnames:
+            nested.append(Path(dirpath) / ".git")
+            # Don't descend into this .git
+            dirnames.remove(".git")
+    return nested
+
+
 def stash() -> str:
     """Capture the current git repository state in a detached commit for reproducibility.
 
     Creates a temporary commit containing all tracked and untracked files without
     affecting the working tree or current HEAD. This allows exact reproducibility
     of training runs.
+
+    Nested git repositories (submodules / embedded repos) are captured as full
+    file trees, not as empty gitlink pointers.
 
     Returns:
         Git commit hash of the snapshot.
@@ -51,33 +73,65 @@ def stash() -> str:
     except subprocess.CalledProcessError:
         head = None
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Create temporary index and tree
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = str(Path(tmpdir) / "index")
+    # Temporarily hide nested .git dirs so git adds subrepos as plain files
+    # instead of recording them as empty gitlink entries.
+    hidden: list[tuple[Path, Path]] = []
+    nested_git_dirs = _find_nested_git_dirs(path)
+    for git_dir in nested_git_dirs:
+        backup = git_dir.with_name(".git._pyexp_hidden")
+        try:
+            git_dir.rename(backup)
+            hidden.append((backup, git_dir))
+        except OSError:
+            pass
 
-        # Add all files (including untracked)
-        subprocess.check_call(
-            ["git", "add", "-A", "--intent-to-add"], cwd=path, env=env
-        )
-        subprocess.check_call(["git", "add", "-A"], cwd=path, env=env)
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create temporary index and tree
+            env = os.environ.copy()
+            env["GIT_INDEX_FILE"] = str(Path(tmpdir) / "index")
 
-        # Write tree object
-        tree_hash = (
-            subprocess.check_output(["git", "write-tree"], cwd=path, env=env)
-            .decode()
-            .strip()
-        )
+            # Add all files (including untracked).
+            # Suppress stderr to silence any residual embedded-repo warnings.
+            subprocess.check_call(
+                ["git", "add", "-A", "--intent-to-add"],
+                cwd=path,
+                env=env,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.check_call(
+                ["git", "add", "-A"],
+                cwd=path,
+                env=env,
+                stderr=subprocess.DEVNULL,
+            )
 
-        # Create a detached commit object (not checked out)
-        # If HEAD exists, parent the snapshot to it; otherwise create a root commit
-        cmd = ["git", "commit-tree", tree_hash, "-m", "Temporary reproducible snapshot"]
-        if head is not None:
-            cmd[3:3] = ["-p", head]
+            # Write tree object
+            tree_hash = (
+                subprocess.check_output(["git", "write-tree"], cwd=path, env=env)
+                .decode()
+                .strip()
+            )
 
-        commit_hash = (
-            subprocess.check_output(cmd, cwd=path, env=env).decode().strip()
-        )
+            # Create a detached commit object (not checked out)
+            # If HEAD exists, parent the snapshot to it; otherwise create a root commit
+            cmd = [
+                "git", "commit-tree", tree_hash,
+                "-m", "Temporary reproducible snapshot",
+            ]
+            if head is not None:
+                cmd[3:3] = ["-p", head]
+
+            commit_hash = (
+                subprocess.check_output(cmd, cwd=path, env=env).decode().strip()
+            )
+    finally:
+        # Always restore nested .git dirs, even if something above fails
+        for backup, original in hidden:
+            try:
+                backup.rename(original)
+            except OSError:
+                pass
 
     return commit_hash
 
