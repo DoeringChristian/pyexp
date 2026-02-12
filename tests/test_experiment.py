@@ -2225,8 +2225,8 @@ class TestWorktreeSnapshotting:
         assert "commit" in runs_json
         assert len(runs_json["commit"]) == 40
 
-    def test_embedded_repo_contents_captured(self, git_repo, tmp_path):
-        """Embedded git repos (subrepos) should be captured as full file trees, not empty gitlinks."""
+    def test_embedded_repo_symlinked(self, git_repo, tmp_path):
+        """Embedded git repos should be symlinked back to the original."""
         # Create an embedded repo inside the main repo
         subrepo = git_repo / "libs" / "mylib"
         subrepo.mkdir(parents=True)
@@ -2244,25 +2244,40 @@ class TestWorktreeSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # The subrepo files should appear in .src with full contents
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
-        captured_module = src_dir / "libs" / "mylib" / "module.py"
-        assert captured_module.exists(), "Subrepo file should be captured in worktree"
-        assert captured_module.read_text() == "VALUE = 123"
+        link = src_dir / "libs" / "mylib"
 
-        # The nested .git should have been restored in the original repo
-        assert (subrepo / ".git").exists(), "Nested .git should be restored after stash"
+        # Should be a symlink pointing to the original
+        assert link.is_symlink(), "Embedded repo should be a symlink in worktree"
+        assert link.resolve() == subrepo.resolve()
 
-    def test_submodule_gitfile_contents_captured(self, git_repo, tmp_path):
-        """Proper submodules (.git file, not dir) should be captured as full file trees."""
-        # Simulate a proper submodule: a directory with a .git *file* pointing elsewhere
-        subrepo = git_repo / "libs" / "mysub"
-        subrepo.mkdir(parents=True)
-        (subrepo / "sub_module.py").write_text("SUB_VALUE = 999")
-        # Write a .git file (like a real submodule has)
-        (subrepo / ".git").write_text("gitdir: ../../.git/modules/mysub\n")
+        # Files should be accessible through the symlink
+        assert (link / "module.py").read_text() == "VALUE = 123"
+
+    def test_submodule_symlinked(self, git_repo, tmp_path):
+        """Proper submodules should be symlinked back to the original."""
+        # Create an external repo to use as a submodule source
+        ext_repo = tmp_path / "ext_repo"
+        ext_repo.mkdir()
+        (ext_repo / "sub_module.py").write_text("SUB_VALUE = 999")
+        _init_git_repo(ext_repo)
+
+        # Add it as a submodule (need protocol.file.allow for local paths)
+        subprocess.check_call(
+            ["git", "-c", "protocol.file.allow=always",
+             "submodule", "add", str(ext_repo), "libs/mysub"],
+            cwd=git_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["git", "commit", "-m", "add submodule"],
+            cwd=git_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
         @experiment
         def my_exp(config):
@@ -2275,13 +2290,15 @@ class TestWorktreeSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # The submodule files should appear in .src with full contents
         base_dir = tmp_path / "my_exp"
         timestamp_dir = sorted(base_dir.iterdir())[0]
         src_dir = timestamp_dir / ".src"
-        captured_module = src_dir / "libs" / "mysub" / "sub_module.py"
-        assert captured_module.exists(), "Submodule file should be captured in worktree"
-        assert captured_module.read_text() == "SUB_VALUE = 999"
+        link = src_dir / "libs" / "mysub"
+        original = git_repo / "libs" / "mysub"
 
-        # The .git file should have been restored
-        assert (subrepo / ".git").is_file(), ".git file should be restored after stash"
+        # Should be a symlink pointing to the original submodule dir
+        assert link.is_symlink(), "Submodule should be a symlink in worktree"
+        assert link.resolve() == original.resolve()
+
+        # Files should be accessible through the symlink
+        assert (link / "sub_module.py").read_text() == "SUB_VALUE = 999"

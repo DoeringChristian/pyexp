@@ -1,6 +1,7 @@
 """Utility functions for pyexp."""
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,27 +26,31 @@ def _find_git_root() -> Path:
     return Path(root)
 
 
-def _find_nested_git_markers(root: Path) -> list[Path]:
-    """Find .git entries inside subdirectories (embedded repos / submodules).
+def _find_submodule_paths(root: Path) -> list[Path]:
+    """Find relative paths of submodules / embedded repos inside a git repo.
 
-    Skips the root-level .git itself. Finds both:
-    - .git directories (embedded repos with a full .git directory)
-    - .git files (proper submodules with a gitdir pointer file)
+    Detects both:
+    - Proper submodules (.git file with gitdir pointer)
+    - Embedded repos (.git directory)
+
+    Returns:
+        List of relative paths (from root) to submodule directories.
     """
-    nested = []
+    paths = []
     for dirpath, dirnames, filenames in os.walk(root):
-        # Skip the root .git itself
+        # Never descend into the root .git itself
         if dirpath == str(root):
             dirnames[:] = [d for d in dirnames if d != ".git"]
             continue
         # .git as a directory (embedded repo)
         if ".git" in dirnames:
-            nested.append(Path(dirpath) / ".git")
-            dirnames.remove(".git")
+            paths.append(Path(dirpath).relative_to(root))
+            dirnames.clear()
         # .git as a file (proper submodule with gitdir pointer)
         elif ".git" in filenames:
-            nested.append(Path(dirpath) / ".git")
-    return nested
+            paths.append(Path(dirpath).relative_to(root))
+            dirnames.clear()
+    return paths
 
 
 def stash() -> str:
@@ -54,9 +59,6 @@ def stash() -> str:
     Creates a temporary commit containing all tracked and untracked files without
     affecting the working tree or current HEAD. This allows exact reproducibility
     of training runs.
-
-    Nested git repositories (submodules / embedded repos) are captured as full
-    file trees, not as empty gitlink pointers.
 
     Returns:
         Git commit hash of the snapshot.
@@ -77,71 +79,60 @@ def stash() -> str:
     except subprocess.CalledProcessError:
         head = None
 
-    # Temporarily hide nested .git entries (dirs or files) so git adds
-    # subrepos as plain files instead of recording them as empty gitlink entries.
-    hidden: list[tuple[Path, Path]] = []
-    nested_git_markers = _find_nested_git_markers(path)
-    for git_dir in nested_git_markers:
-        backup = git_dir.with_name(".git._pyexp_hidden")
-        try:
-            git_dir.rename(backup)
-            hidden.append((backup, git_dir))
-        except OSError:
-            pass
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create temporary index and tree
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(Path(tmpdir) / "index")
+        # Ensure author/committer identity for commit-tree (may not be
+        # configured in all environments).
+        env.setdefault("GIT_AUTHOR_NAME", "pyexp")
+        env.setdefault("GIT_AUTHOR_EMAIL", "pyexp@snapshot")
+        env.setdefault("GIT_COMMITTER_NAME", "pyexp")
+        env.setdefault("GIT_COMMITTER_EMAIL", "pyexp@snapshot")
 
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create temporary index and tree
-            env = os.environ.copy()
-            env["GIT_INDEX_FILE"] = str(Path(tmpdir) / "index")
+        # Add all files (including untracked).
+        # Suppress stderr to silence warnings about embedded git repos.
+        subprocess.check_call(
+            ["git", "add", "-A", "--intent-to-add"],
+            cwd=path,
+            env=env,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["git", "add", "-A"],
+            cwd=path,
+            env=env,
+            stderr=subprocess.DEVNULL,
+        )
 
-            # Add all files (including untracked).
-            # Suppress stderr to silence any residual embedded-repo warnings.
-            subprocess.check_call(
-                ["git", "add", "-A", "--intent-to-add"],
-                cwd=path,
-                env=env,
-                stderr=subprocess.DEVNULL,
-            )
-            subprocess.check_call(
-                ["git", "add", "-A"],
-                cwd=path,
-                env=env,
-                stderr=subprocess.DEVNULL,
-            )
+        # Write tree object
+        tree_hash = (
+            subprocess.check_output(["git", "write-tree"], cwd=path, env=env)
+            .decode()
+            .strip()
+        )
 
-            # Write tree object
-            tree_hash = (
-                subprocess.check_output(["git", "write-tree"], cwd=path, env=env)
-                .decode()
-                .strip()
-            )
+        # Create a detached commit object (not checked out)
+        # If HEAD exists, parent the snapshot to it; otherwise create a root commit
+        cmd = [
+            "git", "commit-tree", tree_hash,
+            "-m", "Temporary reproducible snapshot",
+        ]
+        if head is not None:
+            cmd[3:3] = ["-p", head]
 
-            # Create a detached commit object (not checked out)
-            # If HEAD exists, parent the snapshot to it; otherwise create a root commit
-            cmd = [
-                "git", "commit-tree", tree_hash,
-                "-m", "Temporary reproducible snapshot",
-            ]
-            if head is not None:
-                cmd[3:3] = ["-p", head]
-
-            commit_hash = (
-                subprocess.check_output(cmd, cwd=path, env=env).decode().strip()
-            )
-    finally:
-        # Always restore nested .git dirs, even if something above fails
-        for backup, original in hidden:
-            try:
-                backup.rename(original)
-            except OSError:
-                pass
+        commit_hash = (
+            subprocess.check_output(cmd, cwd=path, env=env).decode().strip()
+        )
 
     return commit_hash
 
 
 def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
     """Create a git worktree at the given directory for the specified commit.
+
+    Submodules and embedded repos are replaced with symlinks back to their
+    original directories in the working tree.
 
     Args:
         commit_hash: Git commit hash to check out in the worktree.
@@ -154,6 +145,11 @@ def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
         subprocess.CalledProcessError: If git worktree creation fails.
     """
     git_root = _find_git_root()
+
+    # Find submodules before creating the main worktree
+    submodule_paths = _find_submodule_paths(git_root)
+
+    # Create the main worktree
     worktree_dir = worktree_dir.resolve()
     subprocess.check_call(
         ["git", "worktree", "add", "--detach", str(worktree_dir), commit_hash],
@@ -161,6 +157,21 @@ def create_worktree(commit_hash: str, worktree_dir: Path) -> Path:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
+
+    # Replace submodule placeholders with symlinks to the originals
+    for rel_path in submodule_paths:
+        original = (git_root / rel_path).resolve()
+        link = worktree_dir / rel_path
+        try:
+            # Remove the empty gitlink placeholder created by worktree checkout
+            if link.is_dir():
+                shutil.rmtree(link)
+            elif link.exists() or link.is_symlink():
+                link.unlink()
+            link.symlink_to(original)
+        except OSError:
+            pass  # Best-effort
+
     return worktree_dir
 
 
