@@ -2206,3 +2206,44 @@ class TestSourceSnapshotting:
         assert "commit" in runs_json
         assert len(runs_json["commit"]) == 40
 
+    def test_snapshot_symlinks_submodules(self, git_repo, tmp_path):
+        """Submodule directories in snapshot should be symlinked to originals."""
+        # Create a separate repo to use as a submodule
+        sub_repo = tmp_path / "sub_repo"
+        sub_repo.mkdir()
+        _init_git_repo(sub_repo)
+        (sub_repo / "lib.py").write_text("value = 99")
+        subprocess.check_call(["git", "add", "."], cwd=sub_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.check_call(["git", "commit", "-m", "add lib"], cwd=sub_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        # Add it as a submodule in the main repo
+        subprocess.check_call(
+            ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), "mylib"],
+            cwd=git_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(["git", "commit", "-m", "add submodule"], cwd=git_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path / "out", executor="inline", stash=True)
+
+        # Find the .src dir
+        base_dir = tmp_path / "out" / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+
+        # Submodule should be a symlink pointing to the real submodule dir
+        mylib_in_snapshot = src_dir / "mylib"
+        assert mylib_in_snapshot.is_symlink(), "submodule should be symlinked"
+        assert mylib_in_snapshot.resolve() == (git_repo / "mylib").resolve()
+        assert (mylib_in_snapshot / "lib.py").read_text() == "value = 99"
+

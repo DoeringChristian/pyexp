@@ -85,11 +85,31 @@ def stash() -> str:
     return commit_hash
 
 
+def _find_submodule_paths(git_root: Path) -> list[str]:
+    """Return relative paths of git submodules in the repository."""
+    try:
+        output = subprocess.check_output(
+            ["git", "submodule", "status"],
+            cwd=git_root,
+            stderr=subprocess.DEVNULL,
+        ).decode()
+    except subprocess.CalledProcessError:
+        return []
+    paths = []
+    for line in output.strip().splitlines():
+        # Format: " <hash> <path> (<describe>)" or "-<hash> <path>"
+        parts = line.strip().split()
+        if len(parts) >= 2:
+            paths.append(parts[1])
+    return paths
+
+
 def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
     """Check out a snapshot commit into a plain directory (no git metadata).
 
     Uses `git archive` to extract the committed tree into dest, avoiding
-    worktrees and any impact on git history or refs.
+    worktrees and any impact on git history or refs. Submodule directories
+    are replaced with symlinks to the original submodule locations.
 
     Args:
         commit_hash: Git commit hash to extract.
@@ -117,6 +137,19 @@ def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
     archive.wait()
     if archive.returncode != 0:
         raise subprocess.CalledProcessError(archive.returncode, "git archive")
+
+    # Replace submodule placeholders with symlinks to the real directories
+    for sub_path in _find_submodule_paths(git_root):
+        sub_in_snapshot = dest / sub_path
+        sub_in_repo = git_root / sub_path
+        if sub_in_repo.is_dir():
+            # Remove the empty placeholder (dir or file) and symlink
+            if sub_in_snapshot.is_dir():
+                sub_in_snapshot.rmdir()
+            elif sub_in_snapshot.exists():
+                sub_in_snapshot.unlink()
+            sub_in_snapshot.symlink_to(sub_in_repo.resolve())
+
     return dest
 
 
