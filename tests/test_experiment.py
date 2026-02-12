@@ -2254,3 +2254,34 @@ class TestWorktreeSnapshotting:
 
         # The nested .git should have been restored in the original repo
         assert (subrepo / ".git").exists(), "Nested .git should be restored after stash"
+
+    def test_submodule_gitfile_contents_captured(self, git_repo, tmp_path):
+        """Proper submodules (.git file, not dir) should be captured as full file trees."""
+        # Simulate a proper submodule: a directory with a .git *file* pointing elsewhere
+        subrepo = git_repo / "libs" / "mysub"
+        subrepo.mkdir(parents=True)
+        (subrepo / "sub_module.py").write_text("SUB_VALUE = 999")
+        # Write a .git file (like a real submodule has)
+        (subrepo / ".git").write_text("gitdir: ../../.git/modules/mysub\n")
+
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        # The submodule files should appear in .src with full contents
+        base_dir = tmp_path / "my_exp"
+        timestamp_dir = sorted(base_dir.iterdir())[0]
+        src_dir = timestamp_dir / ".src"
+        captured_module = src_dir / "libs" / "mysub" / "sub_module.py"
+        assert captured_module.exists(), "Submodule file should be captured in worktree"
+        assert captured_module.read_text() == "SUB_VALUE = 999"
+
+        # The .git file should have been restored
+        assert (subrepo / ".git").is_file(), ".git file should be restored after stash"

@@ -25,22 +25,26 @@ def _find_git_root() -> Path:
     return Path(root)
 
 
-def _find_nested_git_dirs(root: Path) -> list[Path]:
-    """Find .git directories inside subdirectories (embedded repos / submodules).
+def _find_nested_git_markers(root: Path) -> list[Path]:
+    """Find .git entries inside subdirectories (embedded repos / submodules).
 
-    Skips the root-level .git itself. Only finds .git *directories* (not .git
-    files used by worktrees).
+    Skips the root-level .git itself. Finds both:
+    - .git directories (embedded repos with a full .git directory)
+    - .git files (proper submodules with a gitdir pointer file)
     """
     nested = []
-    for dirpath, dirnames, _ in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
         # Skip the root .git itself
         if dirpath == str(root):
             dirnames[:] = [d for d in dirnames if d != ".git"]
             continue
+        # .git as a directory (embedded repo)
         if ".git" in dirnames:
             nested.append(Path(dirpath) / ".git")
-            # Don't descend into this .git
             dirnames.remove(".git")
+        # .git as a file (proper submodule with gitdir pointer)
+        elif ".git" in filenames:
+            nested.append(Path(dirpath) / ".git")
     return nested
 
 
@@ -73,11 +77,11 @@ def stash() -> str:
     except subprocess.CalledProcessError:
         head = None
 
-    # Temporarily hide nested .git dirs so git adds subrepos as plain files
-    # instead of recording them as empty gitlink entries.
+    # Temporarily hide nested .git entries (dirs or files) so git adds
+    # subrepos as plain files instead of recording them as empty gitlink entries.
     hidden: list[tuple[Path, Path]] = []
-    nested_git_dirs = _find_nested_git_dirs(path)
-    for git_dir in nested_git_dirs:
+    nested_git_markers = _find_nested_git_markers(path)
+    for git_dir in nested_git_markers:
         backup = git_dir.with_name(".git._pyexp_hidden")
         try:
             git_dir.rename(backup)
