@@ -8,8 +8,6 @@ from typing import Any, Generic, Iterator, TypeVar
 
 import yaml
 
-
-
 # Global registry for class instantiation from config
 _registry: dict[str, type] = {}
 
@@ -157,15 +155,14 @@ class Config(dict):
             raise AttributeError(f"Config has no attribute '{name}'")
 
     def __repr__(self) -> str:
-        return yaml.dump(to_dict(self), default_flow_style=False, sort_keys=False).rstrip("\n")
+        return yaml.dump(
+            to_dict(self), default_flow_style=False, sort_keys=False
+        ).rstrip("\n")
 
 
 def to_dict(cfg: Config) -> dict:
     """Convert a Config to a plain dict recursively."""
-    return {
-        k: to_dict(v) if isinstance(v, Config) else v
-        for k, v in cfg.items()
-    }
+    return {k: to_dict(v) if isinstance(v, Config) else v for k, v in cfg.items()}
 
 
 def _deep_copy_dict(d: dict) -> dict:
@@ -211,7 +208,9 @@ def merge(base: dict, update: dict) -> dict:
         if key.startswith("**"):
             key = key[2:]
             if not isinstance(value, dict):
-                raise ValueError(f"**{key} requires a dict value, got {type(value).__name__}")
+                raise ValueError(
+                    f"**{key} requires a dict value, got {type(value).__name__}"
+                )
             # Expand into dot-notation updates and recurse
             flat = {}
             for k, v in value.items():
@@ -231,7 +230,6 @@ def merge(base: dict, update: dict) -> dict:
             result[key] = value
 
     return result
-
 
 
 class Runs(Generic[_T]):

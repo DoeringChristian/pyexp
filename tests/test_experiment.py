@@ -56,7 +56,7 @@ class TestExperimentRun:
     """Tests for ExperimentRunner.run() execution."""
 
     def test_run_executes_pipeline(self, tmp_path):
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * 2}
 
@@ -74,7 +74,7 @@ class TestExperimentRun:
         assert result == 10
 
     def test_run_with_passed_functions(self, tmp_path):
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] + 1}
 
@@ -118,7 +118,7 @@ class TestExperimentRun:
         assert call_count == 1  # Only called once due to caching
 
     def test_run_report_flag(self, tmp_path):
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -144,7 +144,7 @@ class TestExperimentRun:
         """--report should use saved configs, not recompute from configs function."""
         config_value = [42]  # Mutable to allow modification
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -173,7 +173,7 @@ class TestExperimentRun:
         """--continue should use saved configs, not recompute from configs function."""
         config_value = [42]  # Mutable to allow modification
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -356,7 +356,7 @@ class TestExperimentRun:
                 my_exp.run(output_dir=tmp_path)
 
     def test_multiple_configs(self, tmp_path):
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] ** 2}
 
@@ -381,7 +381,7 @@ class TestExperimentRun:
         """Report function should receive results as Runs."""
         received_results = None
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * 2}
 
@@ -436,7 +436,7 @@ class TestExperimentRun:
         """Results should be filterable by config values."""
         received_results = None
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * config["y"]}
 
@@ -606,7 +606,7 @@ class TestExperimentRun:
     def test_filter_no_match_returns_none(self, tmp_path):
         """--filter with no matches should return None."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"name": config["name"]}
 
@@ -631,7 +631,7 @@ class TestExperimentRun:
     def test_filter_runs_only_matching(self, tmp_path):
         """--filter should only execute matching configs on fresh run."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"name": config["name"], "ran": True}
 
@@ -675,7 +675,7 @@ class TestResultsMethod:
     def test_results_loads_latest_run(self, tmp_path):
         """results() loads the latest run by default."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * 2}
 
@@ -705,7 +705,7 @@ class TestResultsMethod:
         """results() can load a specific timestamp."""
         import time
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -747,7 +747,7 @@ class TestResultsMethod:
     def test_results_always_1d(self, tmp_path):
         """results() always returns a 1D Runs regardless of sweep shape."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * config["y"]}
 
@@ -806,7 +806,7 @@ class TestResultsMethod:
         import json
         from pyexp.experiment import _config_hash
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -853,14 +853,14 @@ class TestResultsMethod:
 class TestOutputFolderStructure:
     """Tests for output folder naming and timestamp features."""
 
-    def test_default_name_is_function_name(self):
-        """Experiment name defaults to function name."""
+    def test_default_name_is_filename_functionname(self):
+        """Experiment name defaults to <filename>:<function_name>."""
 
         @experiment
         def my_custom_experiment(config):
             return config["x"]
 
-        assert my_custom_experiment._name == "my_custom_experiment"
+        assert my_custom_experiment._name == "test_experiment.my_custom_experiment"
 
     def test_custom_name_in_decorator(self):
         """Can set custom name in decorator."""
@@ -1168,7 +1168,7 @@ class TestSubprocessExecution:
     def test_subprocess_runs_experiment(self, tmp_path):
         """Experiments run in subprocess with executor='subprocess'."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * 2}
 
@@ -1243,7 +1243,7 @@ class TestSubprocessExecution:
     def test_subprocess_multiple_configs(self, tmp_path):
         """Multiple configs all run in separate subprocesses."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] ** 2}
 
@@ -1267,7 +1267,7 @@ class TestSubprocessExecution:
     def test_subprocess_with_sweep(self, tmp_path):
         """Subprocess execution works with sweep configurations."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] + config["y"]}
 
@@ -1299,7 +1299,7 @@ class TestForkExecution:
     def test_fork_runs_experiment(self, tmp_path):
         """Experiments run correctly with fork executor."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] * 3}
 
@@ -1340,7 +1340,7 @@ class TestForkExecution:
     def test_fork_multiple_configs(self, tmp_path):
         """Multiple configs run correctly with fork executor."""
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] ** 2}
 
@@ -2031,7 +2031,7 @@ class TestSourceSnapshotting:
 
     def test_snapshot_created_on_fresh_run(self, git_repo, tmp_path):
         """.snapshots/<commit>/ should be created on a fresh run with stash enabled."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2049,7 +2049,7 @@ class TestSourceSnapshotting:
 
     def test_no_stash_prevents_snapshot(self, git_repo, tmp_path):
         """--no-stash should prevent snapshot creation."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2066,7 +2066,7 @@ class TestSourceSnapshotting:
 
     def test_commit_hash_in_batch_manifest(self, git_repo, tmp_path):
         """Commit hash should be stored in batch manifest."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2085,7 +2085,7 @@ class TestSourceSnapshotting:
 
     def test_commit_hash_in_each_run_dir(self, git_repo, tmp_path):
         """Each run directory should have a .commit file with the commit hash."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2109,7 +2109,7 @@ class TestSourceSnapshotting:
 
     def test_no_commit_hash_without_stash(self, git_repo, tmp_path):
         """Batch manifest should not contain commit hash when stash is disabled."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2127,7 +2127,7 @@ class TestSourceSnapshotting:
 
     def test_snapshot_persists_after_run(self, git_repo, tmp_path):
         """Snapshot should persist after run completes (kept as artifact)."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2152,7 +2152,7 @@ class TestSourceSnapshotting:
         """Snapshot should contain copies of repository files."""
         (git_repo / "source.py").write_text("x = 42")
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2170,7 +2170,7 @@ class TestSourceSnapshotting:
 
     def test_continue_reuses_existing_snapshot(self, git_repo, tmp_path):
         """--continue should detect and reuse existing snapshot."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2226,7 +2226,7 @@ class TestSourceSnapshotting:
 
     def test_snapshot_works_in_repo_with_no_commits(self, git_repo_no_commits, tmp_path):
         """Stash and snapshot should work even in a repo with no prior commits."""
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2264,7 +2264,7 @@ class TestSourceSnapshotting:
         )
         subprocess.check_call(["git", "commit", "-m", "add submodule"], cwd=git_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
 
@@ -2292,7 +2292,7 @@ class TestSourceSnapshotting:
         # Create a marker file in the repo
         (git_repo / "marker.txt").write_text("repo_content")
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             import os
             from pathlib import Path
@@ -2335,7 +2335,7 @@ class TestSourceSnapshotting:
         """Fork executor should keep cwd at the original repo, not the snapshot."""
         (git_repo / "marker.txt").write_text("repo_content")
 
-        @experiment
+        @experiment(name="my_exp")
         def my_exp(config):
             import os
             from pathlib import Path

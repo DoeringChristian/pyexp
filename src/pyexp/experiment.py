@@ -813,9 +813,7 @@ class ExperimentRunner:
         self._configs_fn = fn
         return fn
 
-    def report(
-        self, fn: Callable[[Runs, Path], Any]
-    ) -> Callable[[Runs, Path], Any]:
+    def report(self, fn: Callable[[Runs, Path], Any]) -> Callable[[Runs, Path], Any]:
         """Decorator to register the report function (for decorator API)."""
         self._report_fn = fn
         return fn
@@ -1081,7 +1079,8 @@ class ExperimentRunner:
 
             # Compute experiment directories: base_dir / config_hash / timestamp
             experiment_dirs = [
-                _get_experiment_dir(config, base_dir, timestamp) for config in flat_configs
+                _get_experiment_dir(config, base_dir, timestamp)
+                for config in flat_configs
             ]
 
             # Collect run directory names (<name>-<hash>) for the batch manifest
@@ -1108,8 +1107,11 @@ class ExperimentRunner:
 
                     # Use a temporary path first to get the commit hash
                     import tempfile
+
                     with tempfile.TemporaryDirectory() as tmp:
-                        commit_hash, tmp_snapshot = stash_and_snapshot(Path(tmp) / "src")
+                        commit_hash, tmp_snapshot = stash_and_snapshot(
+                            Path(tmp) / "src"
+                        )
 
                     # Now create the shared snapshot at .snapshots/<commit>/
                     shared_snapshot = base_dir / ".snapshots" / commit_hash
@@ -1372,17 +1374,24 @@ def experiment(
         sig = inspect.signature(f)
         DynamicExperiment._wants_out = len(sig.parameters) >= 2
 
-        # Determine output directory relative to function's file
+        # Determine output directory and default name relative to function's file
         resolved_output_dir = output_dir
-        if resolved_output_dir is None:
-            fn_file = f.__globals__.get("__file__")
-            if fn_file:
-                resolved_output_dir = Path(fn_file).parent / "out"
+        fn_file = f.__globals__.get("__file__")
+        if resolved_output_dir is None and fn_file:
+            resolved_output_dir = Path(fn_file).parent / "out"
+
+        # Default name: <filename>.<function_name>
+        if name:
+            resolved_name = name
+        elif fn_file:
+            resolved_name = f"{Path(fn_file).stem}.{f.__name__}"
+        else:
+            resolved_name = f.__name__
 
         # Create runner with the dynamic class
         runner = ExperimentRunner(
             DynamicExperiment,
-            name=name or f.__name__,
+            name=resolved_name,
             output_dir=resolved_output_dir,
             executor=executor,
             retry=retry,
