@@ -2359,3 +2359,136 @@ class TestSourceSnapshotting:
         )
         assert result.result["marker"] == "snapshot_content"
 
+
+class TestSymlinkGitignored:
+    """Tests for _symlink_gitignored handling of nested .gitignore files."""
+
+    def test_nested_gitignore_symlinks_data(self, tmp_path):
+        """A .gitignore in a subdirectory should cause gitignored entries to be symlinked."""
+        from pyexp.utils import _symlink_gitignored
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+
+        # Create a subdirectory with its own .gitignore
+        data_dir = repo / "data"
+        data_dir.mkdir()
+        (data_dir / "tracked.txt").write_text("tracked")
+        (data_dir / ".gitignore").write_text("large_dataset/\n")
+        large = data_dir / "large_dataset"
+        large.mkdir()
+        (large / "file.bin").write_text("big data")
+
+        # Commit the tracked files (data/ dir, .gitignore, tracked.txt)
+        subprocess.check_call(
+            ["git", "add", "data/.gitignore", "data/tracked.txt"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["git", "commit", "-m", "add data"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Create a snapshot that has data/tracked.txt but not data/large_dataset/
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        snap_data = snapshot / "data"
+        snap_data.mkdir()
+        (snap_data / "tracked.txt").write_text("tracked")
+        (snap_data / ".gitignore").write_text("large_dataset/\n")
+
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            _symlink_gitignored(repo, snapshot)
+        finally:
+            os.chdir(old_cwd)
+
+        # large_dataset should be symlinked into the snapshot
+        symlinked = snap_data / "large_dataset"
+        assert symlinked.is_symlink()
+        assert symlinked.resolve() == large.resolve()
+        assert (symlinked / "file.bin").read_text() == "big data"
+
+    def test_top_level_gitignore_still_works(self, tmp_path):
+        """Top-level gitignored entries should still be symlinked."""
+        from pyexp.utils import _symlink_gitignored
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _init_git_repo(repo)
+
+        (repo / ".gitignore").write_text("ignored_dir/\n")
+        ignored = repo / "ignored_dir"
+        ignored.mkdir()
+        (ignored / "data.bin").write_text("content")
+
+        subprocess.check_call(
+            ["git", "add", ".gitignore"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["git", "commit", "-m", "add gitignore"],
+            cwd=repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        (snapshot / ".gitignore").write_text("ignored_dir/\n")
+
+        old_cwd = os.getcwd()
+        os.chdir(repo)
+        try:
+            _symlink_gitignored(repo, snapshot)
+        finally:
+            os.chdir(old_cwd)
+
+        symlinked = snapshot / "ignored_dir"
+        assert symlinked.is_symlink()
+        assert (symlinked / "data.bin").read_text() == "content"
+
+    def test_snapshot_integration_nested_gitignore(self, git_repo, tmp_path):
+        """Full stash_and_snapshot should symlink nested gitignored dirs."""
+        from pyexp.utils import stash_and_snapshot
+
+        # Create subdirectory with nested .gitignore
+        data_dir = git_repo / "subdir"
+        data_dir.mkdir()
+        (data_dir / "code.py").write_text("x = 1")
+        (data_dir / ".gitignore").write_text("cache/\n")
+        cache_dir = data_dir / "cache"
+        cache_dir.mkdir()
+        (cache_dir / "model.bin").write_text("weights")
+
+        subprocess.check_call(
+            ["git", "add", "subdir/code.py", "subdir/.gitignore"],
+            cwd=git_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.check_call(
+            ["git", "commit", "-m", "add subdir"],
+            cwd=git_repo,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        dest = tmp_path / "snap"
+        commit_hash, snapshot_path = stash_and_snapshot(dest)
+
+        # Tracked file should be in the snapshot directly
+        assert (snapshot_path / "subdir" / "code.py").read_text() == "x = 1"
+        # Gitignored dir should be symlinked
+        cache_in_snap = snapshot_path / "subdir" / "cache"
+        assert cache_in_snap.is_symlink()
+        assert (cache_in_snap / "model.bin").read_text() == "weights"
+
