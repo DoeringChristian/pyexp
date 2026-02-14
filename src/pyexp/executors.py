@@ -148,7 +148,6 @@ class SubprocessExecutor(Executor):
 
             # When snapshot_path is set, remap repo-local sys.path entries
             # to their snapshot equivalents
-            cwd = None
             if snapshot_path is not None:
                 try:
                     from .utils import _find_git_root
@@ -166,7 +165,6 @@ class SubprocessExecutor(Executor):
                         else:
                             remapped.append(p)
                     pythonpath = os.pathsep.join(remapped)
-                    cwd = snapshot_path
                 except Exception:
                     # Fall back to normal sys.path if remapping fails
                     pythonpath = os.pathsep.join(sys.path)
@@ -184,7 +182,6 @@ class SubprocessExecutor(Executor):
                     capture_output=True,
                     text=True,
                     env=env,
-                    cwd=cwd,
                 )
                 log = proc.stdout + proc.stderr
             else:
@@ -192,7 +189,6 @@ class SubprocessExecutor(Executor):
                 proc = subprocess.run(
                     cmd,
                     env=env,
-                    cwd=cwd,
                 )
                 log = ""
 
@@ -282,7 +278,6 @@ class ForkExecutor(Executor):
                             else:
                                 new_path.append(p)
                         sys.path[:] = new_path
-                        os.chdir(snapshot_path)
                     except Exception:
                         pass  # Best-effort: continue without remapping
 
