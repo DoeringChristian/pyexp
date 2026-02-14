@@ -1,7 +1,7 @@
 """Basic example demonstrating pyexp usage."""
 
 import pyexp
-from pyexp import Config, Tensor, sweep
+from pyexp import Config, Runs, sweep
 
 
 @pyexp.experiment(name="")
@@ -69,15 +69,15 @@ def configs() -> list[dict]:
     # Names are "exp_lr0.1_epochs10", "exp_lr0.1_epochs20", etc.
 
     # Pattern matching examples:
-    # cfgs["exp_lr0.1_*"]  -> shape (1, 1, 2), matches both epochs variants
-    # cfgs["*_epochs10"]   -> shape (1, 2, 1), matches both lr variants
+    # cfgs["exp_lr0.1_*"]  -> matches both epochs variants
+    # cfgs["*_epochs10"]   -> matches both lr variants
     # cfgs["exp_lr0.1_epochs10"]  -> single config (exact match)
 
     return cfgs
 
 
 @experiment.report
-def report(results: Tensor, report_dir):
+def report(results: Runs, report_dir):
     """Generate report from all experiment results.
 
     Each experiment instance has: .name, .cfg, .result, .error, .log, .out

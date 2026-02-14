@@ -11,7 +11,7 @@ import pickle
 import re
 import sys
 
-from .config import Config, Tensor
+from .config import Config, Runs
 from .executors import Executor, ExecutorName, get_executor
 from .log import LogReader
 
@@ -46,7 +46,7 @@ class Experiment:
                 return [{"name": "fast", "lr": 0.01}]
 
             @staticmethod
-            def report(results: Tensor["MyExperiment"], out: Path):
+            def report(results: Runs["MyExperiment"], out: Path):
                 for exp in results:
                     print(f"{exp.name}: {exp.accuracy}")
 
@@ -108,8 +108,8 @@ class Experiment:
         raise NotImplementedError("Subclass must implement experiment()")
 
     @staticmethod
-    def configs() -> list[dict] | Tensor:
-        """Return list of configs to run, or a Tensor of configs.
+    def configs() -> list[dict] | Runs:
+        """Return list of configs to run, or a Runs of configs.
 
         Example:
             @staticmethod
@@ -122,16 +122,16 @@ class Experiment:
         raise NotImplementedError("Subclass must implement configs()")
 
     @staticmethod
-    def report(results: Tensor, out: Path) -> Any:
+    def report(results: Runs, out: Path) -> Any:
         """Generate report from experiment results.
 
         Args:
-            results: Tensor of experiment instances with full type info
+            results: Runs of experiment instances with full type info
             out: Path to report directory for saving outputs
 
         Example:
             @staticmethod
-            def report(results: Tensor["MyExperiment"], out: Path):
+            def report(results: Runs["MyExperiment"], out: Path):
                 for exp in results:
                     print(f"{exp.name}: {exp.accuracy}")
         """
@@ -378,15 +378,15 @@ def _get_latest_batch_timestamp(base_dir: Path) -> str | None:
     return manifests[-1].stem
 
 
-def _load_experiments(base_dir: Path, timestamp: str) -> Tensor[Experiment]:
-    """Load all experiments for a batch into a 1D Tensor.
+def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
+    """Load all experiments for a batch into a 1D Runs.
 
     Args:
         base_dir: The experiment base directory.
         timestamp: The batch timestamp.
 
     Returns:
-        1D Tensor of Experiment instances.
+        1D Runs of Experiment instances.
     """
     manifest = _load_batch_manifest(base_dir, timestamp)
     run_names = manifest["runs"]
@@ -410,7 +410,7 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Tensor[Experiment]:
                 f"No experiment found for config '{config_name}' at {experiment_dir}"
             )
 
-    return Tensor(results, (len(results),))
+    return Runs(results)
 
 
 def _generate_timestamp() -> str:
@@ -713,7 +713,7 @@ class ExperimentRunner:
         self._viewer_port_default = viewer_port
         self._stash_default = stash
         self._configs_fn: Callable[[], list[dict]] | None = None
-        self._report_fn: Callable[[Tensor, Path], Any] | None = None
+        self._report_fn: Callable[[Runs, Path], Any] | None = None
         self._current_experiment: Experiment | None = None
         self._chkpt_counter: int = 0
 
@@ -781,8 +781,8 @@ class ExperimentRunner:
         return fn
 
     def report(
-        self, fn: Callable[[Tensor, Path], Any]
-    ) -> Callable[[Tensor, Path], Any]:
+        self, fn: Callable[[Runs, Path], Any]
+    ) -> Callable[[Runs, Path], Any]:
         """Decorator to register the report function (for decorator API)."""
         self._report_fn = fn
         return fn
@@ -793,7 +793,7 @@ class ExperimentRunner:
         output_dir: str | Path | None = None,
         name: str | None = None,
         run: str | None = None,
-    ) -> Tensor[Experiment]:
+    ) -> Runs[Experiment]:
         """Load results from a previous experiment run.
 
         Args:
@@ -801,10 +801,10 @@ class ExperimentRunner:
                       If None or "latest", loads the most recent run.
             output_dir: Base directory where experiment results are stored.
             name: Experiment name. Defaults to class/function name.
-            run: Optional single run name to load (returns 1D Tensor with one element).
+            run: Optional single run name to load (returns 1D Runs with one element).
 
         Returns:
-            1D Tensor of Experiment instances with full attribute access.
+            1D Runs of Experiment instances with full attribute access.
         """
         exp_name = name or self._name
         resolved_output_dir = (
@@ -828,7 +828,7 @@ class ExperimentRunner:
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
-        report: Callable[[Tensor, Path], Any] | None = None,
+        report: Callable[[Runs, Path], Any] | None = None,
         output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,

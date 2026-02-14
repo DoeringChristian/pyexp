@@ -1,7 +1,7 @@
 """Tests for the sweep function."""
 
 import pytest
-from pyexp import sweep, Tensor
+from pyexp import sweep, Runs
 
 
 class TestSweep:
@@ -10,8 +10,7 @@ class TestSweep:
     def test_sweep_from_list(self):
         configs = [{"name": "exp"}]
         result = sweep(configs, [{"lr": 0.1}, {"lr": 0.01}])
-        assert isinstance(result, Tensor)
-        assert result.shape == (1, 2)
+        assert isinstance(result, Runs)
         assert len(result) == 2
 
     def test_sweep_creates_cartesian_product(self):
@@ -28,7 +27,6 @@ class TestSweep:
     def test_sweep_multiple_base_configs(self):
         configs = [{"name": "a"}, {"name": "b"}]
         result = sweep(configs, [{"x": 1}, {"x": 2}])
-        assert result.shape == (2, 2)
         assert len(result) == 4
         assert result[0] == {"name": "a", "x": 1}
         assert result[1] == {"name": "a", "x": 2}
@@ -39,7 +37,6 @@ class TestSweep:
         configs = [{"name": "exp"}]
         configs = sweep(configs, [{"lr": 0.1}, {"lr": 0.01}])
         configs = sweep(configs, [{"epochs": 10}, {"epochs": 20}])
-        assert configs.shape == (1, 2, 2)
         assert len(configs) == 4
 
     def test_sweep_chained_values(self):
@@ -54,17 +51,10 @@ class TestSweep:
         assert {"name": "exp", "lr": 0.01, "epochs": 10} in results
         assert {"name": "exp", "lr": 0.01, "epochs": 20} in results
 
-    def test_sweep_from_tensor(self):
-        configs = Tensor([{"a": 1}, {"a": 2}])
+    def test_sweep_from_runs(self):
+        configs = Runs([{"a": 1}, {"a": 2}])
         result = sweep(configs, [{"b": 10}, {"b": 20}])
-        assert result.shape == (2, 2)
         assert len(result) == 4
-
-    def test_sweep_preserves_shape_from_tensor(self):
-        configs = Tensor([{"a": i} for i in range(6)], shape=(2, 3))
-        result = sweep(configs, [{"b": 1}, {"b": 2}])
-        assert result.shape == (2, 3, 2)
-        assert len(result) == 12
 
     def test_sweep_multiple_params_per_variation(self):
         configs = [{"name": "exp"}]
@@ -81,31 +71,13 @@ class TestSweep:
     def test_sweep_single_variation(self):
         configs = [{"a": 1}]
         result = sweep(configs, [{"b": 2}])
-        assert result.shape == (1, 1)
+        assert len(result) == 1
         assert result[0] == {"a": 1, "b": 2}
 
     def test_sweep_empty_variations(self):
         configs = [{"a": 1}]
         result = sweep(configs, [])
-        assert result.shape == (1, 0)
         assert len(result) == 0
-
-    def test_sweep_indexing_after_chain(self):
-        configs = [{"name": "exp"}]
-        configs = sweep(configs, [{"lr": 0.1}, {"lr": 0.01}])
-        configs = sweep(configs, [{"epochs": 10}, {"epochs": 20}])
-
-        # Get all configs with first lr value
-        first_lr = configs[:, 0, :]
-        assert first_lr.shape == (1, 2)
-        for c in first_lr:
-            assert c["lr"] == 0.1
-
-        # Get all configs with second epochs value
-        second_epochs = configs[:, :, 1]
-        assert second_epochs.shape == (1, 2)
-        for c in second_epochs:
-            assert c["epochs"] == 20
 
     def test_sweep_with_dot_notation(self):
         """Sweep should support dot-notation for nested updates."""
@@ -162,7 +134,7 @@ class TestSweepNames:
 
         # Pattern match
         result = configs["exp_a_*"]
-        assert result.shape == (1, 1, 2)
+        assert len(result) == 2
         assert [c["name"] for c in result] == ["exp_a_0", "exp_a_1"]
 
     def test_sweep_exact_name_match(self):
@@ -193,5 +165,5 @@ class TestSweepNames:
         configs = sweep(configs, [{"name": "x"}, {"name": "y"}])
 
         result = configs["*_x"]
-        assert result.shape == (1, 2, 1)
+        assert len(result) == 2
         assert [c["name"] for c in result] == ["exp_a_x", "exp_b_x"]

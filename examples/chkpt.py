@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pyexp import Experiment, ExperimentRunner, Tensor, chkpt
+from pyexp import Experiment, ExperimentRunner, Runs, chkpt
 
 
 class ChkptExperiment(Experiment):
@@ -50,7 +50,7 @@ class ChkptExperiment(Experiment):
         ]
 
     @staticmethod
-    def report(results: Tensor["ChkptExperiment"], out: Path):
+    def report(results: Runs["ChkptExperiment"], out: Path):
         print("\n=== Experiment Report ===")
         for exp in results:
             print(f"{exp.name}: accuracy={exp.results['accuracy']}")

@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, "src")
 
 import pyexp
-from pyexp import Config, Logger, Tensor
+from pyexp import Config, Logger, Runs
 
 
 @pyexp.experiment(name="demo_logs")
@@ -112,7 +112,7 @@ def configs():
 
 
 @train.report
-def report(results: Tensor, report_dir: Path):
+def report(results: Runs, report_dir: Path):
     """Print final results."""
     from pyexp import LogReader
 

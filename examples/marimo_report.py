@@ -25,7 +25,7 @@ sys.path.insert(0, "src")
 import numpy as np
 
 import pyexp
-from pyexp import Config, Tensor, sweep
+from pyexp import Config, Runs, sweep
 
 
 @pyexp.experiment(name="marimo_report")
@@ -95,7 +95,7 @@ def configs():
 
 
 @experiment.report
-def report(results: Tensor, report_dir: Path):
+def report(results: Runs, report_dir: Path):
     """Generate an HTML report with interactive 3D figures using marimo."""
     import marimo
 

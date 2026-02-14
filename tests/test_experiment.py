@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from pyexp import Config, Tensor, experiment, sweep, Experiment, ExperimentRunner
+from pyexp import Config, Runs, experiment, sweep, Experiment, ExperimentRunner
 
 
 class TestExperimentDecorator:
@@ -378,7 +378,7 @@ class TestExperimentRun:
         assert result == [4, 9, 16]
 
     def test_report_receives_tensor(self, tmp_path):
-        """Report function should receive results as Tensor."""
+        """Report function should receive results as Runs."""
         received_results = None
 
         @experiment
@@ -398,8 +398,8 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert isinstance(received_results, Tensor)
-        assert received_results.shape == (2,)
+        assert isinstance(received_results, Runs)
+        assert len(received_results) == 2
 
     def test_results_contain_config_and_name(self, tmp_path):
         """Each result should contain the cfg and name."""
@@ -457,7 +457,7 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         # Results are always 1D now
-        assert received_results.shape == (4,)
+        assert len(received_results) == 4
 
         # Filter by cfg.x
         x1_results = received_results[{"cfg.x": 1}]
@@ -492,7 +492,7 @@ class TestExperimentRun:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         # Results are always 1D
-        assert received_results.shape == (4,)
+        assert len(received_results) == 4
         # Can still access by name pattern
         exp_a_c = received_results["exp_a_c"]
         assert exp_a_c.cfg["x"] == 1
@@ -693,7 +693,7 @@ class TestResultsMethod:
         # Load results
         results = my_exp.results(output_dir=tmp_path)
 
-        assert results.shape == (1,)
+        assert len(results) == 1
         assert results[0].cfg["name"] == "test"
         assert results[0].cfg["x"] == 5
         assert results[0].result["value"] == 10
@@ -745,7 +745,7 @@ class TestResultsMethod:
         assert results_latest[0].result["value"] == 99
 
     def test_results_always_1d(self, tmp_path):
-        """results() always returns a 1D Tensor regardless of sweep shape."""
+        """results() always returns a 1D Runs regardless of sweep shape."""
 
         @experiment
         def my_exp(config):
@@ -768,7 +768,7 @@ class TestResultsMethod:
         results = my_exp.results(output_dir=tmp_path)
 
         # Results are always 1D
-        assert results.shape == (4,)
+        assert len(results) == 4
 
     def test_results_no_runs_raises(self, tmp_path):
         """results() raises FileNotFoundError when no runs exist."""
@@ -1279,7 +1279,7 @@ class TestSubprocessExecution:
             results = my_exp.run(output_dir=tmp_path, executor="subprocess")
 
         # Results are always 1D
-        assert results.shape == (4,)
+        assert len(results) == 4
         # Access by name
         assert results["exp_a_c"].result["value"] == 11  # x=1, y=10
         assert results["exp_b_d"].result["value"] == 22  # x=2, y=20

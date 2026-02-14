@@ -1,10 +1,10 @@
-"""Configuration utilities: Config, Tensor, merge, sweep, load_config, registry."""
+"""Configuration utilities: Config, Runs, merge, sweep, load_config, registry."""
 
 from __future__ import annotations
 
 import fnmatch
 from pathlib import Path
-from typing import Any, Generic, Iterator, TypeVar, overload
+from typing import Any, Generic, Iterator, TypeVar
 
 import yaml
 
@@ -234,231 +234,104 @@ def merge(base: dict, update: dict) -> dict:
 
 
 
-class Tensor(Generic[_T]):
-    """A tensor-like container that tracks shape across sweeps.
+class Runs(Generic[_T]):
+    """A flat, named collection of items (configs or experiment results).
 
-    Stores data in a flattened list while tracking the shape from successive
-    sweep operations. Supports advanced indexing to select elements along dimensions.
-    Used for both configs and results to enable matching access patterns.
+    Supports lookup by integer index, name pattern (glob-style), or
+    dict-based filtering on item attributes.
 
     Example:
-        configs = Tensor([{"name": "exp"}])  # shape: (1,)
-        configs = sweep(configs, [{"name": "a", "lr": 0.1}, {"name": "b", "lr": 0.01}])  # shape: (1, 2)
-        configs = sweep(configs, [{"name": "x", "epochs": 10}, {"name": "y", "epochs": 20}])  # shape: (1, 2, 2)
+        configs = Runs([{"name": "exp_a", "lr": 0.1}, {"name": "exp_b", "lr": 0.01}])
 
-        # Index along dimensions
-        configs[:, 0, :]  # All configs with first lr value
-        configs[:, :, 1]  # All configs with second epochs value
+        # Integer index
+        configs[0]  # {"name": "exp_a", "lr": 0.1}
 
-        # Pattern matching on combined name (glob-style)
-        configs["exp_a_*"]  # All configs matching pattern, shape (1, 1, 2)
-        configs["exp_*_x"]  # All configs matching pattern, shape (1, 2, 1)
+        # Pattern matching on name (glob-style)
+        configs["exp_*"]  # Runs with all matching items
+        configs["exp_a"]  # Single item if exactly one match
 
-        # Dict matching on config values
-        configs[{"lr": 0.1}]  # All configs where lr == 0.1
-        configs[{"lr": 0.1, "epochs": 10}]  # Match multiple values
+        # Dict matching on values
+        configs[{"lr": 0.1}]  # All items where lr == 0.1
         configs[{"mlp.width": 32}]  # Dot notation for nested keys
     """
 
-    def __init__(self, data: list[_T], shape: tuple[int, ...] | None = None):
-        """Create a Tensor.
+    def __init__(self, data: list[_T]):
+        """Create a Runs collection.
 
         Args:
-            data: List of items (flattened).
-            shape: Shape tuple. If None, inferred as (len(data),).
+            data: List of items.
         """
         self._data = list(data)
-        self._shape = shape if shape is not None else (len(data),)
-        expected_size = 1
-        for dim in self._shape:
-            expected_size *= dim
-        if expected_size != len(self._data):
-            raise ValueError(
-                f"Shape {self._shape} does not match data length {len(self._data)}"
-            )
-
-    @property
-    def shape(self) -> tuple[int, ...]:
-        """Return the shape of the config tensor."""
-        return self._shape
 
     def __len__(self) -> int:
-        """Return total number of configs."""
+        """Return total number of items."""
         return len(self._data)
 
     def __iter__(self) -> Iterator[_T]:
-        """Iterate over all configs (flattened)."""
+        """Iterate over all items."""
         return iter(self._data)
 
-    def _multi_index(self, flat_idx: int) -> tuple[int, ...]:
-        """Convert flat index to multi-dimensional indices."""
-        indices = []
-        for dim_size in reversed(self._shape):
-            indices.append(flat_idx % dim_size)
-            flat_idx //= dim_size
-        return tuple(reversed(indices))
+    def __getitem__(self, key: int | str | dict) -> "_T | Runs[_T]":
+        """Look up items by index, name pattern, or dict filter.
 
-    def _flat_index(self, indices: tuple[int, ...]) -> int:
-        """Convert multi-dimensional indices to flat index."""
-        flat = 0
-        stride = 1
-        for i in range(len(indices) - 1, -1, -1):
-            flat += indices[i] * stride
-            stride *= self._shape[i]
-        return flat
-
-    @overload
-    def __getitem__(self, key: int) -> _T: ...
-    @overload
-    def __getitem__(self, key: str) -> "Tensor[_T]": ...
-    @overload
-    def __getitem__(self, key: dict) -> "Tensor[_T]": ...
-    @overload
-    def __getitem__(self, key: tuple) -> "_T | Tensor[_T]": ...
-
-    def __getitem__(self, key: int | str | dict | tuple) -> "_T | Tensor[_T]":
-        """Advanced indexing to select elements along dimensions.
-
-        Supports integers, slices, and tuples of these, plus pattern matching.
-        - Single integer: flat index into data (for backwards compatibility)
-        - Single string: pattern match on config["name"] (glob-style with *)
-        - Dict/Config: match configs where all key-value pairs match
-        - Tuple of int/slice: multi-dimensional indexing
-        Returns a new Tensor or single element.
+        - int: flat index into data
+        - str: pattern match on item name (glob-style with *)
+        - dict: match items where all key-value pairs match
+        Returns a single item or a new Runs collection.
         """
-        # Single integer = flat index for backwards compatibility
         if isinstance(key, int):
             if key < 0:
                 key = len(self._data) + key
             return self._data[key]
 
-        # Single string = pattern matching on name
         if isinstance(key, str):
             return self._match_pattern(key)
 
-        # Dict = match by key-value pairs
         if isinstance(key, dict):
             return self._match_dict(key)
 
-        if not isinstance(key, tuple):
-            key = (key,)
+        raise TypeError(f"Invalid index type: {type(key)}")
 
-        # Pad key with slices for remaining dimensions
-        key = key + (slice(None),) * (len(self._shape) - len(key))
+    def _match_pattern(self, pattern: str) -> "_T | Runs[_T]":
+        """Match items by name pattern (glob-style).
 
-        if len(key) != len(self._shape):
-            raise IndexError(
-                f"Too many indices: got {len(key)}, shape has {len(self._shape)} dimensions"
-            )
-
-        # Convert each key element to a list of indices
-        index_lists = []
-        new_shape = []
-        for dim, (k, dim_size) in enumerate(zip(key, self._shape)):
-            if isinstance(k, int):
-                if k < 0:
-                    k = dim_size + k
-                if k < 0 or k >= dim_size:
-                    raise IndexError(
-                        f"Index {k} out of range for dimension of size {dim_size}"
-                    )
-                index_lists.append([k])
-                # Integer index collapses dimension (not added to new_shape)
-            elif isinstance(k, slice):
-                indices = list(range(*k.indices(dim_size)))
-                index_lists.append(indices)
-                new_shape.append(len(indices))
-            else:
-                raise TypeError(f"Invalid index type: {type(k)}")
-
-        # Generate all combinations of indices
-        selected_data = []
-        self._select_recursive(index_lists, 0, [], selected_data)
-
-        # If all dimensions collapsed, return single element
-        if not new_shape:
-            return self._data[self._flat_index(tuple(il[0] for il in index_lists))]
-
-        return Tensor(selected_data, tuple(new_shape))
-
-    def _match_pattern(self, pattern: str) -> "Tensor":
-        """Match configs by name pattern (glob-style).
-
-        Returns a Tensor with the same number of dimensions, but with
-        each dimension's size reduced to the number of unique indices
-        that matched along that dimension.
+        Returns a single item if exactly one match, otherwise a new Runs.
         """
-        # Find all matching indices
-        matching_multi_indices: list[tuple[int, ...]] = []
-        for flat_idx, item in enumerate(self._data):
+        matching = []
+        for item in self._data:
             if isinstance(item, dict):
                 name = item.get("name", "")
             else:
                 name = getattr(item, "name", "") or ""
             if fnmatch.fnmatch(name, pattern):
-                matching_multi_indices.append(self._multi_index(flat_idx))
+                matching.append(item)
 
-        if not matching_multi_indices:
+        if not matching:
             raise IndexError(f"No configs match pattern '{pattern}'")
 
-        # Find unique indices per dimension and build mapping
-        unique_per_dim: list[list[int]] = [[] for _ in self._shape]
-        for indices in matching_multi_indices:
-            for dim, idx in enumerate(indices):
-                if idx not in unique_per_dim[dim]:
-                    unique_per_dim[dim].append(idx)
+        if len(matching) == 1:
+            return matching[0]
 
-        # Sort unique indices to maintain order
-        for dim_indices in unique_per_dim:
-            dim_indices.sort()
+        return Runs(matching)
 
-        # Build new shape
-        new_shape = tuple(len(indices) for indices in unique_per_dim)
-
-        # Build new data in correct order
-        selected_data = []
-        self._select_recursive(unique_per_dim, 0, [], selected_data)
-
-        # If single element, return it directly
-        if all(s == 1 for s in new_shape):
-            return self._data[self._flat_index(matching_multi_indices[0])]
-
-        return Tensor(selected_data, new_shape)
-
-    def _match_dict(self, query: dict) -> "Tensor":
+    def _match_dict(self, query: dict) -> "_T | Runs[_T]":
         """Match items by key-value pairs.
 
-        Returns items where all query key-value pairs match.
-        Supports dot-notation keys (e.g., "cfg.x": 1) for attribute/dict access.
-        Works with both dict items and objects with attributes.
+        Returns a single item if exactly one match, otherwise a new Runs.
+        Supports dot-notation keys for attribute/dict access.
         """
-        matching_multi_indices: list[tuple[int, ...]] = []
-        for flat_idx, item in enumerate(self._data):
+        matching = []
+        for item in self._data:
             if self._item_matches(item, query):
-                matching_multi_indices.append(self._multi_index(flat_idx))
+                matching.append(item)
 
-        if not matching_multi_indices:
+        if not matching:
             raise IndexError(f"No configs match query {query}")
 
-        # Find unique indices per dimension
-        unique_per_dim: list[list[int]] = [[] for _ in self._shape]
-        for indices in matching_multi_indices:
-            for dim, idx in enumerate(indices):
-                if idx not in unique_per_dim[dim]:
-                    unique_per_dim[dim].append(idx)
+        if len(matching) == 1:
+            return matching[0]
 
-        for dim_indices in unique_per_dim:
-            dim_indices.sort()
-
-        new_shape = tuple(len(indices) for indices in unique_per_dim)
-
-        selected_data = []
-        self._select_recursive(unique_per_dim, 0, [], selected_data)
-
-        if all(s == 1 for s in new_shape):
-            return self._data[self._flat_index(matching_multi_indices[0])]
-
-        return Tensor(selected_data, new_shape)
+        return Runs(matching)
 
     def _item_matches(self, item: Any, query: dict) -> bool:
         """Check if item matches all key-value pairs in query.
@@ -500,63 +373,44 @@ class Tensor(Generic[_T]):
                 value = getattr(value, part)
         return value
 
-    def _dict_matches(self, config: dict, query: dict) -> bool:
-        """Check if config matches all key-value pairs in query.
-
-        Deprecated: use _item_matches instead which handles both dicts and objects.
-        """
-        return self._item_matches(config, query)
-
-    def _select_recursive(
-        self, index_lists: list[list[int]], dim: int, current: list[int], result: list
-    ):
-        """Recursively select configs based on index lists."""
-        if dim == len(index_lists):
-            result.append(self._data[self._flat_index(tuple(current))])
-            return
-        for idx in index_lists[dim]:
-            self._select_recursive(index_lists, dim + 1, current + [idx], result)
-
     def tolist(self) -> list[_T]:
         """Return data as a flat list."""
         return list(self._data)
 
     def __repr__(self) -> str:
-        return f"Tensor(shape={self._shape}, len={len(self._data)})"
+        return f"Runs(len={len(self._data)})"
 
 
-def sweep(configs: list[dict] | Tensor, variations: list[dict]) -> Tensor:
+def sweep(configs: list[dict] | Runs, variations: list[dict]) -> Runs:
     """Generate cartesian product of configs and parameter variations.
 
     Each config is combined with each variation using merge(), which supports
-    dot-notation for nested key access. Returns a Tensor with an additional
-    dimension for the variations.
+    dot-notation for nested key access. Returns a Runs collection containing
+    all combinations.
 
     The "name" key is handled specially: names are combined with underscore
     separator (e.g., "exp" + "lr0.1" -> "exp_lr0.1"). This enables pattern-based
     selection: configs["exp_lr0.1_*"] matches all configs with that prefix.
 
     Args:
-        configs: Base configurations to expand (list or Tensor).
+        configs: Base configurations to expand (list or Runs).
         variations: List of parameter variations to sweep over.
             Keys can use dot-notation for nested access (e.g., "mlp.width").
             Each variation should have a "name" key for pattern matching.
 
     Returns:
-        Tensor with shape (*old_shape, len(variations)).
+        Runs collection with all combinations.
 
     Example:
         configs = [{"name": "exp", "mlp": {"width": 32}}]
         configs = sweep(configs, [{"name": "w64", "mlp.width": 64}, {"name": "w128", "mlp.width": 128}])
-        # Returns Tensor with shape (1, 2)
+        # Returns Runs(len=2)
         # Config names become "exp_w64", "exp_w128"
         # Access via: configs["exp_w64"] or configs["exp_*"]
     """
-    if isinstance(configs, Tensor):
-        old_shape = configs.shape
+    if isinstance(configs, Runs):
         old_data = configs._data
     else:
-        old_shape = (len(configs),)
         old_data = list(configs)
 
     result = []
@@ -573,8 +427,7 @@ def sweep(configs: list[dict] | Tensor, variations: list[dict]) -> Tensor:
             # else keep base_name or no name
             result.append(merged)
 
-    new_shape = old_shape + (len(variations),)
-    return Tensor(result, new_shape)
+    return Runs(result)
 
 
 def load_config(paths: list[Path] | Path | str | list[str]) -> Config:
@@ -644,7 +497,3 @@ def load_config(paths: list[Path] | Path | str | list[str]) -> Config:
         result = merge(result, cfg)
 
     return Config(result)
-
-
-# Type alias for common Tensor type
-ConfigTensor = Tensor[Config]

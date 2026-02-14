@@ -47,6 +47,7 @@ if __name__ == "__main__":
     results = exp.results()
     print(f"\nLoaded {len(list(results))} results from latest run")
     print(f"{results[0].cfg=}")
+    print(f"{results['fast'].cfg=}")
 
     # Access output directory via exp.out
     print(f"Output dir: {results[0].out}")

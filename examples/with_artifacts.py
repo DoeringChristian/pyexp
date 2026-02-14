@@ -6,7 +6,7 @@ use the class-based Experiment API which provides access to self.out.
 
 import json
 from pathlib import Path
-from pyexp import Experiment, ExperimentRunner, Tensor
+from pyexp import Experiment, ExperimentRunner, Runs
 
 
 class ArtifactExperiment(Experiment):
@@ -47,7 +47,7 @@ class ArtifactExperiment(Experiment):
         ]
 
     @staticmethod
-    def report(results: Tensor["ArtifactExperiment"], report_dir: Path):
+    def report(results: Runs["ArtifactExperiment"], report_dir: Path):
         """Print summary report."""
         print("\n=== Results ===")
         for exp in results:

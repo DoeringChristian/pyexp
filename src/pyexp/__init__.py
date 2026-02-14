@@ -2,8 +2,7 @@
 
 from .config import (
     Config,
-    ConfigTensor,
-    Tensor,
+    Runs,
     build,
     load_config,
     merge,
@@ -26,8 +25,7 @@ from .log import LazyFigure, Logger, LogReader
 
 __all__ = [
     "Config",
-    "ConfigTensor",
-    "Tensor",
+    "Runs",
     "build",
     "load_config",
     "merge",

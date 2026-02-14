@@ -1,7 +1,7 @@
 """Example demonstrating the class-based Experiment API."""
 
 from pathlib import Path
-from pyexp import Experiment, ExperimentRunner, Tensor
+from pyexp import Experiment, ExperimentRunner, Runs
 
 
 class MyExperiment(Experiment):
@@ -39,11 +39,11 @@ class MyExperiment(Experiment):
         ]
 
     @staticmethod
-    def report(results: Tensor["MyExperiment"], out: Path):
+    def report(results: Runs["MyExperiment"], out: Path):
         """Generate report from results.
 
         Args:
-            results: Tensor of MyExperiment instances with full type info
+            results: Runs of MyExperiment instances with full type info
             out: Path to report directory for saving outputs
         """
         print("\n=== Experiment Report ===")
