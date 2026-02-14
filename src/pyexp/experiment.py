@@ -5,6 +5,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Callable, Any, TYPE_CHECKING
 import argparse
+import hashlib
 import json
 import os
 import pickle
@@ -279,6 +280,17 @@ def _sanitize_name(name: str) -> str:
     return name
 
 
+def _config_hash(config: dict) -> str:
+    """Generate a short hash of the config for directory naming.
+
+    Hashes all config values except 'name', so configs with the same
+    parameters but different names map to the same directory.
+    """
+    config_without_name = {k: v for k, v in config.items() if k != "name"}
+    config_str = json.dumps(config_without_name, sort_keys=True, default=str)
+    return hashlib.sha256(config_str.encode()).hexdigest()[:12]
+
+
 def _validate_unique_names(configs: list[dict]) -> None:
     """Validate all configs have unique non-empty 'name' fields.
 
@@ -305,13 +317,34 @@ def _validate_unique_names(configs: list[dict]) -> None:
         seen.add(name)
 
 
+def _validate_unique_hashes(configs: list[dict]) -> None:
+    """Validate all configs produce unique hashes (unique parameter sets).
+
+    Two configs with different names but identical parameters would collide
+    on disk since the directory is based on the config hash (excluding name).
+
+    Raises:
+        ValueError: If any two configs produce the same hash.
+    """
+    seen: dict[str, str] = {}  # hash -> first config name
+    for config in configs:
+        h = _config_hash(config)
+        name = config.get("name", "unnamed")
+        if h in seen:
+            raise ValueError(
+                f"Configs '{seen[h]}' and '{name}' have the same parameters (hash {h}). "
+                f"Each config must have unique parameters."
+            )
+        seen[h] = name
+
+
 def _get_experiment_dir(config: dict, base_dir: Path, timestamp: str) -> Path:
     """Get the experiment directory path for a config.
 
-    Returns base_dir / sanitized_name / timestamp (no hash).
+    Returns base_dir / <name>-<config_hash> / timestamp.
     """
     name = _sanitize_name(config.get("name", "experiment"))
-    return base_dir / name / timestamp
+    return base_dir / f"{name}-{_config_hash(config)}" / timestamp
 
 
 def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
@@ -330,14 +363,14 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
 
 
 def _save_batch_manifest(
-    base_dir: Path, timestamp: str, run_names: list[str], commit: str | None = None
+    base_dir: Path, timestamp: str, run_hashes: list[str], commit: str | None = None
 ) -> None:
     """Save batch manifest to .batches/<timestamp>.json.
 
     Args:
         base_dir: The experiment base directory (e.g., out/experiment_name).
         timestamp: The timestamp string for this batch.
-        run_names: List of run names (sanitized config names).
+        run_hashes: List of config hashes for each run.
         commit: Optional git commit hash of the source snapshot.
     """
     batches_dir = base_dir / ".batches"
@@ -345,7 +378,7 @@ def _save_batch_manifest(
 
     data = {
         "timestamp": timestamp,
-        "runs": run_names,
+        "runs": run_hashes,
     }
     if commit is not None:
         data["commit"] = commit
@@ -389,11 +422,11 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
         1D Runs of Experiment instances.
     """
     manifest = _load_batch_manifest(base_dir, timestamp)
-    run_names = manifest["runs"]
+    run_hashes = manifest["runs"]
 
     results = []
-    for run_name in run_names:
-        experiment_dir = base_dir / run_name / timestamp
+    for run_hash in run_hashes:
+        experiment_dir = base_dir / run_hash / timestamp
         experiment_path = experiment_dir / "experiment.pkl"
 
         if experiment_path.exists():
@@ -433,13 +466,13 @@ def _list_runs(base_dir: Path) -> None:
     for manifest_path in manifests:
         timestamp = manifest_path.stem
         data = json.loads(manifest_path.read_text())
-        run_names = data.get("runs", [])
+        run_hashes = data.get("runs", [])
 
-        total = len(run_names)
+        total = len(run_hashes)
         completed = 0
         failed = 0
-        for run_name in run_names:
-            experiment_path = base_dir / run_name / timestamp / "experiment.pkl"
+        for run_hash in run_hashes:
+            experiment_path = base_dir / run_hash / timestamp / "experiment.pkl"
             if experiment_path.exists():
                 try:
                     with open(experiment_path, "rb") as f:
@@ -1043,13 +1076,19 @@ class ExperimentRunner:
             # Validate unique names (after flattening)
             _validate_unique_names(flat_configs)
 
-            # Compute experiment directories: base_dir / sanitized_name / timestamp
+            # Validate unique hashes (different names but same params would collide)
+            _validate_unique_hashes(flat_configs)
+
+            # Compute experiment directories: base_dir / config_hash / timestamp
             experiment_dirs = [
                 _get_experiment_dir(config, base_dir, timestamp) for config in flat_configs
             ]
 
-            # Collect sanitized run names for the batch manifest
-            run_names = [_sanitize_name(config.get("name", "experiment")) for config in flat_configs]
+            # Collect run directory names (<name>-<hash>) for the batch manifest
+            run_hashes = [
+                f"{_sanitize_name(config.get('name', 'experiment'))}-{_config_hash(config)}"
+                for config in flat_configs
+            ]
 
             # Build configs (without 'out')
             configs_for_save = []
@@ -1086,7 +1125,7 @@ class ExperimentRunner:
                     commit_hash = None
 
             # Save batch manifest
-            _save_batch_manifest(base_dir, timestamp, run_names, commit=commit_hash)
+            _save_batch_manifest(base_dir, timestamp, run_hashes, commit=commit_hash)
 
             # Create all experiment directories and save individual config.json files
             for config, experiment_dir in zip(configs_for_save, experiment_dirs):
@@ -1105,8 +1144,8 @@ class ExperimentRunner:
         if not args.report:
             # Load from batch manifest
             manifest = _load_batch_manifest(base_dir, timestamp)
-            run_names = manifest["runs"]
-            experiment_dirs = [base_dir / rn / timestamp for rn in run_names]
+            run_hashes = manifest["runs"]
+            experiment_dirs = [base_dir / rh / timestamp for rh in run_hashes]
 
             # Apply filter if specified
             if args.filter:

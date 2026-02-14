@@ -581,10 +581,10 @@ class TestExperimentRun:
         @my_exp.configs
         def configs():
             return [
-                {"name": "lr_0.01_batch_32"},
-                {"name": "lr_0.01_batch_64"},
-                {"name": "lr_0.001_batch_32"},
-                {"name": "lr_0.001_batch_64"},
+                {"name": "lr_0.01_batch_32", "lr": 0.01, "batch": 32},
+                {"name": "lr_0.01_batch_64", "lr": 0.01, "batch": 64},
+                {"name": "lr_0.001_batch_32", "lr": 0.001, "batch": 32},
+                {"name": "lr_0.001_batch_64", "lr": 0.001, "batch": 64},
             ]
 
         @my_exp.report
@@ -612,7 +612,7 @@ class TestExperimentRun:
 
         @my_exp.configs
         def configs():
-            return [{"name": "alpha"}, {"name": "beta"}]
+            return [{"name": "alpha", "x": 1}, {"name": "beta", "x": 2}]
 
         @my_exp.report
         def report(results, out):
@@ -638,9 +638,9 @@ class TestExperimentRun:
         @my_exp.configs
         def configs():
             return [
-                {"name": "exp_a"},
-                {"name": "exp_b"},
-                {"name": "other_c"},
+                {"name": "exp_a", "x": 1},
+                {"name": "exp_b", "x": 2},
+                {"name": "other_c", "x": 3},
             ]
 
         @my_exp.report
@@ -802,8 +802,9 @@ class TestResultsMethod:
             my_exp.results(timestamp="1999-01-01_00-00-00", output_dir=tmp_path)
 
     def test_batch_manifest_saved(self, tmp_path):
-        """run() saves .batches/<timestamp>.json with run names."""
+        """run() saves .batches/<timestamp>.json with config hashes."""
         import json
+        from pyexp.experiment import _config_hash
 
         @experiment
         def my_exp(config):
@@ -833,13 +834,17 @@ class TestResultsMethod:
 
         data = json.loads(manifests[0].read_text())
         assert len(data["runs"]) == 2
-        assert data["runs"] == ["a", "b"]
+        expected_hashes = [
+            f"a-{_config_hash({'name': 'a', 'x': 1})}",
+            f"b-{_config_hash({'name': 'b', 'x': 2})}",
+        ]
+        assert data["runs"] == expected_hashes
         assert "timestamp" in data
 
-        # Individual config.json files should exist at <run_name>/<timestamp>/config.json
+        # Individual config.json files should exist at <hash>/<timestamp>/config.json
         timestamp = data["timestamp"]
-        for run_name in data["runs"]:
-            config_json = base_dir / run_name / timestamp / "config.json"
+        for run_hash in data["runs"]:
+            config_json = base_dir / run_hash / timestamp / "config.json"
             assert config_json.exists()
             config_data = json.loads(config_json.read_text())
             assert "x" in config_data
@@ -867,7 +872,8 @@ class TestOutputFolderStructure:
         assert my_exp._name == "mnist_classifier"
 
     def test_new_directory_layout(self, tmp_path):
-        """Output uses <experiment>/<run_name>/<timestamp>/ layout."""
+        """Output uses <experiment>/<config_hash>/<timestamp>/ layout."""
+        from pyexp.experiment import _config_hash
 
         @experiment(name="test_exp")
         def my_exp(config):
@@ -884,16 +890,17 @@ class TestOutputFolderStructure:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Check structure: tmp_path/test_exp/cfg/<timestamp>/
+        # Check structure: tmp_path/test_exp/<hash>/<timestamp>/
         exp_dir = tmp_path / "test_exp"
         assert exp_dir.exists()
 
-        # Should have run name dir and hidden dirs (.batches, report)
-        cfg_dir = exp_dir / "cfg"
-        assert cfg_dir.exists()
+        # Should have <name>-<hash> dir
+        expected_hash = _config_hash({"name": "cfg", "x": 1})
+        hash_dir = exp_dir / f"cfg-{expected_hash}"
+        assert hash_dir.exists()
 
-        # cfg dir should have a timestamp subdir
-        timestamp_dirs = [d for d in cfg_dir.iterdir() if d.is_dir()]
+        # hash dir should have a timestamp subdir
+        timestamp_dirs = [d for d in hash_dir.iterdir() if d.is_dir()]
         assert len(timestamp_dirs) == 1
 
         # Timestamp dir should contain experiment files
@@ -2095,9 +2102,9 @@ class TestSourceSnapshotting:
         commit = data["commit"]
 
         # Each run dir should have a .commit file
-        for run_name in data["runs"]:
-            commit_file = base_dir / run_name / data["timestamp"] / ".commit"
-            assert commit_file.exists(), f".commit should exist in {run_name} run dir"
+        for run_hash in data["runs"]:
+            commit_file = base_dir / run_hash / data["timestamp"] / ".commit"
+            assert commit_file.exists(), f".commit should exist in {run_hash} run dir"
             assert commit_file.read_text() == commit
 
     def test_no_commit_hash_without_stash(self, git_repo, tmp_path):
