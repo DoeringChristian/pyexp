@@ -43,6 +43,11 @@ def run_worker(payload_path: str) -> int:
         instance = payload["instance"]
         result_path = Path(payload["result_path"])
 
+        # Restore transient deps if provided
+        deps = payload.get("deps")
+        if deps is not None:
+            instance._Experiment__deps = deps
+
         # Run the experiment
         instance.experiment()
 

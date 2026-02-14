@@ -60,6 +60,8 @@ class Experiment:
     _Experiment__out: Path | None = None
     _Experiment__error: str | None = None
     _Experiment__log: str = ""
+    _Experiment__deps: "Runs[Experiment] | None" = None
+    _Experiment__skipped: bool = False
 
     @property
     def cfg(self) -> Config:
@@ -95,6 +97,29 @@ class Experiment:
         if self._Experiment__cfg is None:
             return ""
         return self._Experiment__cfg.get("name", "")
+
+    @property
+    def deps(self) -> "Runs[Experiment]":
+        """Completed dependency experiments for this run."""
+        if self._Experiment__deps is None:
+            return Runs([])
+        return self._Experiment__deps
+
+    @property
+    def skipped(self) -> bool:
+        """Whether this experiment was skipped due to a failed dependency."""
+        return self._Experiment__skipped
+
+    def __getstate__(self) -> dict:
+        """Exclude transient deps from pickle serialization."""
+        state = self.__dict__.copy()
+        state.pop("_Experiment__deps", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state from pickle, setting deps to None."""
+        self.__dict__.update(state)
+        self._Experiment__deps = None
 
     def experiment(self) -> None:
         """User implements this to define the experiment.
@@ -286,8 +311,10 @@ def _config_hash(config: dict) -> str:
     Hashes all config values except 'name', so configs with the same
     parameters but different names map to the same directory.
     """
-    config_without_name = {k: v for k, v in config.items() if k != "name"}
-    config_str = json.dumps(config_without_name, sort_keys=True, default=str)
+    config_without_meta = {
+        k: v for k, v in config.items() if k not in ("name", "depends_on")
+    }
+    config_str = json.dumps(config_without_meta, sort_keys=True, default=str)
     return hashlib.sha256(config_str.encode()).hexdigest()[:12]
 
 
@@ -336,6 +363,120 @@ def _validate_unique_hashes(configs: list[dict]) -> None:
                 f"Each config must have unique parameters."
             )
         seen[h] = name
+
+
+def _normalize_depends_on(deps: Any) -> list[str]:
+    """Normalize a depends_on value to a list of pattern strings."""
+    if deps is None:
+        return []
+    if isinstance(deps, str):
+        return [deps]
+    return list(deps)
+
+
+def _resolve_dep_patterns(patterns: list[str], all_names: set[str], config_name: str) -> list[str]:
+    """Resolve dependency regex patterns to concrete config names.
+
+    Each pattern is treated as a regex (using re.search for substring matching).
+    Use ^ and $ anchors for exact matching.
+
+    Raises:
+        ValueError: If a pattern matches no configs, or matches the config itself.
+    """
+    resolved: list[str] = []
+    for pattern in patterns:
+        regex = re.compile(pattern)
+        matches = [n for n in sorted(all_names) if regex.search(n)]
+        if not matches:
+            raise ValueError(
+                f"Config '{config_name}' depends on pattern '{pattern}', "
+                f"which matches no config in this batch."
+            )
+        for m in matches:
+            if m == config_name:
+                raise ValueError(f"Config '{config_name}' depends on itself (via pattern '{pattern}').")
+            if m not in resolved:
+                resolved.append(m)
+    return resolved
+
+
+def _validate_dependencies(configs: list[dict]) -> None:
+    """Validate depends_on references and detect cycles.
+
+    depends_on values are regex patterns matched against config names.
+
+    Raises:
+        ValueError: If a dependency pattern matches no config,
+                    a config depends on itself, or there is a cycle.
+    """
+    names = {c["name"] for c in configs}
+
+    # Build adjacency for cycle detection: name -> list of resolved dependency names
+    adj: dict[str, list[str]] = {}
+    for config in configs:
+        config_name = config["name"]
+        patterns = _normalize_depends_on(config.get("depends_on"))
+        resolved = _resolve_dep_patterns(patterns, names, config_name)
+        adj[config_name] = resolved
+
+    # Cycle detection via DFS
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {name: WHITE for name in names}
+
+    def dfs(node: str, path: list[str]) -> None:
+        color[node] = GRAY
+        path.append(node)
+        for neighbor in adj.get(node, []):
+            if color[neighbor] == GRAY:
+                cycle_start = path.index(neighbor)
+                cycle = path[cycle_start:] + [neighbor]
+                raise ValueError(
+                    f"Dependency cycle detected: {' -> '.join(cycle)}"
+                )
+            if color[neighbor] == WHITE:
+                dfs(neighbor, path)
+        path.pop()
+        color[node] = BLACK
+
+    for name in names:
+        if color[name] == WHITE:
+            dfs(name, [])
+
+
+def _topological_sort(configs: list[dict]) -> list[dict]:
+    """Return configs in dependency order (Kahn's algorithm).
+
+    depends_on patterns are resolved to concrete names via regex.
+    Configs with no dependencies come first.
+    """
+    all_names = {c["name"] for c in configs}
+    name_to_config = {c["name"]: c for c in configs}
+    in_degree: dict[str, int] = {c["name"]: 0 for c in configs}
+    dependents: dict[str, list[str]] = {c["name"]: [] for c in configs}
+
+    for config in configs:
+        patterns = _normalize_depends_on(config.get("depends_on"))
+        resolved = _resolve_dep_patterns(patterns, all_names, config["name"])
+        in_degree[config["name"]] = len(resolved)
+        for dep in resolved:
+            dependents[dep].append(config["name"])
+
+    # Start with nodes that have no dependencies
+    queue = [name for name, deg in in_degree.items() if deg == 0]
+    result: list[dict] = []
+
+    while queue:
+        node = queue.pop(0)
+        result.append(name_to_config[node])
+        for dependent in dependents[node]:
+            in_degree[dependent] -= 1
+            if in_degree[dependent] == 0:
+                queue.append(dependent)
+
+    if len(result) != len(configs):
+        raise ValueError("Dependency cycle detected (topological sort failed).")
+
+    return result
 
 
 def _get_experiment_dir(
@@ -416,6 +557,7 @@ def _get_latest_batch_timestamp(base_dir: Path) -> str | None:
     return manifests[-1].stem
 
 
+# NOTE: not sure if this should depend on the manifest file?
 def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
     """Load all experiments for a batch into a 1D Runs.
 
@@ -604,6 +746,7 @@ class _ProgressBar:
         self.passed = 0
         self.failed = 0
         self.cached = 0
+        self.skipped = 0
         self._render()  # Show initial state
 
     def start(self, name: str = ""):
@@ -611,7 +754,7 @@ class _ProgressBar:
         self._render(name, running=True)
 
     def update(self, status: str, name: str = ""):
-        """Update progress with status: 'passed', 'failed', or 'cached'."""
+        """Update progress with status: 'passed', 'failed', 'cached', or 'skipped'."""
         self.current += 1
         if status == "passed":
             self.passed += 1
@@ -619,6 +762,8 @@ class _ProgressBar:
             self.failed += 1
         elif status == "cached":
             self.cached += 1
+        elif status == "skipped":
+            self.skipped += 1
         self._render(name)
 
     def _render(self, name: str = "", running: bool = False):
@@ -637,6 +782,8 @@ class _ProgressBar:
             parts.append(f"\033[31m{self.failed} failed\033[0m")
         if self.cached:
             parts.append(f"\033[33m{self.cached} cached\033[0m")
+        if self.skipped:
+            parts.append(f"\033[90m{self.skipped} skipped\033[0m")
         status = ", ".join(parts) if parts else ""
 
         # Truncate name if too long
@@ -1090,6 +1237,10 @@ class ExperimentRunner:
             # Validate unique names (after flattening)
             _validate_unique_names(flat_configs)
 
+            # Validate dependencies and topologically sort
+            _validate_dependencies(flat_configs)
+            flat_configs = _topological_sort(flat_configs)
+
             # Validate unique hashes when hashing is enabled
             if enable_hash_configs:
                 _validate_unique_hashes(flat_configs)
@@ -1166,6 +1317,8 @@ class ExperimentRunner:
         # PHASE 2: Experiment Execution (skip if --report)
         # =================================================================
         if not args.report:
+            import cloudpickle
+
             # Load from batch manifest
             manifest = _load_batch_manifest(base_dir, timestamp)
             run_dirs = manifest["runs"]
@@ -1196,75 +1349,133 @@ class ExperimentRunner:
             show_progress = not args.no_capture
             progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
 
+            # Collect all config names for regex resolution
+            all_config_names: set[str] = set()
+            for experiment_dir in experiment_dirs:
+                config_json_path = experiment_dir / "config.json"
+                config_data = json.loads(config_json_path.read_text())
+                all_config_names.add(config_data.get("name", ""))
+
+            # Track completed experiments by name for dependency injection
+            completed: dict[str, Experiment] = {}
+
             for experiment_dir in experiment_dirs:
                 experiment_path = experiment_dir / "experiment.pkl"
 
                 # Load config from saved config.json
                 config_json_path = experiment_dir / "config.json"
                 config_data = json.loads(config_json_path.read_text())
+                config_name = config_data.get("name", "")
+                dep_patterns = _normalize_depends_on(config_data.get("depends_on"))
+
+                # Resolve regex patterns to concrete names
+                resolved_deps = _resolve_dep_patterns(
+                    dep_patterns, all_config_names, config_name
+                ) if dep_patterns else []
+
+                # Strip depends_on before creating Config object
+                config_data.pop("depends_on", None)
                 config = Config(config_data)
-                config_name = config.get("name", "")
 
-                if not experiment_path.exists():
-                    # Show running status
-                    if progress:
-                        progress.start(config_name)
-
-                    # Create fresh experiment instance
-                    instance = self._experiment_class()
-                    # Set private attributes via name mangling
-                    instance._Experiment__cfg = config
-                    instance._Experiment__out = experiment_dir
-
-                    # Retry loop
-                    for attempt in range(max_retries + 1):
-                        exec_instance.run(
-                            instance,
-                            experiment_path,
-                            capture=not args.no_capture,
-                            stash=enable_stash,
-                            snapshot_path=snapshot_path,
-                        )
-
-                        # Reload instance to check result
-                        with open(experiment_path, "rb") as f:
-                            instance = pickle.load(f)
-
-                        if not instance.error:
-                            break  # Success, exit retry loop
-
-                        # Print error immediately on each failure
-                        error_msg = instance.error or ""
-                        remaining = max_retries - attempt
-                        retry_info = (
-                            f" (retrying, {remaining} left)" if remaining > 0 else ""
-                        )
-                        print(
-                            f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
-                        )
-                        print(error_msg)
-                        if instance.log:
-                            print("--- Log output ---")
-                            print(instance.log)
-                        print("---")
-
-                        if attempt < max_retries:
-                            # Delete experiment.pkl before retry so executor writes fresh
-                            experiment_path.unlink(missing_ok=True)
-                            # Create fresh instance for retry
-                            instance = self._experiment_class()
-                            instance._Experiment__cfg = config
-                            instance._Experiment__out = experiment_dir
-
-                    # Save log to plaintext file
-                    log_path = experiment_dir / "log.out"
-                    log_path.write_text(instance.log or "")
-                    status = "failed" if instance.error else "passed"
-                else:
+                if experiment_path.exists():
+                    # Already completed (cached / --continue)
+                    with open(experiment_path, "rb") as f:
+                        instance = pickle.load(f)
+                    completed[config_name] = instance
                     # Ensure marker file exists for viewer discovery
                     marker_path = experiment_dir / ".pyexp"
                     marker_path.touch(exist_ok=True)
                     status = "cached"
+                else:
+                    # Check if any dependency failed or was skipped
+                    should_skip = False
+                    skip_reason = None
+                    for dep_name in resolved_deps:
+                        dep_exp = completed.get(dep_name)
+                        if dep_exp is None:
+                            should_skip = True
+                            skip_reason = f"Dependency '{dep_name}' was not found"
+                            break
+                        if dep_exp.skipped or dep_exp.error:
+                            should_skip = True
+                            skip_reason = f"Dependency '{dep_name}' failed or was skipped"
+                            break
+
+                    if should_skip:
+                        # Create skipped experiment
+                        instance = self._experiment_class()
+                        instance._Experiment__cfg = config
+                        instance._Experiment__out = experiment_dir
+                        instance._Experiment__skipped = True
+                        instance._Experiment__error = f"Skipped: {skip_reason}"
+                        experiment_dir.mkdir(parents=True, exist_ok=True)
+                        with open(experiment_path, "wb") as f:
+                            cloudpickle.dump(instance, f)
+                        completed[config_name] = instance
+                        status = "skipped"
+                    else:
+                        # Show running status
+                        if progress:
+                            progress.start(config_name)
+
+                        # Build deps Runs from completed experiments
+                        dep_experiments = [completed[n] for n in resolved_deps]
+                        deps_runs = Runs(dep_experiments)
+
+                        # Create fresh experiment instance
+                        instance = self._experiment_class()
+                        # Set private attributes via name mangling
+                        instance._Experiment__cfg = config
+                        instance._Experiment__out = experiment_dir
+                        instance._Experiment__deps = deps_runs
+
+                        # Retry loop
+                        for attempt in range(max_retries + 1):
+                            exec_instance.run(
+                                instance,
+                                experiment_path,
+                                capture=not args.no_capture,
+                                stash=enable_stash,
+                                snapshot_path=snapshot_path,
+                            )
+
+                            # Reload instance to check result
+                            with open(experiment_path, "rb") as f:
+                                instance = pickle.load(f)
+
+                            if not instance.error:
+                                break  # Success, exit retry loop
+
+                            # Print error immediately on each failure
+                            error_msg = instance.error or ""
+                            remaining = max_retries - attempt
+                            retry_info = (
+                                f" (retrying, {remaining} left)" if remaining > 0 else ""
+                            )
+                            print(
+                                f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
+                            )
+                            print(error_msg)
+                            if instance.log:
+                                print("--- Log output ---")
+                                print(instance.log)
+                            print("---")
+
+                            if attempt < max_retries:
+                                # Delete experiment.pkl before retry so executor writes fresh
+                                experiment_path.unlink(missing_ok=True)
+                                # Create fresh instance for retry
+                                instance = self._experiment_class()
+                                instance._Experiment__cfg = config
+                                instance._Experiment__out = experiment_dir
+                                instance._Experiment__deps = deps_runs
+
+                        completed[config_name] = instance
+
+                        # Save log to plaintext file
+                        log_path = experiment_dir / "log.out"
+                        log_path.write_text(instance.log or "")
+                        status = "failed" if instance.error else "passed"
 
                 # Update progress bar
                 if progress:
@@ -1297,6 +1508,8 @@ class _DecoratorExperiment(Experiment):
     _fn: Callable | None = None
     # _wants_out is set by make_runner based on function signature
     _wants_out: bool = False
+    # _wants_deps is set by make_runner based on function signature
+    _wants_deps: bool = False
     # _runner is set by make_runner to reference the ExperimentRunner
     _runner: "ExperimentRunner | None" = None
 
@@ -1309,7 +1522,9 @@ class _DecoratorExperiment(Experiment):
                 runner._current_experiment = self
                 runner._chkpt_counter = 0
             try:
-                if type(self)._wants_out:
+                if type(self)._wants_deps:
+                    self.result = fn(self.cfg, self.out, self.deps)
+                elif type(self)._wants_out:
                     self.result = fn(self.cfg, self.out)
                 else:
                     self.result = fn(self.cfg)
@@ -1355,9 +1570,10 @@ def experiment(
         stash: If True, capture git repository state.
         hash_configs: Append config parameter hash to run directory names.
 
-    The decorated function can have one of two signatures:
+    The decorated function can have one of three signatures:
         - fn(cfg) - receives only the config
         - fn(cfg, out) - receives config and output directory path
+        - fn(cfg, out, deps) - receives config, output directory, and dependency runs
 
     Example usage:
 
@@ -1394,9 +1610,11 @@ def experiment(
         # Store the function on the class (as regular class attribute, not staticmethod)
         DynamicExperiment._fn = f
 
-        # Check if function wants 'out' parameter (2+ parameters means cfg + out)
+        # Check if function wants 'out' and/or 'deps' parameter
         sig = inspect.signature(f)
-        DynamicExperiment._wants_out = len(sig.parameters) >= 2
+        n_params = len(sig.parameters)
+        DynamicExperiment._wants_out = n_params >= 2
+        DynamicExperiment._wants_deps = n_params >= 3
 
         # Determine output directory and default name relative to function's file
         resolved_output_dir = output_dir

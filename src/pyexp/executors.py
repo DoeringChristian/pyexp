@@ -131,10 +131,13 @@ class SubprocessExecutor(Executor):
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
         # Create payload with serialized instance
+        # Extract deps before pickling (excluded by __getstate__)
+        deps = instance._Experiment__deps
         payload = {
             "instance": instance,
             "result_path": str(result_path),
             "stash": stash,
+            "deps": deps,
         }
 
         # Write payload to temp file
@@ -408,14 +411,21 @@ class RayExecutor(Executor):
         """Run experiment as a Ray task."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # Extract deps before serialization (excluded by __getstate__)
+        deps = instance._Experiment__deps
+
         @self._ray.remote
-        def _run_experiment(instance, result_path_str, capture):
+        def _run_experiment(instance, deps, result_path_str, capture):
             """Ray remote function to execute experiment."""
             import io
             import sys
             import traceback
             from pathlib import Path
             import cloudpickle
+
+            # Restore transient deps
+            if deps is not None:
+                instance._Experiment__deps = deps
 
             result_path = Path(result_path_str)
             log = ""
@@ -442,7 +452,7 @@ class RayExecutor(Executor):
             return instance
 
         # Submit task and wait for result
-        future = _run_experiment.remote(instance, str(result_path), capture)
+        future = _run_experiment.remote(instance, deps, str(result_path), capture)
         try:
             self._ray.get(future)
         except Exception as e:
