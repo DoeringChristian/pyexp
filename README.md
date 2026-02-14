@@ -481,7 +481,7 @@ def pipeline(config: Config, out, deps):
 
     if config.name == "finetune":
         # deps is a Runs[Experiment] of completed dependency runs
-        base_model = deps["pretrain*"][0].result["model"]
+        base_model = deps["pretrain.*"][0].result["model"]
         return {"model": finetune(base_model, config)}
 
     if config.name == "evaluate":
@@ -499,9 +499,10 @@ def configs():
 ```
 
 **Key details:**
-- `depends_on` accepts a string or list of strings, each a regex pattern
-- Patterns use `re.search` (substring match) — use `^` and `$` anchors for exact matching
-- The `deps` parameter is a `Runs[Experiment]` collection of completed dependency experiments, supporting name-based lookup (glob-style via `deps["pattern*"]`)
+- `depends_on` accepts a string, dict, or list of strings/dicts
+- String patterns use `re.search` (substring match) — use `^` and `$` anchors for exact matching
+- Dict patterns match on config field values (e.g., `{"stage": "pretrain"}`)
+- The `deps` parameter is a `Runs[Experiment]` collection of completed dependency experiments, supporting name-based lookup (regex via `deps["pattern.*"]`)
 - Circular dependencies raise a `ValueError`
 - `depends_on` is excluded from the config hash and stripped from `cfg` (but preserved in `config.json`)
 - Use the three-parameter function signature `fn(cfg, out, deps)` to receive dependencies
@@ -522,9 +523,9 @@ Filter results using pattern matching or dict queries:
 ```python
 @experiment.report
 def report(results, report_dir):
-    # Pattern matching on name (glob-style)
-    lr01_results = results["exp_lr0.1_*"]  # All with lr0.1
-    epoch10_results = results["*_e10"]      # All with e10
+    # Pattern matching on name (regex via re.search)
+    lr01_results = results["exp_lr0.1_.*"]  # All with lr0.1
+    epoch10_results = results[".*_e10"]      # All with e10
 
     # Dict matching on config values
     lr01_results = results[{"cfg.learning_rate": 0.1}]
@@ -550,8 +551,8 @@ def report(results, report_dir):
     r = results[0]
     print(r.name, r.result["accuracy"])
 
-    # Access by name pattern (glob-style)
-    lr01_results = results["exp_lr0.1_*"]
+    # Access by name pattern (regex via re.search)
+    lr01_results = results["exp_lr0.1_.*"]
 
     # Access by dict filter
     filtered = results[{"cfg.learning_rate": 0.1}]
@@ -597,6 +598,7 @@ CLI arguments can override settings from the decorator or `run()` function.
 | `--continue [TIMESTAMP]` | Continue a previous run. Without argument, continues most recent. With argument, continues that specific timestamp. |
 | `--report [TIMESTAMP]` | Generate report from cache. Without argument, uses most recent run. With argument, uses that specific timestamp. |
 | `--list` | List all previous runs with their status |
+| `--graph` | Print the dependency graph and exit |
 | `--filter REGEX` | Only run configs whose names match the regex pattern |
 | `-s`, `--capture=no` | Show subprocess output instead of progress bar |
 | `--viewer` | Start the viewer after experiments complete |
@@ -899,7 +901,7 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Classes
 
 - `Config` - Dict subclass with dot notation access
-- `Runs` - Flat named collection with pattern and dict-based indexing
+- `Runs` - Flat named collection with regex pattern and dict-based indexing
 - `Experiment` - Base class for experiments; the instance IS the result
 - `ExperimentRunner` - Orchestrates config generation, execution, and reporting
 - `Executor` - Abstract base class for custom executors

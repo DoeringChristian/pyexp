@@ -133,7 +133,7 @@ class TestSweepNames:
         )
 
         # Pattern match
-        result = configs["exp_a_*"]
+        result = configs["exp_a_.*"]
         assert len(result) == 2
         assert [c["name"] for c in result] == ["exp_a_0", "exp_a_1"]
 
@@ -164,6 +164,6 @@ class TestSweepNames:
         configs = sweep(configs, [{"name": "a"}, {"name": "b"}])
         configs = sweep(configs, [{"name": "x"}, {"name": "y"}])
 
-        result = configs["*_x"]
+        result = configs[".*_x"]
         assert len(result) == 2
         assert [c["name"] for c in result] == ["exp_a_x", "exp_b_x"]

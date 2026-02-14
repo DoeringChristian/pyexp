@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import fnmatch
+import re
 from pathlib import Path
 from typing import Any, Generic, Iterator, TypeVar
 
@@ -235,7 +235,7 @@ def merge(base: dict, update: dict) -> dict:
 class Runs(Generic[_T]):
     """A flat, named collection of items (configs or experiment results).
 
-    Supports lookup by integer index, name pattern (glob-style), or
+    Supports lookup by integer index, name pattern (regex via re.search), or
     dict-based filtering on item attributes.
 
     Example:
@@ -244,8 +244,8 @@ class Runs(Generic[_T]):
         # Integer index
         configs[0]  # {"name": "exp_a", "lr": 0.1}
 
-        # Pattern matching on name (glob-style)
-        configs["exp_*"]  # Runs with all matching items
+        # Pattern matching on name (regex via re.search)
+        configs["exp_.*"]  # Runs with all matching items
         configs["exp_a"]  # Single item if exactly one match
 
         # Dict matching on values
@@ -273,7 +273,7 @@ class Runs(Generic[_T]):
         """Look up items by index, name pattern, or dict filter.
 
         - int: flat index into data
-        - str: pattern match on item name (glob-style with *)
+        - str: pattern match on item name (regex via re.search)
         - dict: match items where all key-value pairs match
         Returns a single item or a new Runs collection.
         """
@@ -291,7 +291,7 @@ class Runs(Generic[_T]):
         raise TypeError(f"Invalid index type: {type(key)}")
 
     def _match_pattern(self, pattern: str) -> "_T | Runs[_T]":
-        """Match items by name pattern (glob-style).
+        """Match items by name pattern (regex via re.search).
 
         Returns a single item if exactly one match, otherwise a new Runs.
         """
@@ -301,7 +301,7 @@ class Runs(Generic[_T]):
                 name = item.get("name", "")
             else:
                 name = getattr(item, "name", "") or ""
-            if fnmatch.fnmatch(name, pattern):
+            if re.search(pattern, name):
                 matching.append(item)
 
         if not matching:

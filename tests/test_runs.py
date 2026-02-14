@@ -64,7 +64,7 @@ class TestRunsPatternMatching:
         runs = Runs(
             [{"name": "a_x"}, {"name": "a_y"}, {"name": "b_x"}, {"name": "b_y"}],
         )
-        result = runs["a_*"]
+        result = runs["a_.*"]
         assert len(result) == 2
         assert [c["name"] for c in result] == ["a_x", "a_y"]
 
@@ -72,7 +72,7 @@ class TestRunsPatternMatching:
         runs = Runs(
             [{"name": "a_x"}, {"name": "a_y"}, {"name": "b_x"}, {"name": "b_y"}],
         )
-        result = runs["*_x"]
+        result = runs[".*_x"]
         assert len(result) == 2
         assert [c["name"] for c in result] == ["a_x", "b_x"]
 
@@ -83,7 +83,7 @@ class TestRunsPatternMatching:
 
     def test_pattern_with_question_mark(self):
         runs = Runs([{"name": "a1"}, {"name": "a2"}, {"name": "b1"}])
-        result = runs["a?"]
+        result = runs["a."]
         assert len(result) == 2
         assert [c["name"] for c in result] == ["a1", "a2"]
 
@@ -91,7 +91,7 @@ class TestRunsPatternMatching:
         runs = Runs(
             [{"name": "x_a"}, {"name": "x_b"}, {"name": "x_c"}, {"name": "x_d"}],
         )
-        result = runs["x_*"]
+        result = runs["x_.*"]
         assert len(result) == 4
 
     def test_pattern_on_non_dict_no_match(self):

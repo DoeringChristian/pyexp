@@ -365,63 +365,71 @@ def _validate_unique_hashes(configs: list[dict]) -> None:
         seen[h] = name
 
 
-def _normalize_depends_on(deps: Any) -> list[str]:
-    """Normalize a depends_on value to a list of pattern strings."""
+def _normalize_depends_on(deps: Any) -> list[str | dict]:
+    """Normalize a depends_on value to a list of keys (str or dict)."""
     if deps is None:
         return []
-    if isinstance(deps, str):
+    if isinstance(deps, (str, dict)):
         return [deps]
     return list(deps)
 
 
-def _resolve_dep_patterns(patterns: list[str], all_names: set[str], config_name: str) -> list[str]:
-    """Resolve dependency regex patterns to concrete config names.
+def _resolve_depends_on(depends_on: list[str | dict], configs_runs: Runs, config_name: str) -> list[str]:
+    """Resolve depends_on keys to concrete config names using Runs indexing.
 
-    Each pattern is treated as a regex (using re.search for substring matching).
-    Use ^ and $ anchors for exact matching.
+    Each key in depends_on uses the same lookup mechanism as Runs.__getitem__:
+    - str: glob-style pattern matching on name (e.g., "pretrain*")
+    - dict: key-value matching on config fields (e.g., {"stage": "pretrain"})
 
     Raises:
-        ValueError: If a pattern matches no configs, or matches the config itself.
+        ValueError: If a key matches no configs, or matches the config itself.
     """
     resolved: list[str] = []
-    for pattern in patterns:
-        regex = re.compile(pattern)
-        matches = [n for n in sorted(all_names) if regex.search(n)]
-        if not matches:
+    for key in depends_on:
+        try:
+            result = configs_runs[key]
+        except (IndexError, TypeError):
             raise ValueError(
-                f"Config '{config_name}' depends on pattern '{pattern}', "
+                f"Config '{config_name}' depends on {key!r}, "
                 f"which matches no config in this batch."
             )
-        for m in matches:
-            if m == config_name:
-                raise ValueError(f"Config '{config_name}' depends on itself (via pattern '{pattern}').")
-            if m not in resolved:
-                resolved.append(m)
+        # Normalize to list
+        if isinstance(result, Runs):
+            matches = list(result)
+        else:
+            matches = [result]
+
+        for item in matches:
+            name = item.get("name", "") if isinstance(item, dict) else getattr(item, "name", "")
+            if name == config_name:
+                raise ValueError(f"Config '{config_name}' depends on itself (via {key!r}).")
+            if name not in resolved:
+                resolved.append(name)
     return resolved
 
 
 def _validate_dependencies(configs: list[dict]) -> None:
     """Validate depends_on references and detect cycles.
 
-    depends_on values are regex patterns matched against config names.
+    depends_on values use the same indexing as Runs (glob patterns or dict queries).
 
     Raises:
-        ValueError: If a dependency pattern matches no config,
+        ValueError: If a dependency key matches no config,
                     a config depends on itself, or there is a cycle.
     """
-    names = {c["name"] for c in configs}
+    configs_runs = Runs(configs)
 
     # Build adjacency for cycle detection: name -> list of resolved dependency names
     adj: dict[str, list[str]] = {}
     for config in configs:
         config_name = config["name"]
-        patterns = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_dep_patterns(patterns, names, config_name)
+        deps = _normalize_depends_on(config.get("depends_on"))
+        resolved = _resolve_depends_on(deps, configs_runs, config_name)
         adj[config_name] = resolved
 
     # Cycle detection via DFS
     WHITE, GRAY, BLACK = 0, 1, 2
-    color: dict[str, int] = {name: WHITE for name in names}
+    color: dict[str, int] = {name: WHITE for name in adj}
 
     def dfs(node: str, path: list[str]) -> None:
         color[node] = GRAY
@@ -438,7 +446,7 @@ def _validate_dependencies(configs: list[dict]) -> None:
         path.pop()
         color[node] = BLACK
 
-    for name in names:
+    for name in adj:
         if color[name] == WHITE:
             dfs(name, [])
 
@@ -446,17 +454,17 @@ def _validate_dependencies(configs: list[dict]) -> None:
 def _topological_sort(configs: list[dict]) -> list[dict]:
     """Return configs in dependency order (Kahn's algorithm).
 
-    depends_on patterns are resolved to concrete names via regex.
+    depends_on keys are resolved via Runs indexing.
     Configs with no dependencies come first.
     """
-    all_names = {c["name"] for c in configs}
+    configs_runs = Runs(configs)
     name_to_config = {c["name"]: c for c in configs}
     in_degree: dict[str, int] = {c["name"]: 0 for c in configs}
     dependents: dict[str, list[str]] = {c["name"]: [] for c in configs}
 
     for config in configs:
-        patterns = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_dep_patterns(patterns, all_names, config["name"])
+        deps = _normalize_depends_on(config.get("depends_on"))
+        resolved = _resolve_depends_on(deps, configs_runs, config["name"])
         in_degree[config["name"]] = len(resolved)
         for dep in resolved:
             dependents[dep].append(config["name"])
@@ -610,15 +618,6 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
             with open(experiment_path, "rb") as f:
                 instance = pickle.load(f)
             results.append(instance)
-        else:
-            config_path = experiment_dir / "config.json"
-            config_name = "unknown"
-            if config_path.exists():
-                config = json.loads(config_path.read_text())
-                config_name = config.get("name", config_name)
-            raise FileNotFoundError(
-                f"No experiment found for config '{config_name}' at {experiment_dir}"
-            )
 
     return Runs(results)
 
@@ -675,6 +674,19 @@ def _list_runs(base_dir: Path) -> None:
         status = ", ".join(parts) if parts else "empty"
 
         print(f"  {timestamp}  {status}  ({total} configs)")
+
+
+def _print_dependency_graph(configs: list[dict]) -> None:
+    """Print the dependency graph for a list of configs."""
+    configs_runs = Runs(configs)
+    for config in configs:
+        name = config["name"]
+        deps = _normalize_depends_on(config.get("depends_on"))
+        if deps:
+            resolved = _resolve_depends_on(deps, configs_runs, name)
+            print(f"  {name} <- {', '.join(resolved)}")
+        else:
+            print(f"  {name}")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -756,6 +768,11 @@ def _parse_args() -> argparse.Namespace:
         "--list",
         action="store_true",
         help="List all previous runs with their status",
+    )
+    parser.add_argument(
+        "--graph",
+        action="store_true",
+        help="Print the dependency graph and exit",
     )
     parser.add_argument(
         "--filter",
@@ -1191,6 +1208,17 @@ class ExperimentRunner:
             _list_runs(base_dir)
             return None
 
+        # --graph: print dependency graph and exit
+        if args.graph:
+            config_list = configs_fn()
+            flat_configs = list(config_list)
+            _validate_unique_names(flat_configs)
+            _validate_dependencies(flat_configs)
+            flat_configs = _topological_sort(flat_configs)
+            print(f"Dependency graph for {exp_name}:")
+            _print_dependency_graph(flat_configs)
+            return None
+
         # --report implies --continue (use report's timestamp or latest)
         if args.report is not None and not args.continue_run:
             args.continue_run = args.report
@@ -1389,12 +1417,12 @@ class ExperimentRunner:
             show_progress = not args.no_capture
             progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
 
-            # Collect all config names for regex resolution
-            all_config_names: set[str] = set()
+            # Build Runs of all configs for dependency resolution
+            all_dir_configs = []
             for experiment_dir in experiment_dirs:
                 config_json_path = experiment_dir / "config.json"
-                config_data = json.loads(config_json_path.read_text())
-                all_config_names.add(config_data.get("name", ""))
+                all_dir_configs.append(json.loads(config_json_path.read_text()))
+            all_configs_runs = Runs(all_dir_configs)
 
             # Track completed experiments by name for dependency injection
             completed: dict[str, Experiment] = {}
@@ -1406,12 +1434,12 @@ class ExperimentRunner:
                 config_json_path = experiment_dir / "config.json"
                 config_data = json.loads(config_json_path.read_text())
                 config_name = config_data.get("name", "")
-                dep_patterns = _normalize_depends_on(config_data.get("depends_on"))
+                dep_keys = _normalize_depends_on(config_data.get("depends_on"))
 
-                # Resolve regex patterns to concrete names
-                resolved_deps = _resolve_dep_patterns(
-                    dep_patterns, all_config_names, config_name
-                ) if dep_patterns else []
+                # Resolve dependency keys to concrete names via Runs indexing
+                resolved_deps = _resolve_depends_on(
+                    dep_keys, all_configs_runs, config_name
+                ) if dep_keys else []
 
                 # Strip depends_on before creating Config object
                 config_data.pop("depends_on", None)

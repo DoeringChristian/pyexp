@@ -13,6 +13,7 @@ def pipeline(config: Config, out, deps):
         out: Output directory for this run.
         deps: Runs[Experiment] of completed dependency runs.
     """
+    pipeline.results()
     if config.name.startswith("pretrain"):
         print(f"Pretraining with lr={config.lr}, epochs={config.epochs}")
         # Simulate pretraining
@@ -20,8 +21,8 @@ def pipeline(config: Config, out, deps):
         return {"model": model, "loss": 0.1}
 
     if config.name == "finetune":
-        # deps["pretrain*"] returns a Runs with all matching pretrain experiments
-        pretrain_runs = deps["pretrain*"]
+        # deps["pretrain.*"] returns a Runs with all matching pretrain experiments
+        pretrain_runs = deps["pretrain.*"]
         base_model = pretrain_runs[0].result["model"]
         print(
             f"Finetuning from {len(pretrain_runs)} pretrain run(s) (type={base_model['type']})"
