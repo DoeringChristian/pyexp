@@ -107,25 +107,43 @@ def _find_submodule_paths(git_root: Path) -> list[str]:
 def _symlink_gitignored(git_root: Path, dest: Path) -> None:
     """Symlink gitignored files/directories into the snapshot.
 
-    Walks the top-level entries of the repo and symlinks any that are
-    gitignored and missing from the snapshot. This makes data files
-    (datasets, large binaries, etc.) accessible to experiments running
-    from the snapshot without copying them.
+    Recursively walks the repo tree and symlinks any gitignored entries
+    that are missing from the snapshot. This makes data files (datasets,
+    large binaries, etc.) accessible to experiments running from the
+    snapshot without copying them.
 
-    Only processes top-level entries to avoid recursing into deep trees.
+    When a gitignored entry is found and symlinked, its subtree is not
+    explored further. Directories that exist in both the repo and the
+    snapshot are recursed into to discover nested gitignored entries
+    (e.g. from a .gitignore in a subdirectory).
     """
-    for entry in git_root.iterdir():
+    _symlink_gitignored_walk(git_root, dest, git_root, dest)
+
+
+def _symlink_gitignored_walk(
+    repo_dir: Path, snapshot_dir: Path, git_root: Path, dest_root: Path
+) -> None:
+    """Walk repo_dir and symlink gitignored entries missing from snapshot_dir."""
+    for entry in repo_dir.iterdir():
         name = entry.name
         # Skip git metadata and the snapshot destination itself
-        if name == ".git" or dest.is_relative_to(entry.resolve()):
+        if name == ".git" or dest_root.is_relative_to(entry.resolve()):
             continue
-        target_in_snapshot = dest / name
-        # Only symlink entries missing from the snapshot
+        target_in_snapshot = snapshot_dir / name
         if target_in_snapshot.exists() or target_in_snapshot.is_symlink():
+            # Entry exists in snapshot — recurse into directories to find
+            # deeper gitignored entries
+            if entry.is_dir() and not entry.is_symlink():
+                _symlink_gitignored_walk(entry, target_in_snapshot, git_root, dest_root)
             continue
-        # Check if this entry is gitignored
+        # Entry missing from snapshot — check if it's gitignored
+        rel_path = str(entry.relative_to(git_root))
+        # Append trailing slash for directories so git check-ignore
+        # matches directory-only patterns (e.g. "dir/")
+        if entry.is_dir():
+            rel_path += "/"
         result = subprocess.run(
-            ["git", "check-ignore", "-q", name],
+            ["git", "check-ignore", "-q", rel_path],
             cwd=git_root,
             capture_output=True,
         )
