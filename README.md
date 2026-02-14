@@ -95,8 +95,8 @@ results = experiment.results(output_dir="/data/experiments")
 for r in results:
     print(f"{r.name}: {r.result['accuracy']}")
 
-# Results preserve tensor shape from sweeps
-print(results.shape)  # e.g., (1, 2, 2)
+# Results are a flat Runs collection
+print(len(results))  # e.g., 4
 filtered = results[{"config.learning_rate": 0.01}]
 ```
 
@@ -424,7 +424,7 @@ def configs():
         {"name": "e100", "epochs": 100},
     ])
 
-    return cfgs  # Shape: (1, 2, 2), names: exp_lr0.1_e10, exp_lr0.1_e100, ...
+    return cfgs  # 4 configs, names: exp_lr0.1_e10, exp_lr0.1_e100, ...
 ```
 
 Names are automatically combined with underscores across sweeps.
@@ -467,7 +467,7 @@ cfgs = sweep(cfgs, [
 
 ### Result Filtering
 
-The report function receives a `Tensor` of results. Each result contains:
+The report function receives a `Runs` collection of results. Each result contains:
 - `name`: the combined config name
 - `config`: the full config dict (includes `out` path)
 - `result`: the experiment return value
@@ -495,22 +495,25 @@ def report(results, report_dir):
     wide_results = results[{"config.mlp.width": 128}]
 ```
 
-### Tensor Indexing
+### Runs Indexing
 
-Results preserve the shape from sweep operations:
+Results are a flat `Runs` collection supporting integer, name pattern, and dict indexing:
 
 ```python
 @experiment.report
 def report(results, report_dir):
-    # Shape is (1, 2, 2) from sweeps
-    print(results.shape)
+    # Flat collection of all results
+    print(len(results))  # e.g., 4
 
-    # Index by position
-    first_lr = results[:, 0, :]  # All configs with first lr value
-
-    # Access individual result
-    r = results[0, 1, 0]
+    # Access by integer index
+    r = results[0]
     print(r.name, r.result["accuracy"])
+
+    # Access by name pattern (glob-style)
+    lr01_results = results["exp_lr0.1_*"]
+
+    # Access by dict filter
+    filtered = results[{"config.learning_rate": 0.1}]
 ```
 
 ### Custom Executors
@@ -856,7 +859,7 @@ The viewer starts as a background process before experiments begin, allowing you
 
 - `Config` - Dict subclass with dot notation access
 - `Result` - Experiment result with config, result, error, log, logger, out
-- `Tensor` - Shape-preserving container with advanced indexing
+- `Runs` - Flat named collection with pattern and dict-based indexing
 - `Experiment` - Experiment runner with caching
 - `Executor` - Abstract base class for custom executors
 - `InlineExecutor` - Runs in same process (no isolation)
@@ -891,7 +894,7 @@ The viewer starts as a background process before experiments begin, allowing you
 - `experiment.results(timestamp=None, output_dir=None)` - Load results from a previous run
   - `timestamp`: Specific timestamp or `"latest"` (default: latest)
   - `output_dir`: Override output directory (default: file-relative)
-  - Returns: `Tensor` of `Result` objects preserving sweep shape
+  - Returns: `Runs` collection of `Experiment` instances
 
 ### Logger Methods
 

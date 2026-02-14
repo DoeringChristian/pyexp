@@ -377,7 +377,7 @@ class TestExperimentRun:
 
         assert result == [4, 9, 16]
 
-    def test_report_receives_tensor(self, tmp_path):
+    def test_report_receives_runs(self, tmp_path):
         """Report function should receive results as Runs."""
         received_results = None
 
@@ -467,8 +467,8 @@ class TestExperimentRun:
         y10_results = received_results[{"cfg.y": 10}]
         assert all(r.cfg["y"] == 10 for r in y10_results)
 
-    def test_report_tensors_are_1d(self, tmp_path):
-        """Result tensors are always 1D regardless of sweep shape."""
+    def test_report_runs_are_1d(self, tmp_path):
+        """Result Runs are always 1D regardless of sweep shape."""
         received_results = None
 
         @experiment

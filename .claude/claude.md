@@ -145,13 +145,14 @@ results = experiment.results()
 results = experiment.results(timestamp="2024-01-25_14-30-00")
 ```
 
-### runs.json
+### Batch Manifests
 
-Each run saves a `runs.json` file containing:
-- `configs`: List of config dicts (without internal `_` prefixed keys)
-- `shape`: Tensor shape from sweeps
+Each run saves a `.batches/<timestamp>.json` manifest containing:
+- `timestamp`: The batch timestamp
+- `runs`: List of run names (sanitized config names)
+- `commit`: Optional git commit hash of the source snapshot
 
-This enables `results()` to reconstruct the exact tensor structure from a previous run.
+This enables `results()` to load all experiments from a previous run into a flat `Runs` collection.
 
 ## Experiment Object
 
