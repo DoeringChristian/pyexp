@@ -33,12 +33,12 @@ def configs():
 
 @experiment.report
 def report(results, report_dir):
-    # Each result has: name, config, result, error, log, logger, out
+    # Each result has: name, cfg, result, error, log, out
     for r in results:
         print(f"{r.name}: {r.result['accuracy']}")
 
     # Filter by config values
-    fast_results = results[{"config.learning_rate": 0.01}]
+    fast_results = results[{"cfg.learning_rate": 0.01}]
 
 if __name__ == "__main__":
     experiment.run()
@@ -64,12 +64,13 @@ The experiment framework separates execution into three phases:
 
 1. **Config Generation** (only on fresh start - no `--continue` or `--report`):
    - Runs the `@experiment.configs` function to generate configurations
-   - Computes directory hashes and creates experiment folders
-   - Saves `runs.json` (folder references) and individual `config.json` files
+   - Validates names, dependencies, and topologically sorts configs
+   - Creates experiment folders and saves individual `config.json` files
 
 2. **Experiment Execution** (fresh start or `--continue`, skipped for `--report`):
-   - Loads configs from saved `config.json` files (not recomputed)
-   - Runs experiments and saves results to `result.pkl`
+   - Discovers experiment runs by scanning the filesystem for `config.json` files
+   - Runs experiments in dependency order and saves results to `experiment.pkl`
+   - Skips experiments whose dependencies failed
 
 3. **Report Generation** (always runs):
    - Loads all results from disk
@@ -97,7 +98,7 @@ for r in results:
 
 # Results are a flat Runs collection
 print(len(results))  # e.g., 4
-filtered = results[{"config.learning_rate": 0.01}]
+filtered = results[{"cfg.learning_rate": 0.01}]
 ```
 
 ### Output Folder Structure
@@ -107,19 +108,23 @@ Results are organized by experiment name and timestamp. By default, the output d
 ```
 <experiment_file_dir>/out/
   <experiment_name>/
-    <timestamp>/                    # Each run gets a new timestamp
-      runs.json                  # References to run folders and shape
-      <config_name>-<hash>/
-        config.json                 # Full config (includes 'out' path)
-        result.pkl
+    .batches/                       # Batch manifests (for reference only)
+      <timestamp>.json
+    .snapshots/                     # Git source snapshots (if stash enabled)
+      <commit_hash>/
+    <config_name>/
+      <timestamp>/                  # Each run gets a new timestamp
+        config.json                 # Full config (including depends_on)
+        experiment.pkl              # Pickled experiment instance (the result)
         log.out                     # Captured stdout/stderr
+        .commit                     # Git commit reference (if stash enabled)
+        .checkpoints/               # Checkpoint files (if using @chkpt)
         model.pt                    # Your saved artifacts
-      <config_name>-<hash>/
-        ...
-      report/                       # Report outputs
-    <timestamp>/                    # Another run
-      ...
+    report/
+      <timestamp>/                  # Report outputs
 ```
+
+Run directories are self-contained and discovered by scanning the filesystem for `config.json` files, not from any manifest.
 
 **Directory name sanitization:** Config names are automatically sanitized for use as directory names. Characters `/\:*?"<>|` are replaced with `_` to ensure cross-platform compatibility and prevent accidental subdirectory creation.
 
@@ -384,19 +389,18 @@ model = build(Model, config["model"])  # Type-checked against Model
 
 ### Output Directory
 
-Each experiment receives an `out` in its config pointing to its cache directory. Use this to save artifacts:
+Each experiment receives an `out` directory for saving artifacts. Use the two-parameter function signature `fn(cfg, out)`:
 
 ```python
 @pyexp.experiment
-def experiment(config: Config):
+def experiment(config: Config, out):
     model = train(config)
-    torch.save(model, config.out / "model.pt")
+    torch.save(model, out / "model.pt")
     return {"accuracy": 0.95}
 
 @experiment.report
 def report(results, report_dir):
     for r in results:
-        # Access output directory via result.out or result.config.out
         model = torch.load(r.out / "model.pt")
         print(f"{r.name}: saved at {r.out}")
 ```
@@ -465,16 +469,53 @@ cfgs = sweep(cfgs, [
 ])
 ```
 
+### Inter-run Dependencies
+
+Use `depends_on` in configs to declare that one run depends on another's result. Dependencies are specified as regex patterns matched against config names. Runs execute in topological order, and if a dependency fails, its dependents are automatically skipped.
+
+```python
+@pyexp.experiment
+def pipeline(config: Config, out, deps):
+    if config.name.startswith("pretrain"):
+        return {"model": train(config), "loss": 0.1}
+
+    if config.name == "finetune":
+        # deps is a Runs[Experiment] of completed dependency runs
+        base_model = deps["pretrain*"][0].result["model"]
+        return {"model": finetune(base_model, config)}
+
+    if config.name == "evaluate":
+        model = deps["finetune"].result["model"]
+        return {"accuracy": evaluate(model)}
+
+@pipeline.configs
+def configs():
+    return [
+        {"name": "pretrain1", "lr": 0.01, "epochs": 100},
+        {"name": "pretrain2", "lr": 0.001, "epochs": 100},
+        {"name": "finetune", "lr": 0.001, "depends_on": "pretrain.*"},
+        {"name": "evaluate", "depends_on": ["finetune", "pretrain.*"]},
+    ]
+```
+
+**Key details:**
+- `depends_on` accepts a string or list of strings, each a regex pattern
+- Patterns use `re.search` (substring match) — use `^` and `$` anchors for exact matching
+- The `deps` parameter is a `Runs[Experiment]` collection of completed dependency experiments, supporting name-based lookup (glob-style via `deps["pattern*"]`)
+- Circular dependencies raise a `ValueError`
+- `depends_on` is excluded from the config hash and stripped from `cfg` (but preserved in `config.json`)
+- Use the three-parameter function signature `fn(cfg, out, deps)` to receive dependencies
+
 ### Result Filtering
 
-The report function receives a `Runs` collection of results. Each result contains:
-- `name`: the combined config name
-- `config`: the full config dict (includes `out` path)
-- `result`: the experiment return value
+The report function receives a `Runs` collection of `Experiment` instances. Each experiment has:
+- `name`: the config name
+- `cfg`: the config (Config object with dot notation)
+- `result`: the experiment return value (decorator API only)
 - `error`: error message if failed, else `None`
+- `skipped`: whether skipped due to a failed dependency
 - `log`: captured stdout/stderr
-- `logger`: `LogReader` if logging was used
-- `out`: path to experiment output directory (same as `config.out`)
+- `out`: path to experiment output directory
 
 Filter results using pattern matching or dict queries:
 
@@ -486,13 +527,13 @@ def report(results, report_dir):
     epoch10_results = results["*_e10"]      # All with e10
 
     # Dict matching on config values
-    lr01_results = results[{"config.learning_rate": 0.1}]
+    lr01_results = results[{"cfg.learning_rate": 0.1}]
 
     # Multiple constraints
-    specific = results[{"config.learning_rate": 0.1, "config.epochs": 10}]
+    specific = results[{"cfg.learning_rate": 0.1, "cfg.epochs": 10}]
 
     # Nested config access
-    wide_results = results[{"config.mlp.width": 128}]
+    wide_results = results[{"cfg.mlp.width": 128}]
 ```
 
 ### Runs Indexing
@@ -513,7 +554,7 @@ def report(results, report_dir):
     lr01_results = results["exp_lr0.1_*"]
 
     # Access by dict filter
-    filtered = results[{"config.learning_rate": 0.1}]
+    filtered = results[{"cfg.learning_rate": 0.1}]
 ```
 
 ### Custom Executors
@@ -858,9 +899,9 @@ The viewer starts as a background process before experiments begin, allowing you
 ### Classes
 
 - `Config` - Dict subclass with dot notation access
-- `Result` - Experiment result with config, result, error, log, logger, out
 - `Runs` - Flat named collection with pattern and dict-based indexing
-- `Experiment` - Experiment runner with caching
+- `Experiment` - Base class for experiments; the instance IS the result
+- `ExperimentRunner` - Orchestrates config generation, execution, and reporting
 - `Executor` - Abstract base class for custom executors
 - `InlineExecutor` - Runs in same process (no isolation)
 - `SubprocessExecutor` - Runs in isolated subprocess (default)
@@ -869,19 +910,20 @@ The viewer starts as a background process before experiments begin, allowing you
 - `Logger` - Log scalars, text, and figures during experiments
 - `LogReader` - Explore and load logged data programmatically
 
-### Result Properties
+### Experiment Properties
 
-- `result.name` - Config name
-- `result.config` - Full config dict (includes `out`)
-- `result.result` - Experiment return value
-- `result.error` - Error message if failed, else `None`
-- `result.log` - Captured stdout/stderr
-- `result.logger` - `LogReader` if logging was used, else `None`
-- `result.out` - Path to experiment output directory
+- `exp.name` - Config name (shorthand for `cfg.get("name", "")`)
+- `exp.cfg` - Config object (dot notation access)
+- `exp.out` - Path to experiment output directory
+- `exp.result` - Experiment return value (decorator API only)
+- `exp.error` - Error message if failed, else `None`
+- `exp.skipped` - Whether skipped due to a failed dependency
+- `exp.log` - Captured stdout/stderr
+- `exp.deps` - `Runs[Experiment]` of completed dependency runs (available during execution)
 
 ### Decorators
 
-- `@pyexp.experiment` - Define an experiment function
+- `@pyexp.experiment` - Define an experiment function (`fn(cfg)`, `fn(cfg, out)`, or `fn(cfg, out, deps)`)
 - `@pyexp.experiment(name="...", output_dir="...", executor="...")` - Define with options
 - `@experiment.configs` - Register configs generator
 - `@experiment.report` - Register report function
