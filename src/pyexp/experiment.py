@@ -545,21 +545,53 @@ def _load_batch_manifest(base_dir: Path, timestamp: str) -> dict:
     return json.loads(manifest_path.read_text())
 
 
-def _get_latest_batch_timestamp(base_dir: Path) -> str | None:
-    """Find the most recent batch timestamp from .batches/ directory."""
-    batches_dir = base_dir / ".batches"
-    if not batches_dir.exists():
-        return None
-    manifests = sorted(batches_dir.glob("*.json"))
-    if not manifests:
-        return None
-    # Filename is <timestamp>.json, sort lexicographically (timestamps sort correctly)
-    return manifests[-1].stem
+def _discover_experiment_dirs(base_dir: Path, timestamp: str) -> list[Path]:
+    """Discover experiment run directories by scanning the filesystem.
+
+    Looks for subdirectories of base_dir that contain a <timestamp>/config.json.
+    Skips dot-directories (.batches, .snapshots, etc.).
+
+    Returns:
+        List of experiment directories (base_dir/<run_name>/<timestamp>),
+        sorted alphabetically by run name.
+    """
+    if not base_dir.exists():
+        return []
+    dirs = []
+    for entry in sorted(base_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        experiment_dir = entry / timestamp
+        if (experiment_dir / "config.json").exists():
+            dirs.append(experiment_dir)
+    return dirs
 
 
-# NOTE: not sure if this should depend on the manifest file?
+def _get_latest_timestamp(base_dir: Path) -> str | None:
+    """Find the most recent batch timestamp by scanning run directories.
+
+    Looks at all timestamp subdirectories across all run directories and
+    returns the lexicographically latest one.
+    """
+    if not base_dir.exists():
+        return None
+    timestamps: set[str] = set()
+    for entry in base_dir.iterdir():
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        for ts_dir in entry.iterdir():
+            if ts_dir.is_dir() and (ts_dir / "config.json").exists():
+                timestamps.add(ts_dir.name)
+    if not timestamps:
+        return None
+    return sorted(timestamps)[-1]
+
+
 def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
     """Load all experiments for a batch into a 1D Runs.
+
+    Discovers runs by scanning the filesystem for directories containing
+    <timestamp>/config.json.
 
     Args:
         base_dir: The experiment base directory.
@@ -568,12 +600,10 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
     Returns:
         1D Runs of Experiment instances.
     """
-    manifest = _load_batch_manifest(base_dir, timestamp)
-    run_dirs = manifest["runs"]
+    experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
 
     results = []
-    for run_dir in run_dirs:
-        experiment_dir = base_dir / run_dir / timestamp
+    for experiment_dir in experiment_dirs:
         experiment_path = experiment_dir / "experiment.pkl"
 
         if experiment_path.exists():
@@ -600,26 +630,27 @@ def _generate_timestamp() -> str:
 
 def _list_runs(base_dir: Path) -> None:
     """List all runs under the experiment base directory with their status."""
-    batches_dir = base_dir / ".batches"
-    if not batches_dir.exists():
+    # Discover all timestamps by scanning run directories
+    timestamps: set[str] = set()
+    if base_dir.exists():
+        for entry in base_dir.iterdir():
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            for ts_dir in entry.iterdir():
+                if ts_dir.is_dir() and (ts_dir / "config.json").exists():
+                    timestamps.add(ts_dir.name)
+
+    if not timestamps:
         print("No runs found.")
         return
 
-    manifests = sorted(batches_dir.glob("*.json"))
-    if not manifests:
-        print("No runs found.")
-        return
-
-    for manifest_path in manifests:
-        timestamp = manifest_path.stem
-        data = json.loads(manifest_path.read_text())
-        run_dirs = data.get("runs", [])
-
-        total = len(run_dirs)
+    for timestamp in sorted(timestamps):
+        experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+        total = len(experiment_dirs)
         completed = 0
         failed = 0
-        for run_dir in run_dirs:
-            experiment_path = base_dir / run_dir / timestamp / "experiment.pkl"
+        for experiment_dir in experiment_dirs:
+            experiment_path = experiment_dir / "experiment.pkl"
             if experiment_path.exists():
                 try:
                     with open(experiment_path, "rb") as f:
@@ -999,14 +1030,14 @@ class ExperimentRunner:
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
-            latest = _get_latest_batch_timestamp(base_dir)
+            latest = _get_latest_timestamp(base_dir)
             if latest is None:
                 raise FileNotFoundError(f"No runs found in {base_dir}")
             timestamp = latest
 
-        # Verify the batch manifest exists
-        manifest_path = base_dir / ".batches" / f"{timestamp}.json"
-        if not manifest_path.exists():
+        # Verify that at least one run directory exists for this timestamp
+        experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+        if not experiment_dirs:
             raise FileNotFoundError(f"Run not found: {timestamp}")
 
         return _load_experiments(base_dir, timestamp)
@@ -1171,24 +1202,25 @@ class ExperimentRunner:
         # Determine the timestamp
         if args.continue_run:
             if args.continue_run == "latest":
-                latest = _get_latest_batch_timestamp(base_dir)
+                latest = _get_latest_timestamp(base_dir)
                 if latest is None:
                     raise RuntimeError(f"No previous runs found in {base_dir}")
                 timestamp = latest
             else:
                 timestamp = args.continue_run
-                manifest_path = base_dir / ".batches" / f"{timestamp}.json"
-                if not manifest_path.exists():
+                if not _discover_experiment_dirs(base_dir, timestamp):
                     raise RuntimeError(f"Run not found: {timestamp}")
 
-            # Detect existing snapshot from previous batch
-            manifest = _load_batch_manifest(base_dir, timestamp)
-            prev_commit = manifest.get("commit")
-            if prev_commit:
-                prev_snapshot = base_dir / ".snapshots" / prev_commit
-                if prev_snapshot.exists():
-                    snapshot_path = prev_snapshot
-                    commit_hash = prev_commit
+            # Detect existing snapshot from a .commit file in any run directory
+            for exp_dir in _discover_experiment_dirs(base_dir, timestamp):
+                commit_file = exp_dir / ".commit"
+                if commit_file.exists():
+                    prev_commit = commit_file.read_text().strip()
+                    prev_snapshot = base_dir / ".snapshots" / prev_commit
+                    if prev_snapshot.exists():
+                        snapshot_path = prev_snapshot
+                        commit_hash = prev_commit
+                    break
         else:
             # Generate new timestamp
             timestamp = _generate_timestamp()
@@ -1319,10 +1351,18 @@ class ExperimentRunner:
         if not args.report:
             import cloudpickle
 
-            # Load from batch manifest
-            manifest = _load_batch_manifest(base_dir, timestamp)
-            run_dirs = manifest["runs"]
-            experiment_dirs = [base_dir / rd / timestamp for rd in run_dirs]
+            # Discover experiment directories from filesystem
+            experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+
+            # Topologically sort discovered dirs by depends_on from config.json
+            dir_configs = []
+            for d in experiment_dirs:
+                cfg = json.loads((d / "config.json").read_text())
+                dir_configs.append(cfg)
+            if any(c.get("depends_on") for c in dir_configs):
+                sorted_configs = _topological_sort(dir_configs)
+                name_to_dir = {c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)}
+                experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
 
             # Apply filter if specified
             if args.filter:
