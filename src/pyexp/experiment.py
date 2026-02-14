@@ -338,13 +338,18 @@ def _validate_unique_hashes(configs: list[dict]) -> None:
         seen[h] = name
 
 
-def _get_experiment_dir(config: dict, base_dir: Path, timestamp: str) -> Path:
+def _get_experiment_dir(
+    config: dict, base_dir: Path, timestamp: str, *, hash_configs: bool = False
+) -> Path:
     """Get the experiment directory path for a config.
 
-    Returns base_dir / <name>-<config_hash> / timestamp.
+    Returns base_dir / <name> / timestamp (default) or
+    base_dir / <name>-<config_hash> / timestamp (with hash_configs=True).
     """
     name = _sanitize_name(config.get("name", "experiment"))
-    return base_dir / f"{name}-{_config_hash(config)}" / timestamp
+    if hash_configs:
+        return base_dir / f"{name}-{_config_hash(config)}" / timestamp
+    return base_dir / name / timestamp
 
 
 def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
@@ -363,14 +368,14 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
 
 
 def _save_batch_manifest(
-    base_dir: Path, timestamp: str, run_hashes: list[str], commit: str | None = None
+    base_dir: Path, timestamp: str, run_dirs: list[str], commit: str | None = None
 ) -> None:
     """Save batch manifest to .batches/<timestamp>.json.
 
     Args:
         base_dir: The experiment base directory (e.g., out/experiment_name).
         timestamp: The timestamp string for this batch.
-        run_hashes: List of config hashes for each run.
+        run_dirs: List of run directory names for each run.
         commit: Optional git commit hash of the source snapshot.
     """
     batches_dir = base_dir / ".batches"
@@ -378,7 +383,7 @@ def _save_batch_manifest(
 
     data = {
         "timestamp": timestamp,
-        "runs": run_hashes,
+        "runs": run_dirs,
     }
     if commit is not None:
         data["commit"] = commit
@@ -422,11 +427,11 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
         1D Runs of Experiment instances.
     """
     manifest = _load_batch_manifest(base_dir, timestamp)
-    run_hashes = manifest["runs"]
+    run_dirs = manifest["runs"]
 
     results = []
-    for run_hash in run_hashes:
-        experiment_dir = base_dir / run_hash / timestamp
+    for run_dir in run_dirs:
+        experiment_dir = base_dir / run_dir / timestamp
         experiment_path = experiment_dir / "experiment.pkl"
 
         if experiment_path.exists():
@@ -466,13 +471,13 @@ def _list_runs(base_dir: Path) -> None:
     for manifest_path in manifests:
         timestamp = manifest_path.stem
         data = json.loads(manifest_path.read_text())
-        run_hashes = data.get("runs", [])
+        run_dirs = data.get("runs", [])
 
-        total = len(run_hashes)
+        total = len(run_dirs)
         completed = 0
         failed = 0
-        for run_hash in run_hashes:
-            experiment_path = base_dir / run_hash / timestamp / "experiment.pkl"
+        for run_dir in run_dirs:
+            experiment_path = base_dir / run_dir / timestamp / "experiment.pkl"
             if experiment_path.exists():
                 try:
                     with open(experiment_path, "rb") as f:
@@ -717,6 +722,7 @@ class ExperimentRunner:
         viewer: bool = False,
         viewer_port: int = 8765,
         stash: bool = True,
+        hash_configs: bool = False,
     ):
         """Create an ExperimentRunner.
 
@@ -729,6 +735,7 @@ class ExperimentRunner:
             viewer: Start viewer after experiments complete.
             viewer_port: Port for the viewer.
             stash: Capture git repository state.
+            hash_configs: Append config parameter hash to run directory names.
         """
         self._experiment_class = experiment_class
         self._name = name or experiment_class.__name__
@@ -745,6 +752,7 @@ class ExperimentRunner:
         self._viewer_default = viewer
         self._viewer_port_default = viewer_port
         self._stash_default = stash
+        self._hash_configs_default = hash_configs
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Runs, Path], Any] | None = None
         self._current_experiment: Experiment | None = None
@@ -867,6 +875,7 @@ class ExperimentRunner:
         viewer: bool | None = None,
         viewer_port: int | None = None,
         stash: bool | None = None,
+        hash_configs: bool | None = None,
     ) -> Any:
         """Execute the full pipeline: configs -> experiments -> report.
 
@@ -880,6 +889,7 @@ class ExperimentRunner:
             viewer: If True, start the viewer after experiments complete.
             viewer_port: Port for the viewer.
             stash: If True, capture git repository state.
+            hash_configs: Append config parameter hash to run directory names.
         """
         args = _parse_args()
 
@@ -957,6 +967,12 @@ class ExperimentRunner:
             enable_stash = stash
         else:
             enable_stash = self._stash_default
+
+        # Hash configs: run() arg > constructor arg
+        if hash_configs is not None:
+            enable_hash_configs = hash_configs
+        else:
+            enable_hash_configs = self._hash_configs_default
 
         # If executor is already an Executor instance, use it directly
         if isinstance(resolved_executor, Executor):
@@ -1074,20 +1090,26 @@ class ExperimentRunner:
             # Validate unique names (after flattening)
             _validate_unique_names(flat_configs)
 
-            # Validate unique hashes (different names but same params would collide)
-            _validate_unique_hashes(flat_configs)
+            # Validate unique hashes when hashing is enabled
+            if enable_hash_configs:
+                _validate_unique_hashes(flat_configs)
 
-            # Compute experiment directories: base_dir / config_hash / timestamp
+            # Compute experiment directories
             experiment_dirs = [
-                _get_experiment_dir(config, base_dir, timestamp)
+                _get_experiment_dir(
+                    config, base_dir, timestamp, hash_configs=enable_hash_configs
+                )
                 for config in flat_configs
             ]
 
-            # Collect run directory names (<name>-<hash>) for the batch manifest
-            run_hashes = [
-                f"{_sanitize_name(config.get('name', 'experiment'))}-{_config_hash(config)}"
-                for config in flat_configs
-            ]
+            # Collect run directory names for the batch manifest
+            run_dirs = []
+            for config in flat_configs:
+                name = _sanitize_name(config.get("name", "experiment"))
+                if enable_hash_configs:
+                    run_dirs.append(f"{name}-{_config_hash(config)}")
+                else:
+                    run_dirs.append(name)
 
             # Build configs (without 'out')
             configs_for_save = []
@@ -1127,7 +1149,7 @@ class ExperimentRunner:
                     commit_hash = None
 
             # Save batch manifest
-            _save_batch_manifest(base_dir, timestamp, run_hashes, commit=commit_hash)
+            _save_batch_manifest(base_dir, timestamp, run_dirs, commit=commit_hash)
 
             # Create all experiment directories and save individual config.json files
             for config, experiment_dir in zip(configs_for_save, experiment_dirs):
@@ -1146,8 +1168,8 @@ class ExperimentRunner:
         if not args.report:
             # Load from batch manifest
             manifest = _load_batch_manifest(base_dir, timestamp)
-            run_hashes = manifest["runs"]
-            experiment_dirs = [base_dir / rh / timestamp for rh in run_hashes]
+            run_dirs = manifest["runs"]
+            experiment_dirs = [base_dir / rd / timestamp for rd in run_dirs]
 
             # Apply filter if specified
             if args.filter:
@@ -1315,6 +1337,7 @@ def experiment(
     viewer: bool = False,
     viewer_port: int = 8765,
     stash: bool = True,
+    hash_configs: bool = False,
 ) -> "ExperimentRunner | Callable[[Callable[[dict], Any]], ExperimentRunner]":
     """Decorator to create an ExperimentRunner from a function.
 
@@ -1330,6 +1353,7 @@ def experiment(
         viewer: If True, start the viewer after experiments complete.
         viewer_port: Port for the viewer.
         stash: If True, capture git repository state.
+        hash_configs: Append config parameter hash to run directory names.
 
     The decorated function can have one of two signatures:
         - fn(cfg) - receives only the config
@@ -1398,6 +1422,7 @@ def experiment(
             viewer=viewer,
             viewer_port=viewer_port,
             stash=stash,
+            hash_configs=hash_configs,
         )
 
         # Link the dynamic class back to the runner for chkpt support
