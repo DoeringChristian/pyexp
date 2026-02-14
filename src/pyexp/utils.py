@@ -104,6 +104,35 @@ def _find_submodule_paths(git_root: Path) -> list[str]:
     return paths
 
 
+def _symlink_gitignored(git_root: Path, dest: Path) -> None:
+    """Symlink gitignored files/directories into the snapshot.
+
+    Walks the top-level entries of the repo and symlinks any that are
+    gitignored and missing from the snapshot. This makes data files
+    (datasets, large binaries, etc.) accessible to experiments running
+    from the snapshot without copying them.
+
+    Only processes top-level entries to avoid recursing into deep trees.
+    """
+    for entry in git_root.iterdir():
+        name = entry.name
+        # Skip git metadata and the snapshot destination itself
+        if name == ".git" or dest.is_relative_to(entry.resolve()):
+            continue
+        target_in_snapshot = dest / name
+        # Only symlink entries missing from the snapshot
+        if target_in_snapshot.exists() or target_in_snapshot.is_symlink():
+            continue
+        # Check if this entry is gitignored
+        result = subprocess.run(
+            ["git", "check-ignore", "-q", name],
+            cwd=git_root,
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            target_in_snapshot.symlink_to(entry.resolve())
+
+
 def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
     """Check out a snapshot commit into a plain directory (no git metadata).
 
@@ -149,6 +178,10 @@ def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
             elif sub_in_snapshot.exists():
                 sub_in_snapshot.unlink()
             sub_in_snapshot.symlink_to(sub_in_repo.resolve())
+
+    # Symlink gitignored files/directories so experiments can access data
+    # files that aren't committed (e.g. datasets, large binaries).
+    _symlink_gitignored(git_root, dest)
 
     return dest
 

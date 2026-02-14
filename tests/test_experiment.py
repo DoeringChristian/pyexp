@@ -2276,3 +2276,86 @@ class TestSourceSnapshotting:
         assert mylib_in_snapshot.resolve() == (git_repo / "mylib").resolve()
         assert (mylib_in_snapshot / "lib.py").read_text() == "value = 99"
 
+    @pytest.mark.skipif(
+        not _can_subprocess_import_pyexp(),
+        reason="pyexp not importable in subprocess (not installed)",
+    )
+    def test_subprocess_executes_from_snapshot(self, git_repo, tmp_path):
+        """Subprocess executor should run experiments from the snapshot directory."""
+        # Create a marker file in the repo
+        (git_repo / "marker.txt").write_text("snapshot_content")
+
+        @experiment
+        def my_exp(config):
+            import os
+            from pathlib import Path
+
+            cwd = os.getcwd()
+            # Read the marker file from the working directory
+            marker = Path("marker.txt")
+            content = marker.read_text() if marker.exists() else "NOT_FOUND"
+            return {"cwd": cwd, "marker": content}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="subprocess", stash=True)
+
+        # The cwd should be inside .snapshots/, not the original git repo
+        base_dir = tmp_path / "my_exp"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None
+        assert result.result["cwd"].startswith(str(snapshot_dir)), (
+            f"Subprocess should run from snapshot dir {snapshot_dir}, "
+            f"but cwd was {result.result['cwd']}"
+        )
+        # The experiment should have read the marker file from the snapshot
+        assert result.result["marker"] == "snapshot_content"
+
+        # Now modify the original file - the snapshot should be unaffected
+        (git_repo / "marker.txt").write_text("modified_after_snapshot")
+        assert (snapshot_dir / "marker.txt").read_text() == "snapshot_content"
+
+    @pytest.mark.skipif(
+        not hasattr(os, "fork"), reason="Fork not available on this platform"
+    )
+    def test_fork_executes_from_snapshot(self, git_repo, tmp_path):
+        """Fork executor should run experiments from the snapshot directory."""
+        (git_repo / "marker.txt").write_text("snapshot_content")
+
+        @experiment
+        def my_exp(config):
+            import os
+            from pathlib import Path
+
+            cwd = os.getcwd()
+            marker = Path("marker.txt")
+            content = marker.read_text() if marker.exists() else "NOT_FOUND"
+            return {"cwd": cwd, "marker": content}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        @my_exp.report
+        def report(results, out):
+            return results[0]
+
+        with patch.object(sys, "argv", ["test"]):
+            result = my_exp.run(output_dir=tmp_path, executor="fork", stash=True)
+
+        base_dir = tmp_path / "my_exp"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None
+        assert result.result["cwd"].startswith(str(snapshot_dir)), (
+            f"Fork should run from snapshot dir {snapshot_dir}, "
+            f"but cwd was {result.result['cwd']}"
+        )
+        assert result.result["marker"] == "snapshot_content"
+
