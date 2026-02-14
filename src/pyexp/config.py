@@ -391,7 +391,10 @@ class Tensor(Generic[_T]):
         # Find all matching indices
         matching_multi_indices: list[tuple[int, ...]] = []
         for flat_idx, item in enumerate(self._data):
-            name = item.get("name", "") if isinstance(item, dict) else ""
+            if isinstance(item, dict):
+                name = item.get("name", "")
+            else:
+                name = getattr(item, "name", "") or ""
             if fnmatch.fnmatch(name, pattern):
                 matching_multi_indices.append(self._multi_index(flat_idx))
 

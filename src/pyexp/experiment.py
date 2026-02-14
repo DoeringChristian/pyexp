@@ -5,7 +5,6 @@ from functools import wraps
 from pathlib import Path
 from typing import Callable, Any, TYPE_CHECKING
 import argparse
-import hashlib
 import json
 import os
 import pickle
@@ -266,13 +265,6 @@ def _validate_configs(configs: list[dict]) -> None:
             raise TypeError(f"Config '{name}': {e}") from None
 
 
-def _config_hash(config: dict) -> str:
-    """Generate a short hash of the config for cache identification."""
-    config_without_name = {k: v for k, v in config.items() if k != "name"}
-    config_str = json.dumps(config_without_name, sort_keys=True, default=str)
-    return hashlib.sha256(config_str.encode()).hexdigest()[:12]
-
-
 def _sanitize_name(name: str) -> str:
     """Sanitize a config name for use as a directory name.
 
@@ -287,11 +279,39 @@ def _sanitize_name(name: str) -> str:
     return name
 
 
-def _get_experiment_dir(config: dict, output_dir: Path) -> Path:
-    """Get the cache directory path for an experiment config."""
+def _validate_unique_names(configs: list[dict]) -> None:
+    """Validate all configs have unique non-empty 'name' fields.
+
+    Args:
+        configs: List of config dicts (after sanitization).
+
+    Raises:
+        ValueError: If any config has an empty name or names are not unique.
+    """
+    names = []
+    for i, config in enumerate(configs):
+        name = config.get("name", "")
+        if not name:
+            raise ValueError(
+                f"Config at index {i} has no 'name' field. All configs must have a unique non-empty 'name'."
+            )
+        names.append(name)
+    seen = set()
+    for name in names:
+        if name in seen:
+            raise ValueError(
+                f"Duplicate config name '{name}'. All configs must have unique names."
+            )
+        seen.add(name)
+
+
+def _get_experiment_dir(config: dict, base_dir: Path, timestamp: str) -> Path:
+    """Get the experiment directory path for a config.
+
+    Returns base_dir / sanitized_name / timestamp (no hash).
+    """
     name = _sanitize_name(config.get("name", "experiment"))
-    hash_str = _config_hash(config)
-    return output_dir / f"{name}-{hash_str}"
+    return base_dir / name / timestamp
 
 
 def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
@@ -309,57 +329,71 @@ def _filter_by_name(items: list, pattern: str, get_name: callable) -> list:
     return [item for item in items if regex.search(get_name(item) or "")]
 
 
-def _save_runs_json(
-    run_dir: Path, shape: tuple, paths: list[Path], commit: str | None = None
+def _save_batch_manifest(
+    base_dir: Path, timestamp: str, run_names: list[str], commit: str | None = None
 ) -> None:
-    """Save run references and shape to a JSON file for later loading.
+    """Save batch manifest to .batches/<timestamp>.json.
 
     Args:
-        run_dir: The run directory.
-        shape: Shape of the config tensor.
-        paths: List of paths to the experiment directories (one per config).
+        base_dir: The experiment base directory (e.g., out/experiment_name).
+        timestamp: The timestamp string for this batch.
+        run_names: List of run names (sanitized config names).
         commit: Optional git commit hash of the source snapshot.
     """
-    # Store just the relative paths to run folders
-    runs = [str(p.relative_to(run_dir)) for p in paths]
+    batches_dir = base_dir / ".batches"
+    batches_dir.mkdir(parents=True, exist_ok=True)
 
     data = {
-        "runs": runs,
-        "shape": list(shape),
+        "timestamp": timestamp,
+        "runs": run_names,
     }
     if commit is not None:
         data["commit"] = commit
-    configs_path = run_dir / "runs.json"
-    configs_path.write_text(json.dumps(data, indent=2, default=str))
+
+    manifest_path = batches_dir / f"{timestamp}.json"
+    manifest_path.write_text(json.dumps(data, indent=2, default=str))
 
 
-def _load_runs_json(run_dir: Path) -> tuple[list[Path], tuple]:
-    """Load run paths and shape from runs.json.
+def _load_batch_manifest(base_dir: Path, timestamp: str) -> dict:
+    """Load a batch manifest from .batches/<timestamp>.json.
 
     Returns:
-        Tuple of (list of experiment directory paths, shape tuple).
+        Dict with keys: timestamp, runs, and optionally commit.
     """
-    configs_path = run_dir / "runs.json"
-    if not configs_path.exists():
-        raise FileNotFoundError(f"No runs.json found in {run_dir}")
-    data = json.loads(configs_path.read_text())
-    paths = [run_dir / run for run in data["runs"]]
-    return paths, tuple(data["shape"])
+    manifest_path = base_dir / ".batches" / f"{timestamp}.json"
+    if not manifest_path.exists():
+        raise FileNotFoundError(f"No batch manifest found at {manifest_path}")
+    return json.loads(manifest_path.read_text())
 
 
-def _load_experiments_from_dir(run_dir: Path) -> Tensor[Experiment]:
-    """Load experiment instances from a run directory using runs.json.
+def _get_latest_batch_timestamp(base_dir: Path) -> str | None:
+    """Find the most recent batch timestamp from .batches/ directory."""
+    batches_dir = base_dir / ".batches"
+    if not batches_dir.exists():
+        return None
+    manifests = sorted(batches_dir.glob("*.json"))
+    if not manifests:
+        return None
+    # Filename is <timestamp>.json, sort lexicographically (timestamps sort correctly)
+    return manifests[-1].stem
+
+
+def _load_experiments(base_dir: Path, timestamp: str) -> Tensor[Experiment]:
+    """Load all experiments for a batch into a 1D Tensor.
 
     Args:
-        run_dir: Path to the run directory containing runs.json and experiment dirs.
+        base_dir: The experiment base directory.
+        timestamp: The batch timestamp.
 
     Returns:
-        Tensor of Experiment instances with the original shape.
+        1D Tensor of Experiment instances.
     """
-    experiment_dirs, shape = _load_runs_json(run_dir)
+    manifest = _load_batch_manifest(base_dir, timestamp)
+    run_names = manifest["runs"]
 
     results = []
-    for experiment_dir in experiment_dirs:
+    for run_name in run_names:
+        experiment_dir = base_dir / run_name / timestamp
         experiment_path = experiment_dir / "experiment.pkl"
 
         if experiment_path.exists():
@@ -376,7 +410,7 @@ def _load_experiments_from_dir(run_dir: Path) -> Tensor[Experiment]:
                 f"No experiment found for config '{config_name}' at {experiment_dir}"
             )
 
-    return Tensor(results, shape)
+    return Tensor(results, (len(results),))
 
 
 def _generate_timestamp() -> str:
@@ -384,52 +418,28 @@ def _generate_timestamp() -> str:
     return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
-def _get_latest_timestamp(base_dir: Path) -> str | None:
-    """Find the most recent timestamp folder in the base directory."""
-    if not base_dir.exists():
-        return None
-    # List directories that look like timestamps (YYYY-MM-DD_HH-MM-SS)
-    timestamp_dirs = [
-        d
-        for d in base_dir.iterdir()
-        if d.is_dir() and len(d.name) == 19 and d.name[4] == "-" and d.name[10] == "_"
-    ]
-    if not timestamp_dirs:
-        return None
-    # Sort by name (timestamps sort lexicographically)
-    timestamp_dirs.sort(key=lambda d: d.name, reverse=True)
-    return timestamp_dirs[0].name
-
-
 def _list_runs(base_dir: Path) -> None:
     """List all runs under the experiment base directory with their status."""
-    if not base_dir.exists():
+    batches_dir = base_dir / ".batches"
+    if not batches_dir.exists():
         print("No runs found.")
         return
 
-    timestamp_dirs = [
-        d
-        for d in base_dir.iterdir()
-        if d.is_dir() and len(d.name) == 19 and d.name[4] == "-" and d.name[10] == "_"
-    ]
-    if not timestamp_dirs:
+    manifests = sorted(batches_dir.glob("*.json"))
+    if not manifests:
         print("No runs found.")
         return
 
-    timestamp_dirs.sort(key=lambda d: d.name)
+    for manifest_path in manifests:
+        timestamp = manifest_path.stem
+        data = json.loads(manifest_path.read_text())
+        run_names = data.get("runs", [])
 
-    for run_dir in timestamp_dirs:
-        # Scan config directories inside the run
-        config_dirs = [
-            d
-            for d in run_dir.iterdir()
-            if d.is_dir() and d.name not in ("report", ".src")
-        ]
-        total = len(config_dirs)
+        total = len(run_names)
         completed = 0
         failed = 0
-        for config_dir in config_dirs:
-            experiment_path = config_dir / "experiment.pkl"
+        for run_name in run_names:
+            experiment_path = base_dir / run_name / timestamp / "experiment.pkl"
             if experiment_path.exists():
                 try:
                     with open(experiment_path, "rb") as f:
@@ -453,7 +463,7 @@ def _list_runs(base_dir: Path) -> None:
             parts.append(f"\033[33m{pending} pending\033[0m")
         status = ", ".join(parts) if parts else "empty"
 
-        print(f"  {run_dir.name}  {status}  ({total} configs)")
+        print(f"  {timestamp}  {status}  ({total} configs)")
 
 
 def _parse_args() -> argparse.Namespace:
@@ -782,6 +792,7 @@ class ExperimentRunner:
         timestamp: str | None = None,
         output_dir: str | Path | None = None,
         name: str | None = None,
+        run: str | None = None,
     ) -> Tensor[Experiment]:
         """Load results from a previous experiment run.
 
@@ -790,9 +801,10 @@ class ExperimentRunner:
                       If None or "latest", loads the most recent run.
             output_dir: Base directory where experiment results are stored.
             name: Experiment name. Defaults to class/function name.
+            run: Optional single run name to load (returns 1D Tensor with one element).
 
         Returns:
-            Tensor of Experiment instances with full attribute access.
+            1D Tensor of Experiment instances with full attribute access.
         """
         exp_name = name or self._name
         resolved_output_dir = (
@@ -801,16 +813,17 @@ class ExperimentRunner:
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
-            latest = _get_latest_timestamp(base_dir)
+            latest = _get_latest_batch_timestamp(base_dir)
             if latest is None:
                 raise FileNotFoundError(f"No runs found in {base_dir}")
-            run_dir = base_dir / latest
-        else:
-            run_dir = base_dir / timestamp
-            if not run_dir.exists():
-                raise FileNotFoundError(f"Run not found: {run_dir}")
+            timestamp = latest
 
-        return _load_experiments_from_dir(run_dir)
+        # Verify the batch manifest exists
+        manifest_path = base_dir / ".batches" / f"{timestamp}.json"
+        if not manifest_path.exists():
+            raise FileNotFoundError(f"Run not found: {timestamp}")
+
+        return _load_experiments(base_dir, timestamp)
 
     def run(
         self,
@@ -961,30 +974,32 @@ class ExperimentRunner:
         snapshot_path: Path | None = None
         commit_hash: str | None = None
 
-        # Determine the run directory (always timestamped)
+        # Determine the timestamp
         if args.continue_run:
             if args.continue_run == "latest":
-                # Continue from the most recent timestamp
-                latest = _get_latest_timestamp(base_dir)
+                latest = _get_latest_batch_timestamp(base_dir)
                 if latest is None:
                     raise RuntimeError(f"No previous runs found in {base_dir}")
-                run_dir = base_dir / latest
+                timestamp = latest
             else:
-                # Continue from specified timestamp
-                run_dir = base_dir / args.continue_run
-                if not run_dir.exists():
-                    raise RuntimeError(f"Run not found: {run_dir}")
+                timestamp = args.continue_run
+                manifest_path = base_dir / ".batches" / f"{timestamp}.json"
+                if not manifest_path.exists():
+                    raise RuntimeError(f"Run not found: {timestamp}")
 
-            # Detect existing snapshot from previous run
-            src_dir = run_dir / ".src"
-            if src_dir.exists():
-                snapshot_path = src_dir
+            # Detect existing snapshot from previous batch
+            manifest = _load_batch_manifest(base_dir, timestamp)
+            prev_commit = manifest.get("commit")
+            if prev_commit:
+                prev_snapshot = base_dir / ".snapshots" / prev_commit
+                if prev_snapshot.exists():
+                    snapshot_path = prev_snapshot
+                    commit_hash = prev_commit
         else:
             # Generate new timestamp
-            run_dir = base_dir / _generate_timestamp()
+            timestamp = _generate_timestamp()
 
         # Print run info
-        timestamp = run_dir.name
         print(f"Run: {exp_name}/{timestamp}")
 
         # Start viewer in background if requested
@@ -993,7 +1008,7 @@ class ExperimentRunner:
             import subprocess as sp
             from pyexp._viewer import _find_free_port
 
-            run_dir.mkdir(parents=True, exist_ok=True)
+            base_dir.mkdir(parents=True, exist_ok=True)
             resolved_viewer_port = _find_free_port(resolved_viewer_port)
             print(f"Viewer: http://localhost:{resolved_viewer_port}")
             viewer_process = sp.Popen(
@@ -1008,7 +1023,7 @@ class ExperimentRunner:
                     "--port",
                     str(resolved_viewer_port),
                 ],
-                env={**os.environ, "PYEXP_LOG_DIR": str(run_dir.absolute())},
+                env={**os.environ, "PYEXP_LOG_DIR": str(base_dir.absolute())},
                 stdout=sp.DEVNULL,
                 stderr=sp.DEVNULL,
             )
@@ -1016,55 +1031,62 @@ class ExperimentRunner:
         # =================================================================
         # PHASE 1: Config Generation (only on fresh start)
         # =================================================================
-        # On fresh start: generate configs, compute hashes, create directories
-        # On --continue or --report: skip this phase, use saved configs
         is_fresh_start = not args.continue_run and not args.report
 
         if is_fresh_start:
             config_list = configs_fn()
             _validate_configs(list(config_list))
 
-            # Get shape from config_list if it's a Tensor
-            if isinstance(config_list, Tensor):
-                shape = config_list.shape
-            else:
-                shape = (len(config_list),)
-
             # Flatten config_list for iteration
             flat_configs = list(config_list)
 
-            # Compute experiment directories for each config (hashes computed here)
+            # Validate unique names (after flattening)
+            _validate_unique_names(flat_configs)
+
+            # Compute experiment directories: base_dir / sanitized_name / timestamp
             experiment_dirs = [
-                _get_experiment_dir(config, run_dir) for config in flat_configs
+                _get_experiment_dir(config, base_dir, timestamp) for config in flat_configs
             ]
 
-            # Build configs (without 'out' - that's set separately now)
+            # Collect sanitized run names for the batch manifest
+            run_names = [_sanitize_name(config.get("name", "experiment")) for config in flat_configs]
+
+            # Build configs (without 'out')
             configs_for_save = []
-            for config, experiment_dir in zip(flat_configs, experiment_dirs):
+            for config in flat_configs:
                 assert (
                     "out" not in config
                 ), "Config cannot contain 'out' key; it is reserved"
                 configs_for_save.append(Config(config))
 
-            # Create run directory
-            run_dir.mkdir(parents=True, exist_ok=True)
+            # Create base directory
+            base_dir.mkdir(parents=True, exist_ok=True)
 
-            # Create source snapshot if stash is enabled
+            # Create shared source snapshot if stash is enabled
             if enable_stash:
                 try:
                     from .utils import stash_and_snapshot
 
-                    commit_hash, snapshot_path = stash_and_snapshot(
-                        run_dir / ".src"
-                    )
+                    # Use a temporary path first to get the commit hash
+                    import tempfile
+                    with tempfile.TemporaryDirectory() as tmp:
+                        commit_hash, tmp_snapshot = stash_and_snapshot(Path(tmp) / "src")
+
+                    # Now create the shared snapshot at .snapshots/<commit>/
+                    shared_snapshot = base_dir / ".snapshots" / commit_hash
+                    if not shared_snapshot.exists():
+                        _, snapshot_path = stash_and_snapshot(shared_snapshot)
+                    else:
+                        snapshot_path = shared_snapshot
+
                     print(f"Source snapshot: {commit_hash[:12]} -> {snapshot_path}")
                 except Exception as e:
                     print(f"Warning: Could not create source snapshot: {e}")
                     snapshot_path = None
                     commit_hash = None
 
-            # Save runs.json (with commit hash if available)
-            _save_runs_json(run_dir, shape, experiment_dirs, commit=commit_hash)
+            # Save batch manifest
+            _save_batch_manifest(base_dir, timestamp, run_names, commit=commit_hash)
 
             # Create all experiment directories and save individual config.json files
             for config, experiment_dir in zip(configs_for_save, experiment_dirs):
@@ -1073,14 +1095,18 @@ class ExperimentRunner:
                 config_json_path.write_text(
                     json.dumps(dict(config), indent=2, default=str)
                 )
+                # Write commit reference so each run is self-contained
+                if commit_hash is not None:
+                    (experiment_dir / ".commit").write_text(commit_hash)
 
         # =================================================================
         # PHASE 2: Experiment Execution (skip if --report)
         # =================================================================
-        # Load configs from saved config.json files and run experiments
         if not args.report:
-            # Load experiment directories and shape from runs.json
-            experiment_dirs, shape = _load_runs_json(run_dir)
+            # Load from batch manifest
+            manifest = _load_batch_manifest(base_dir, timestamp)
+            run_names = manifest["runs"]
+            experiment_dirs = [base_dir / rn / timestamp for rn in run_names]
 
             # Apply filter if specified
             if args.filter:
@@ -1189,9 +1215,9 @@ class ExperimentRunner:
         # PHASE 3: Report Generation (optional)
         # =================================================================
         if report_fn is not None:
-            results = _load_experiments_from_dir(run_dir)
+            results = _load_experiments(base_dir, timestamp)
 
-            report_dir = run_dir / "report"
+            report_dir = base_dir / "report" / timestamp
             report_dir.mkdir(parents=True, exist_ok=True)
 
             return report_fn(results, report_dir)

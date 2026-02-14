@@ -88,7 +88,7 @@ def report(results: Tensor, report_dir):
 
     # Filter results by config values
     lr01_results = results[{"cfg.learning_rate": 0.1}]
-    print(f"\nResults with lr=0.1: {lr01_results.shape}")
+    print(f"\nResults with lr=0.1: {len(lr01_results)} runs")
 
     # Find best result
     best = max(results, key=lambda exp: exp.result["accuracy"])

@@ -456,18 +456,19 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Filter by cfg.x (note: changed from config.x to cfg.x)
+        # Results are always 1D now
+        assert received_results.shape == (4,)
+
+        # Filter by cfg.x
         x1_results = received_results[{"cfg.x": 1}]
-        assert x1_results.shape == (1, 1, 2)
         assert all(r.cfg["x"] == 1 for r in x1_results)
 
         # Filter by cfg.y
         y10_results = received_results[{"cfg.y": 10}]
-        assert y10_results.shape == (1, 2, 1)
         assert all(r.cfg["y"] == 10 for r in y10_results)
 
-    def test_report_tensors_preserve_sweep_shape(self, tmp_path):
-        """Tensors should preserve shape from sweep operations."""
+    def test_report_tensors_are_1d(self, tmp_path):
+        """Result tensors are always 1D regardless of sweep shape."""
         received_results = None
 
         @experiment
@@ -490,9 +491,12 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert received_results.shape == (1, 2, 2)
-        assert received_results[0, 0, 0].cfg["x"] == 1
-        assert received_results[0, 0, 0].result["val"] == 11
+        # Results are always 1D
+        assert received_results.shape == (4,)
+        # Can still access by name pattern
+        exp_a_c = received_results["exp_a_c"]
+        assert exp_a_c.cfg["x"] == 1
+        assert exp_a_c.result["val"] == 11
 
     def test_non_dict_result_wrapped_in_result(self, tmp_path):
         """Non-dict results are stored in .result attribute."""
@@ -652,18 +656,15 @@ class TestExperimentRun:
                 pass  # Expected - report tries to load all configs
 
         # Check which experiments actually ran by looking for experiment.pkl files
-        run_dir = tmp_path / "my_exp"
-        timestamp_dir = list(run_dir.iterdir())[0]
+        # New layout: base_dir/<run_name>/<timestamp>/experiment.pkl
+        base_dir = tmp_path / "my_exp"
         ran_names = []
-        for exp_dir in timestamp_dir.iterdir():
-            if exp_dir.is_dir() and exp_dir.name != "report":
-                exp_pkl = exp_dir / "experiment.pkl"
-                if exp_pkl.exists():
-                    import pickle
-                    with open(exp_pkl, "rb") as f:
-                        exp = pickle.load(f)
-                    if exp.result and exp.result.get("ran"):
-                        ran_names.append(exp.result["name"])
+        for exp_pkl in base_dir.rglob("experiment.pkl"):
+            import pickle
+            with open(exp_pkl, "rb") as f:
+                exp = pickle.load(f)
+            if exp.result and exp.result.get("ran"):
+                ran_names.append(exp.result["name"])
 
         assert sorted(ran_names) == ["exp_a", "exp_b"]
 
@@ -720,9 +721,10 @@ class TestResultsMethod:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Get the first timestamp
+        # Get the first timestamp from batch manifests
         base_dir = tmp_path / "my_exp"
-        first_timestamp = sorted(base_dir.iterdir())[0].name
+        batches_dir = base_dir / ".batches"
+        first_timestamp = sorted(batches_dir.glob("*.json"))[0].stem
 
         time.sleep(1.1)  # Ensure different timestamp
 
@@ -742,8 +744,8 @@ class TestResultsMethod:
         results_latest = my_exp.results(output_dir=tmp_path)
         assert results_latest[0].result["value"] == 99
 
-    def test_results_preserves_tensor_shape(self, tmp_path):
-        """results() preserves the original tensor shape from sweep."""
+    def test_results_always_1d(self, tmp_path):
+        """results() always returns a 1D Tensor regardless of sweep shape."""
 
         @experiment
         def my_exp(config):
@@ -765,8 +767,8 @@ class TestResultsMethod:
 
         results = my_exp.results(output_dir=tmp_path)
 
-        # Should preserve 3D shape: (1 base) x (2 x values) x (2 y values)
-        assert results.shape == (1, 2, 2)
+        # Results are always 1D
+        assert results.shape == (4,)
 
     def test_results_no_runs_raises(self, tmp_path):
         """results() raises FileNotFoundError when no runs exist."""
@@ -799,8 +801,8 @@ class TestResultsMethod:
         with pytest.raises(FileNotFoundError, match="Run not found"):
             my_exp.results(timestamp="1999-01-01_00-00-00", output_dir=tmp_path)
 
-    def test_configs_json_saved(self, tmp_path):
-        """run() saves runs.json with run folder references and shape."""
+    def test_batch_manifest_saved(self, tmp_path):
+        """run() saves .batches/<timestamp>.json with run names."""
         import json
 
         @experiment
@@ -821,24 +823,23 @@ class TestResultsMethod:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Find the run directory
+        # Find the batch manifest
         base_dir = tmp_path / "my_exp"
-        run_dir = sorted(base_dir.iterdir())[0]
+        batches_dir = base_dir / ".batches"
+        assert batches_dir.exists()
 
-        # Check runs.json exists and has correct content
-        configs_path = run_dir / "runs.json"
-        assert configs_path.exists()
+        manifests = list(batches_dir.glob("*.json"))
+        assert len(manifests) == 1
 
-        data = json.loads(configs_path.read_text())
-        assert data["shape"] == [2]
+        data = json.loads(manifests[0].read_text())
         assert len(data["runs"]) == 2
-        # runs should be folder names like "a-<hash>" and "b-<hash>"
-        assert data["runs"][0].startswith("a-")
-        assert data["runs"][1].startswith("b-")
+        assert data["runs"] == ["a", "b"]
+        assert "timestamp" in data
 
-        # Individual config.json files should contain full configs
-        for run_folder in data["runs"]:
-            config_json = run_dir / run_folder / "config.json"
+        # Individual config.json files should exist at <run_name>/<timestamp>/config.json
+        timestamp = data["timestamp"]
+        for run_name in data["runs"]:
+            config_json = base_dir / run_name / timestamp / "config.json"
             assert config_json.exists()
             config_data = json.loads(config_json.read_text())
             assert "x" in config_data
@@ -865,8 +866,8 @@ class TestOutputFolderStructure:
 
         assert my_exp._name == "mnist_classifier"
 
-    def test_always_creates_timestamp_folder(self, tmp_path):
-        """Output folder always includes a timestamp directory."""
+    def test_new_directory_layout(self, tmp_path):
+        """Output uses <experiment>/<run_name>/<timestamp>/ layout."""
 
         @experiment(name="test_exp")
         def my_exp(config):
@@ -883,20 +884,29 @@ class TestOutputFolderStructure:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Check structure: tmp_path/test_exp/<timestamp>/cfg-<hash>/
+        # Check structure: tmp_path/test_exp/cfg/<timestamp>/
         exp_dir = tmp_path / "test_exp"
         assert exp_dir.exists()
 
-        # Should have one timestamp folder
-        timestamp_dirs = list(exp_dir.iterdir())
-        assert len(timestamp_dirs) == 1
-        assert timestamp_dirs[0].is_dir()
+        # Should have run name dir and hidden dirs (.batches, report)
+        cfg_dir = exp_dir / "cfg"
+        assert cfg_dir.exists()
 
-        # Timestamp folder should contain config folder and report folder
-        contents = list(timestamp_dirs[0].iterdir())
-        config_dirs = [d for d in contents if d.name.startswith("cfg-")]
-        assert len(config_dirs) == 1
-        assert (timestamp_dirs[0] / "report").exists()
+        # cfg dir should have a timestamp subdir
+        timestamp_dirs = [d for d in cfg_dir.iterdir() if d.is_dir()]
+        assert len(timestamp_dirs) == 1
+
+        # Timestamp dir should contain experiment files
+        assert (timestamp_dirs[0] / "config.json").exists()
+        assert (timestamp_dirs[0] / "experiment.pkl").exists()
+
+        # Report dir should be at base_dir/report/<timestamp>/
+        batches_dir = exp_dir / ".batches"
+        assert batches_dir.exists()
+        manifest = list(batches_dir.glob("*.json"))[0]
+        ts = manifest.stem
+        report_dir = exp_dir / "report" / ts
+        assert report_dir.exists()
 
     def test_continue_specific_timestamp(self, tmp_path):
         """--continue=TIMESTAMP continues a specific run."""
@@ -917,9 +927,9 @@ class TestOutputFolderStructure:
         with patch.object(sys, "argv", ["test"]):
             result1 = my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Get the timestamp that was created
+        # Get the timestamp from batch manifest
         exp_dir = tmp_path / "test_exp"
-        timestamp = list(exp_dir.iterdir())[0].name
+        timestamp = sorted((exp_dir / ".batches").glob("*.json"))[0].stem
 
         # Second run with --continue should use cache
         with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
@@ -929,7 +939,7 @@ class TestOutputFolderStructure:
         assert result2 == 1
 
     def test_continue_uses_latest_timestamp(self, tmp_path):
-        """--continue uses the most recent timestamp folder."""
+        """--continue uses the most recent batch timestamp."""
 
         @experiment(name="test_exp")
         def my_exp(config):
@@ -953,8 +963,8 @@ class TestOutputFolderStructure:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         exp_dir = tmp_path / "test_exp"
-        timestamps = sorted(d.name for d in exp_dir.iterdir())
-        assert len(timestamps) == 2
+        batches = sorted((exp_dir / ".batches").glob("*.json"))
+        assert len(batches) == 2
 
         # --continue should use the latest
         with patch.object(sys, "argv", ["test", "--continue"]):
@@ -1268,9 +1278,11 @@ class TestSubprocessExecution:
         with patch.object(sys, "argv", ["test"]):
             results = my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        assert results.shape == (1, 2, 2)
-        assert results[0, 0, 0].result["value"] == 11  # x=1, y=10
-        assert results[0, 1, 1].result["value"] == 22  # x=2, y=20
+        # Results are always 1D
+        assert results.shape == (4,)
+        # Access by name
+        assert results["exp_a_c"].result["value"] == 11  # x=1, y=10
+        assert results["exp_b_d"].result["value"] == 22  # x=2, y=20
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="Fork not available on this platform")
@@ -1586,10 +1598,10 @@ class TestCheckpointDecorator:
         assert log["evaluate"] == 1
         assert result1["accuracy"] == 0.95
 
-        # Get the timestamp for continue
+        # Get the timestamp from batch manifests
         exp_dir = tmp_path / "MyExperiment"
-        timestamps = [d for d in exp_dir.iterdir() if d.is_dir()]
-        timestamp = timestamps[0].name
+        batches_dir = exp_dir / ".batches"
+        timestamp = sorted(batches_dir.glob("*.json"))[0].stem
 
         # Delete experiment.pkl to force re-run but keep checkpoints
         for exp_pkl in exp_dir.rglob("experiment.pkl"):
@@ -1840,10 +1852,10 @@ class TestCheckpointDecorator:
         assert log["step2"] == 1
         assert result1.error is not None
 
-        # Get timestamp
+        # Get timestamp from batch manifests
         exp_dir = tmp_path / "MyExperiment"
-        timestamps = [d for d in exp_dir.iterdir() if d.is_dir()]
-        timestamp = timestamps[0].name
+        batches_dir = exp_dir / ".batches"
+        timestamp = sorted(batches_dir.glob("*.json"))[0].stem
 
         # Delete experiment.pkl but keep checkpoints
         for exp_pkl in exp_dir.rglob("experiment.pkl"):
@@ -2000,8 +2012,18 @@ def git_repo_no_commits(tmp_path):
 class TestSourceSnapshotting:
     """Tests for git-based source code snapshotting."""
 
+    def _get_snapshot_dir(self, base_dir):
+        """Helper to find the snapshot directory under .snapshots/."""
+        snapshots_dir = base_dir / ".snapshots"
+        if not snapshots_dir.exists():
+            return None
+        commit_dirs = list(snapshots_dir.iterdir())
+        if not commit_dirs:
+            return None
+        return commit_dirs[0]
+
     def test_snapshot_created_on_fresh_run(self, git_repo, tmp_path):
-        """.src snapshot dir should be created on a fresh run with stash enabled."""
+        """.snapshots/<commit>/ should be created on a fresh run with stash enabled."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2013,12 +2035,10 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # Find run dir and check .src exists
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
-        assert src_dir.exists(), ".src snapshot directory should be created"
-        assert src_dir.is_dir()
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None, ".snapshots/<commit>/ should be created"
+        assert snapshot_dir.is_dir()
 
     def test_no_stash_prevents_snapshot(self, git_repo, tmp_path):
         """--no-stash should prevent snapshot creation."""
@@ -2033,14 +2053,12 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test", "--no-stash"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Find run dir and check .src does NOT exist
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
-        assert not src_dir.exists(), ".src should not be created with --no-stash"
+        snapshots_dir = base_dir / ".snapshots"
+        assert not snapshots_dir.exists(), ".snapshots should not be created with --no-stash"
 
-    def test_commit_hash_in_runs_json(self, git_repo, tmp_path):
-        """Commit hash should be stored in runs.json."""
+    def test_commit_hash_in_batch_manifest(self, git_repo, tmp_path):
+        """Commit hash should be stored in batch manifest."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2052,15 +2070,38 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # Find run dir and check runs.json
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
-        assert "commit" in runs_json, "runs.json should contain commit hash"
-        assert len(runs_json["commit"]) == 40, "commit hash should be 40 chars"
+        manifest = list((base_dir / ".batches").glob("*.json"))[0]
+        data = json.loads(manifest.read_text())
+        assert "commit" in data, "batch manifest should contain commit hash"
+        assert len(data["commit"]) == 40, "commit hash should be 40 chars"
+
+    def test_commit_hash_in_each_run_dir(self, git_repo, tmp_path):
+        """Each run directory should have a .commit file with the commit hash."""
+        @experiment
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "fast", "x": 1}, {"name": "slow", "x": 2}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+
+        base_dir = tmp_path / "my_exp"
+        manifest = list((base_dir / ".batches").glob("*.json"))[0]
+        data = json.loads(manifest.read_text())
+        commit = data["commit"]
+
+        # Each run dir should have a .commit file
+        for run_name in data["runs"]:
+            commit_file = base_dir / run_name / data["timestamp"] / ".commit"
+            assert commit_file.exists(), f".commit should exist in {run_name} run dir"
+            assert commit_file.read_text() == commit
 
     def test_no_commit_hash_without_stash(self, git_repo, tmp_path):
-        """runs.json should not contain commit hash when stash is disabled."""
+        """Batch manifest should not contain commit hash when stash is disabled."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2073,9 +2114,9 @@ class TestSourceSnapshotting:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
-        assert "commit" not in runs_json
+        manifest = list((base_dir / ".batches").glob("*.json"))[0]
+        data = json.loads(manifest.read_text())
+        assert "commit" not in data
 
     def test_snapshot_persists_after_run(self, git_repo, tmp_path):
         """Snapshot should persist after run completes (kept as artifact)."""
@@ -2096,15 +2137,12 @@ class TestSourceSnapshotting:
 
         assert result == 1
 
-        # Snapshot should still exist after run
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
-        assert src_dir.exists(), ".src should persist after run completes"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None, ".snapshots/<commit>/ should persist after run"
 
     def test_snapshot_contains_repo_files(self, git_repo, tmp_path):
         """Snapshot should contain copies of repository files."""
-        # Add a source file to the repo
         (git_repo / "source.py").write_text("x = 42")
 
         @experiment
@@ -2118,15 +2156,13 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # Check snapshot has the source file
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
-        assert (src_dir / "source.py").exists()
-        assert (src_dir / "source.py").read_text() == "x = 42"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert (snapshot_dir / "source.py").exists()
+        assert (snapshot_dir / "source.py").read_text() == "x = 42"
 
     def test_continue_reuses_existing_snapshot(self, git_repo, tmp_path):
-        """--continue should detect and reuse existing .src snapshot."""
+        """--continue should detect and reuse existing snapshot."""
         @experiment
         def my_exp(config):
             return {"value": config["x"]}
@@ -2144,20 +2180,19 @@ class TestSourceSnapshotting:
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        timestamp = timestamp_dir.name
-        src_dir = timestamp_dir / ".src"
-        assert src_dir.exists()
+        timestamp = sorted((base_dir / ".batches").glob("*.json"))[0].stem
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None
 
         # Continue run should reuse snapshot (not fail)
         with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
             result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
         assert result == 1
-        assert src_dir.exists()
+        assert snapshot_dir.exists()
 
-    def test_list_runs_excludes_src(self, git_repo, tmp_path, capsys):
-        """--list should not count .src as a config directory."""
+    def test_list_runs_correct_count(self, git_repo, tmp_path, capsys):
+        """--list should show correct config count."""
         @experiment(name="test_exp")
         def my_exp(config):
             return {"value": config["x"]}
@@ -2195,20 +2230,18 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        # Find run dir and check .src exists
         base_dir = tmp_path / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
-        assert src_dir.exists(), ".src snapshot should be created even without prior commits"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
+        assert snapshot_dir is not None, ".snapshots/<commit>/ should be created even without prior commits"
 
-        # Check commit hash is in runs.json
-        runs_json = json.loads((timestamp_dir / "runs.json").read_text())
-        assert "commit" in runs_json
-        assert len(runs_json["commit"]) == 40
+        # Check commit hash is in batch manifest
+        manifest = list((base_dir / ".batches").glob("*.json"))[0]
+        data = json.loads(manifest.read_text())
+        assert "commit" in data
+        assert len(data["commit"]) == 40
 
     def test_snapshot_symlinks_submodules(self, git_repo, tmp_path):
         """Submodule directories in snapshot should be symlinked to originals."""
-        # Create a separate repo to use as a submodule
         sub_repo = tmp_path / "sub_repo"
         sub_repo.mkdir()
         _init_git_repo(sub_repo)
@@ -2216,7 +2249,6 @@ class TestSourceSnapshotting:
         subprocess.check_call(["git", "add", "."], cwd=sub_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         subprocess.check_call(["git", "commit", "-m", "add lib"], cwd=sub_repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        # Add it as a submodule in the main repo
         subprocess.check_call(
             ["git", "-c", "protocol.file.allow=always", "submodule", "add", str(sub_repo), "mylib"],
             cwd=git_repo,
@@ -2236,13 +2268,10 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path / "out", executor="inline", stash=True)
 
-        # Find the .src dir
         base_dir = tmp_path / "out" / "my_exp"
-        timestamp_dir = sorted(base_dir.iterdir())[0]
-        src_dir = timestamp_dir / ".src"
+        snapshot_dir = self._get_snapshot_dir(base_dir)
 
-        # Submodule should be a symlink pointing to the real submodule dir
-        mylib_in_snapshot = src_dir / "mylib"
+        mylib_in_snapshot = snapshot_dir / "mylib"
         assert mylib_in_snapshot.is_symlink(), "submodule should be symlinked"
         assert mylib_in_snapshot.resolve() == (git_repo / "mylib").resolve()
         assert (mylib_in_snapshot / "lib.py").read_text() == "value = 99"
