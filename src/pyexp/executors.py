@@ -102,10 +102,12 @@ class InlineExecutor(Executor):
                 sys.stdout, sys.stderr = old_stdout, old_stderr
 
         instance._Experiment__log = log
+        instance._Experiment__finished = True
 
         # Pickle entire instance using cloudpickle for dynamic classes
         with open(result_path, "wb") as f:
             cloudpickle.dump(instance, f)
+        (result_path.parent / ".finished").touch()
 
 
 class SubprocessExecutor(Executor):
@@ -200,16 +202,23 @@ class SubprocessExecutor(Executor):
                 # Load and update with log
                 with open(result_path, "rb") as f:
                     instance = pickle.load(f)
+                # If worker crashed before marking finished, record the error
+                if not instance.finished:
+                    instance._Experiment__error = f"SubprocessError: worker exited with code {proc.returncode}"
+                    instance._Experiment__finished = True
                 instance._Experiment__log = log
                 # Re-save with log included
                 with open(result_path, "wb") as f:
                     cloudpickle.dump(instance, f)
+                (result_path.parent / ".finished").touch()
             else:
                 # Subprocess crashed before writing result
                 instance._Experiment__error = f"SubprocessError: exited with code {proc.returncode}"
                 instance._Experiment__log = log
+                instance._Experiment__finished = True
                 with open(result_path, "wb") as f:
                     cloudpickle.dump(instance, f)
+                (result_path.parent / ".finished").touch()
         finally:
             # Clean up payload file
             Path(payload_path).unlink(missing_ok=True)
@@ -286,16 +295,20 @@ class ForkExecutor(Executor):
 
                 instance.experiment()
 
+                instance._Experiment__finished = True
                 with open(result_path, "wb") as f:
                     cloudpickle.dump(instance, f)
+                (result_path.parent / ".finished").touch()
                 os._exit(0)
             except Exception as e:
                 # Write error information
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                 instance._Experiment__error = error_msg
+                instance._Experiment__finished = True
                 try:
                     with open(result_path, "wb") as f:
                         cloudpickle.dump(instance, f)
+                    (result_path.parent / ".finished").touch()
                 except Exception:
                     pass
                 os._exit(1)
@@ -321,15 +334,22 @@ class ForkExecutor(Executor):
             if result_path.exists():
                 with open(result_path, "rb") as f:
                     instance = pickle.load(f)
+                # If child crashed before marking finished, record the error
+                if not instance.finished:
+                    instance._Experiment__error = f"ForkError: child exited with code {exit_code}"
+                    instance._Experiment__finished = True
                 instance._Experiment__log = log
                 with open(result_path, "wb") as f:
                     cloudpickle.dump(instance, f)
+                (result_path.parent / ".finished").touch()
             else:
                 # Child crashed before writing result
                 instance._Experiment__error = f"ForkError: exited with code {exit_code}"
                 instance._Experiment__log = log
+                instance._Experiment__finished = True
                 with open(result_path, "wb") as f:
                     cloudpickle.dump(instance, f)
+                (result_path.parent / ".finished").touch()
 
 
 class RayExecutor(Executor):
@@ -447,8 +467,10 @@ class RayExecutor(Executor):
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
             instance._Experiment__log = log
+            instance._Experiment__finished = True
             with open(result_path, "wb") as f:
                 cloudpickle.dump(instance, f)
+            (result_path.parent / ".finished").touch()
             return instance
 
         # Submit task and wait for result
@@ -459,8 +481,10 @@ class RayExecutor(Executor):
             # Task failed at Ray level
             instance._Experiment__error = f"RayError: {e}\n{traceback.format_exc()}"
             instance._Experiment__log = ""
+            instance._Experiment__finished = True
             with open(result_path, "wb") as f:
                 cloudpickle.dump(instance, f)
+            (result_path.parent / ".finished").touch()
 
 
 # Registry of built-in executors

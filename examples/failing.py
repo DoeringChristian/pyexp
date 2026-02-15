@@ -1,3 +1,4 @@
+from os import abort
 import pyexp
 from pyexp import Config
 
@@ -24,6 +25,7 @@ def exp(config: Config):
 
     exp.chkpt(somethingdifferent)()
 
+    abort()
     exit()
 
     # Simulate experiment result
@@ -42,6 +44,9 @@ def configs() -> list[dict]:
 
 
 if __name__ == "__main__":
+    results = exp.results()
+    print(f"{results=}")
+
     exp.run()
 
     # Load latest results

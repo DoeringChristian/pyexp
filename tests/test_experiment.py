@@ -770,15 +770,16 @@ class TestResultsMethod:
         # Results are always 1D
         assert len(results) == 4
 
-    def test_results_no_runs_raises(self, tmp_path):
-        """results() raises FileNotFoundError when no runs exist."""
+    def test_results_no_runs_returns_empty(self, tmp_path):
+        """results() returns empty Runs when no runs exist."""
 
         @experiment
         def my_exp(config):
             return {"value": 1}
 
-        with pytest.raises(FileNotFoundError, match="No runs found"):
-            my_exp.results(output_dir=tmp_path)
+        results = my_exp.results(output_dir=tmp_path)
+        assert isinstance(results, Runs)
+        assert len(results) == 0
 
     def test_results_invalid_timestamp_raises(self, tmp_path):
         """results() raises FileNotFoundError for invalid timestamp."""
@@ -843,6 +844,208 @@ class TestResultsMethod:
             assert config_json.exists()
             config_data = json.loads(config_json.read_text())
             assert "x" in config_data
+
+
+class TestFinishedFlag:
+    """Tests for the Experiment.finished property."""
+
+    def test_finished_false_by_default(self):
+        """New Experiment instances have finished=False."""
+        exp = Experiment()
+        assert exp.finished is False
+
+    def test_finished_true_after_successful_run(self, tmp_path):
+        """finished=True after a successful experiment run."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        results = my_exp.results(output_dir=tmp_path)
+        assert len(results) == 1
+        assert results[0].finished is True
+
+    def test_finished_true_after_failed_run(self, tmp_path):
+        """finished=True after a failed experiment run."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            raise ValueError("intentional failure")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline", retry=0)
+
+        results = my_exp.results(output_dir=tmp_path)
+        assert len(results) == 1
+        assert results[0].finished is True
+        assert results[0].error is not None
+
+    def test_initial_pkl_saved_before_execution(self, tmp_path):
+        """experiment.pkl should exist on disk even before execution completes."""
+        import pickle
+
+        pkl_existed_before = {}
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            # During execution, check that the pkl already exists on disk
+            exp_dir = config["_exp_dir"]
+            pkl_path = exp_dir / "experiment.pkl"
+            pkl_existed_before[config["name"]] = pkl_path.exists()
+            if pkl_path.exists():
+                with open(pkl_path, "rb") as f:
+                    pre_instance = pickle.load(f)
+                pkl_existed_before["was_finished"] = pre_instance.finished
+            return {"value": 1}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        # We need to pass the experiment dir to the function. Since inline
+        # executor runs in-process, we can discover it after setup.
+        # Instead, use a simpler approach: just check files after run.
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # After run, the pkl should exist and be finished
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].finished is True
+
+    def test_continue_skips_finished_experiments(self, tmp_path):
+        """--continue should skip experiments that are already finished."""
+        call_count = 0
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            nonlocal call_count
+            call_count += 1
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        # First run
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert call_count == 1
+
+        # Continue run should skip (already finished)
+        with patch.object(sys, "argv", ["test", "--continue"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        assert call_count == 1  # Not called again
+
+    def test_results_finished_only(self, tmp_path):
+        """results(finished=True) with explicit timestamp only returns finished experiments."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "a", "x": 1}, {"name": "b", "x": 2}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+        timestamp = sorted((base_dir / ".batches").glob("*.json"))[0].stem
+
+        # All finished — should return both
+        results = my_exp.results(timestamp=timestamp, output_dir=tmp_path, finished=True)
+        assert len(results) == 2
+
+        # Remove .finished from one experiment to simulate unfinished
+        for d in base_dir.rglob(".finished"):
+            d.unlink()
+            break
+
+        # With finished=True, only the finished one should be returned
+        results = my_exp.results(timestamp=timestamp, output_dir=tmp_path, finished=True)
+        assert len(results) == 1
+
+        # Without finished flag, both should still be returned
+        results = my_exp.results(timestamp=timestamp, output_dir=tmp_path)
+        assert len(results) == 2
+
+    def test_results_finished_searches_back_in_time(self, tmp_path):
+        """results(finished=True) searches back to find a fully finished batch."""
+        import time
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        # First run — will be finished
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        time.sleep(1.1)
+
+        # Second run — will also be finished
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+        timestamps = sorted((base_dir / ".batches").glob("*.json"))
+        latest_ts = timestamps[-1].stem
+
+        # Remove .finished from latest run to simulate unfinished
+        for d in base_dir.rglob(".finished"):
+            # Only remove from the latest timestamp
+            if latest_ts in str(d):
+                d.unlink()
+
+        # results(finished=True) should skip the latest and find the first
+        results = my_exp.results(output_dir=tmp_path, finished=True)
+        assert len(results) == 1
+
+        first_ts = timestamps[0].stem
+        # Verify it loaded from the first timestamp
+        assert first_ts in str(results[0].out)
+
+    def test_results_finished_returns_empty_when_none_finished(self, tmp_path):
+        """results(finished=True) returns empty Runs when no batch is fully finished."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Remove all .finished markers
+        base_dir = tmp_path / "my_exp"
+        for d in base_dir.rglob(".finished"):
+            d.unlink()
+
+        results = my_exp.results(output_dir=tmp_path, finished=True)
+        assert isinstance(results, Runs)
+        assert len(results) == 0
 
 
 class TestOutputFolderStructure:

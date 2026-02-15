@@ -54,6 +54,10 @@ def configs() -> list[dict]:
 
 
 if __name__ == "__main__":
+
+    results = exp.results()
+    print(f"{results=}")
+
     exp.run()
 
     # Load latest results

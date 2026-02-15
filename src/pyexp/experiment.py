@@ -62,6 +62,7 @@ class Experiment:
     _Experiment__log: str = ""
     _Experiment__deps: "Runs[Experiment] | None" = None
     _Experiment__skipped: bool = False
+    _Experiment__finished: bool = False
 
     @property
     def cfg(self) -> Config:
@@ -109,6 +110,11 @@ class Experiment:
     def skipped(self) -> bool:
         """Whether this experiment was skipped due to a failed dependency."""
         return self._Experiment__skipped
+
+    @property
+    def finished(self) -> bool:
+        """Whether this experiment has finished executing (successfully or with error)."""
+        return self._Experiment__finished
 
     def __getstate__(self) -> dict:
         """Exclude transient deps from pickle serialization."""
@@ -575,14 +581,10 @@ def _discover_experiment_dirs(base_dir: Path, timestamp: str) -> list[Path]:
     return dirs
 
 
-def _get_latest_timestamp(base_dir: Path) -> str | None:
-    """Find the most recent batch timestamp by scanning run directories.
-
-    Looks at all timestamp subdirectories across all run directories and
-    returns the lexicographically latest one.
-    """
+def _get_all_timestamps(base_dir: Path) -> list[str]:
+    """Return all batch timestamps sorted newest-first by scanning run directories."""
     if not base_dir.exists():
-        return None
+        return []
     timestamps: set[str] = set()
     for entry in base_dir.iterdir():
         if not entry.is_dir() or entry.name.startswith("."):
@@ -590,12 +592,38 @@ def _get_latest_timestamp(base_dir: Path) -> str | None:
         for ts_dir in entry.iterdir():
             if ts_dir.is_dir() and (ts_dir / "config.json").exists():
                 timestamps.add(ts_dir.name)
-    if not timestamps:
-        return None
-    return sorted(timestamps)[-1]
+    return sorted(timestamps, reverse=True)
 
 
-def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
+def _get_latest_timestamp(base_dir: Path) -> str | None:
+    """Find the most recent batch timestamp by scanning run directories.
+
+    Looks at all timestamp subdirectories across all run directories and
+    returns the lexicographically latest one.
+    """
+    timestamps = _get_all_timestamps(base_dir)
+    return timestamps[0] if timestamps else None
+
+
+def _is_batch_finished(base_dir: Path, timestamp: str) -> bool:
+    """Check if all runs in a batch have finished (have .finished marker)."""
+    experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+    if not experiment_dirs:
+        return False
+    return all((d / ".finished").exists() for d in experiment_dirs)
+
+
+def _get_latest_finished_timestamp(base_dir: Path) -> str | None:
+    """Find the most recent batch timestamp where all runs are finished."""
+    for ts in _get_all_timestamps(base_dir):
+        if _is_batch_finished(base_dir, ts):
+            return ts
+    return None
+
+
+def _load_experiments(
+    base_dir: Path, timestamp: str, *, finished_only: bool = False
+) -> Runs[Experiment]:
     """Load all experiments for a batch into a 1D Runs.
 
     Discovers runs by scanning the filesystem for directories containing
@@ -604,6 +632,7 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
     Args:
         base_dir: The experiment base directory.
         timestamp: The batch timestamp.
+        finished_only: If True, only load experiments that have a .finished marker.
 
     Returns:
         1D Runs of Experiment instances.
@@ -613,6 +642,9 @@ def _load_experiments(base_dir: Path, timestamp: str) -> Runs[Experiment]:
     results = []
     for experiment_dir in experiment_dirs:
         experiment_path = experiment_dir / "experiment.pkl"
+
+        if finished_only and not (experiment_dir / ".finished").exists():
+            continue
 
         if experiment_path.exists():
             with open(experiment_path, "rb") as f:
@@ -649,8 +681,9 @@ def _list_runs(base_dir: Path) -> None:
         completed = 0
         failed = 0
         for experiment_dir in experiment_dirs:
+            finished_marker = experiment_dir / ".finished"
             experiment_path = experiment_dir / "experiment.pkl"
-            if experiment_path.exists():
+            if finished_marker.exists() and experiment_path.exists():
                 try:
                     with open(experiment_path, "rb") as f:
                         instance = pickle.load(f)
@@ -1027,6 +1060,7 @@ class ExperimentRunner:
         output_dir: str | Path | None = None,
         name: str | None = None,
         run: str | None = None,
+        finished: bool = False,
     ) -> Runs[Experiment]:
         """Load results from a previous experiment run.
 
@@ -1036,6 +1070,9 @@ class ExperimentRunner:
             output_dir: Base directory where experiment results are stored.
             name: Experiment name. Defaults to class/function name.
             run: Optional single run name to load (returns 1D Runs with one element).
+            finished: If True, only include finished experiments. When searching
+                     for "latest", searches backwards in time until it finds a
+                     batch where all runs are finished.
 
         Returns:
             1D Runs of Experiment instances with full attribute access.
@@ -1047,9 +1084,12 @@ class ExperimentRunner:
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
-            latest = _get_latest_timestamp(base_dir)
+            if finished:
+                latest = _get_latest_finished_timestamp(base_dir)
+            else:
+                latest = _get_latest_timestamp(base_dir)
             if latest is None:
-                raise FileNotFoundError(f"No runs found in {base_dir}")
+                return Runs([])
             timestamp = latest
 
         # Verify that at least one run directory exists for this timestamp
@@ -1057,7 +1097,7 @@ class ExperimentRunner:
         if not experiment_dirs:
             raise FileNotFoundError(f"Run not found: {timestamp}")
 
-        return _load_experiments(base_dir, timestamp)
+        return _load_experiments(base_dir, timestamp, finished_only=finished)
 
     def run(
         self,
@@ -1445,10 +1485,15 @@ class ExperimentRunner:
                 config_data.pop("depends_on", None)
                 config = Config(config_data)
 
-                if experiment_path.exists():
-                    # Already completed (cached / --continue)
+                # Check if a finished result already exists on disk
+                finished_marker = experiment_dir / ".finished"
+                is_cached = experiment_path.exists() and finished_marker.exists()
+
+                if is_cached:
                     with open(experiment_path, "rb") as f:
                         instance = pickle.load(f)
+                if is_cached:
+                    # Already completed (cached / --continue)
                     completed[config_name] = instance
                     # Ensure marker file exists for viewer discovery
                     marker_path = experiment_dir / ".pyexp"
@@ -1476,9 +1521,11 @@ class ExperimentRunner:
                         instance._Experiment__out = experiment_dir
                         instance._Experiment__skipped = True
                         instance._Experiment__error = f"Skipped: {skip_reason}"
+                        instance._Experiment__finished = True
                         experiment_dir.mkdir(parents=True, exist_ok=True)
                         with open(experiment_path, "wb") as f:
                             cloudpickle.dump(instance, f)
+                        (experiment_dir / ".finished").touch()
                         completed[config_name] = instance
                         status = "skipped"
                     else:
@@ -1496,6 +1543,12 @@ class ExperimentRunner:
                         instance._Experiment__cfg = config
                         instance._Experiment__out = experiment_dir
                         instance._Experiment__deps = deps_runs
+
+                        # Save initial experiment.pkl so partial/interrupted
+                        # experiments are always discoverable on disk
+                        experiment_dir.mkdir(parents=True, exist_ok=True)
+                        with open(experiment_path, "wb") as f:
+                            cloudpickle.dump(instance, f)
 
                         # Retry loop
                         for attempt in range(max_retries + 1):
@@ -1530,13 +1583,14 @@ class ExperimentRunner:
                             print("---")
 
                             if attempt < max_retries:
-                                # Delete experiment.pkl before retry so executor writes fresh
-                                experiment_path.unlink(missing_ok=True)
                                 # Create fresh instance for retry
                                 instance = self._experiment_class()
                                 instance._Experiment__cfg = config
                                 instance._Experiment__out = experiment_dir
                                 instance._Experiment__deps = deps_runs
+                                # Re-save initial (unfinished) pkl for retry
+                                with open(experiment_path, "wb") as f:
+                                    cloudpickle.dump(instance, f)
 
                         completed[config_name] = instance
 

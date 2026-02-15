@@ -52,9 +52,11 @@ def run_worker(payload_path: str) -> int:
         instance.experiment()
 
         # Write pickled instance using cloudpickle for dynamic classes
+        instance._Experiment__finished = True
         result_path.parent.mkdir(parents=True, exist_ok=True)
         with open(result_path, "wb") as f:
             cloudpickle.dump(instance, f)
+        (result_path.parent / ".finished").touch()
 
         return 0
 
@@ -64,10 +66,12 @@ def run_worker(payload_path: str) -> int:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             if instance is not None:
                 instance._Experiment__error = error_msg
+                instance._Experiment__finished = True
                 if result_path is not None:
                     result_path.parent.mkdir(parents=True, exist_ok=True)
                     with open(result_path, "wb") as f:
                         cloudpickle.dump(instance, f)
+                    (result_path.parent / ".finished").touch()
         except Exception:
             # If we can't even write the error, just print it
             traceback.print_exc()
