@@ -24,7 +24,7 @@ import traceback
 import cloudpickle
 
 if TYPE_CHECKING:
-    from .experiment import Result
+    from .runner import Result
     from .config import Runs
 
 # Valid executor names

@@ -1345,7 +1345,7 @@ class TestSubmitAPI:
         with patch.object(sys, "argv", ["test"]):
             runner.run(executor="inline")
 
-        from pyexp.experiment import _get_latest_timestamp, _load_experiments
+        from pyexp.runner import _get_latest_timestamp, _load_experiments
         base_dir = tmp_path / "my_exp"
         ts = _get_latest_timestamp(base_dir)
         results = _load_experiments(base_dir, ts)
@@ -1779,7 +1779,7 @@ class TestFilterWithDependencies:
 
         # Verify both ran successfully
         base_dir = tmp_path / "pipeline"
-        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
 
         ts = _get_latest_timestamp(base_dir)
         exp_dirs = _discover_experiment_dirs(base_dir, ts)
@@ -1828,7 +1828,7 @@ class TestFilterWithDependencies:
 
         # Phase 2: delete finetune's .finished marker so it re-runs
         base_dir = tmp_path / "pipeline2"
-        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
 
         ts = _get_latest_timestamp(base_dir)
         exp_dirs = _discover_experiment_dirs(base_dir, ts)
@@ -1879,7 +1879,7 @@ class TestFilterWithDependencies:
 
         # Verify finetune was marked as skipped
         base_dir = tmp_path / "pipeline3"
-        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
 
         ts = _get_latest_timestamp(base_dir)
         exp_dirs = _discover_experiment_dirs(base_dir, ts)

@@ -10,7 +10,8 @@ from .config import (
     sweep,
     to_dict,
 )
-from .experiment import Result, ExperimentRunner, Experiment, experiment
+from .runner import Result, ExperimentRunner
+from .experiment import Experiment, experiment
 from .executors import (
     Executor,
     ExecutorName,

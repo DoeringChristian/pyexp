@@ -6,7 +6,7 @@ from pyexp import Config, Runs
 
 
 @pyexp.experiment
-def my_experiment(cfg: Config, out: Path):
+def exp(cfg: Config, out: Path):
     """Run the experiment with config and output directory access."""
     lr = cfg.learning_rate
     epochs = cfg.epochs
@@ -17,7 +17,7 @@ def my_experiment(cfg: Config, out: Path):
     return {"accuracy": 0.9 + lr * epochs / 100, "epochs_run": epochs}
 
 
-@my_experiment.configs
+@exp.configs
 def configs():
     """Return list of configs to run."""
     return [
@@ -28,16 +28,15 @@ def configs():
 
 
 if __name__ == "__main__":
-    my_experiment.run()
+    exp.run()
 
     # Load results after run
-    results = my_experiment.results()
     print("\n=== Results ===")
-    for exp in results:
-        print(f"{exp.name}: accuracy={exp.result['accuracy']:.4f}, epochs={exp.result['epochs_run']}")
-        print(f"  cfg: {exp.cfg}")
-        print(f"  out: {exp.out}")
-        print(f"  error: {exp.error}")
-
-    best = max(results, key=lambda exp: exp.result["accuracy"])
-    print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
+    print(f"{dir(exp['fast'])=}")
+    for run in exp:
+        print(
+            f"{run.name}: accuracy={run.result['accuracy']:.4f}, epochs={run.result['epochs_run']}"
+        )
+        print(f"  cfg: {run.cfg}")
+        print(f"  out: {run.out}")
+        print(f"  error: {run.error}")
