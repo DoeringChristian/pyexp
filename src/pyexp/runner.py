@@ -517,6 +517,23 @@ def _print_dependency_graph(configs: list[dict]) -> None:
             print(f"  {name}")
 
 
+def _write_run_dir(experiment_dir, config, commit_hash):
+    """Create the experiment run directory, write config.json, and optionally .commit.
+
+    Args:
+        experiment_dir: Path to the experiment run directory.
+        config: Config object to serialize as config.json.
+        commit_hash: Optional git commit hash to write as .commit.
+    """
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    config_json_path = experiment_dir / "config.json"
+    config_json_path.write_text(
+        json.dumps(dict(config), indent=2, default=str)
+    )
+    if commit_hash is not None:
+        (experiment_dir / ".commit").write_text(commit_hash)
+
+
 class _ProgressBar:
     """Simple progress bar for experiment execution."""
 
@@ -761,15 +778,6 @@ class ExperimentRunner:
 
             _save_batch_manifest(base_dir, timestamp, run_dirs, commit=commit_hash)
 
-            for config, experiment_dir in zip(configs_for_save, experiment_dirs):
-                experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_json_path = experiment_dir / "config.json"
-                config_json_path.write_text(
-                    json.dumps(dict(config), indent=2, default=str)
-                )
-                if commit_hash is not None:
-                    (experiment_dir / ".commit").write_text(commit_hash)
-
         # =================================================================
         # Experiment Execution
         # =================================================================
@@ -780,50 +788,87 @@ class ExperimentRunner:
             sub_name = cfg_sub.get("name", "")
             submission_fns[sub_name] = fn_sub
 
-        # Discover experiment directories from filesystem
-        experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+        if is_fresh_start:
+            # Use in-memory data from Phase A (no filesystem discovery needed)
+            all_configs_runs = Runs(flat_configs)
 
-        # Topologically sort discovered dirs by depends_on from config.json
-        dir_configs = []
-        for d in experiment_dirs:
-            cfg = json.loads((d / "config.json").read_text())
-            dir_configs.append(cfg)
-        if any(c.get("depends_on") for c in dir_configs):
-            sorted_configs = _topological_sort(dir_configs)
-            name_to_dir = {
-                c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)
+            # Build mapping from dir path to Config object for deferred writing
+            dir_to_config_obj: dict[str, Config] = {
+                str(d): c for d, c in zip(experiment_dirs, configs_for_save)
             }
-            experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
 
-        all_experiment_dirs = list(experiment_dirs)
+            all_experiment_dirs = list(experiment_dirs)
 
-        # Apply filter if specified
-        if filter:
+            # Apply filter using in-memory config names
+            if filter:
+                dir_to_flat = {
+                    str(d): fc for d, fc in zip(experiment_dirs, flat_configs)
+                }
 
-            def get_config_name(exp_dir: Path) -> str:
-                config_path = exp_dir / "config.json"
-                if config_path.exists():
-                    config = json.loads(config_path.read_text())
-                    return config.get("name", "")
-                return ""
+                def get_config_name_mem(exp_dir: Path) -> str:
+                    fc = dir_to_flat.get(str(exp_dir))
+                    return fc.get("name", "") if fc else ""
 
-            original_count = len(experiment_dirs)
-            experiment_dirs = _filter_by_name(experiment_dirs, filter, get_config_name)
-            if not experiment_dirs:
-                print(f"No configs match filter '{filter}'")
-                return None
-            print(
-                f"Filter '{filter}': {len(experiment_dirs)}/{original_count} configs selected"
-            )
+                original_count = len(experiment_dirs)
+                experiment_dirs = _filter_by_name(
+                    experiment_dirs, filter, get_config_name_mem
+                )
+                if not experiment_dirs:
+                    print(f"No configs match filter '{filter}'")
+                    return None
+                print(
+                    f"Filter '{filter}': {len(experiment_dirs)}/{original_count} configs selected"
+                )
+        else:
+            # Continue run: discover from filesystem (existing logic)
+            experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+
+            # Topologically sort discovered dirs by depends_on from config.json
+            dir_configs = []
+            for d in experiment_dirs:
+                cfg = json.loads((d / "config.json").read_text())
+                dir_configs.append(cfg)
+            if any(c.get("depends_on") for c in dir_configs):
+                sorted_configs = _topological_sort(dir_configs)
+                name_to_dir = {
+                    c.get("name", ""): d
+                    for c, d in zip(dir_configs, experiment_dirs)
+                }
+                experiment_dirs = [
+                    name_to_dir[c["name"]] for c in sorted_configs
+                ]
+
+            all_experiment_dirs = list(experiment_dirs)
+
+            # Apply filter if specified
+            if filter:
+
+                def get_config_name(exp_dir: Path) -> str:
+                    config_path = exp_dir / "config.json"
+                    if config_path.exists():
+                        config = json.loads(config_path.read_text())
+                        return config.get("name", "")
+                    return ""
+
+                original_count = len(experiment_dirs)
+                experiment_dirs = _filter_by_name(
+                    experiment_dirs, filter, get_config_name
+                )
+                if not experiment_dirs:
+                    print(f"No configs match filter '{filter}'")
+                    return None
+                print(
+                    f"Filter '{filter}': {len(experiment_dirs)}/{original_count} configs selected"
+                )
+
+            all_dir_configs = []
+            for exp_dir in all_experiment_dirs:
+                config_json_path = exp_dir / "config.json"
+                all_dir_configs.append(json.loads(config_json_path.read_text()))
+            all_configs_runs = Runs(all_dir_configs)
 
         show_progress = capture
         progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
-
-        all_dir_configs = []
-        for exp_dir in all_experiment_dirs:
-            config_json_path = exp_dir / "config.json"
-            all_dir_configs.append(json.loads(config_json_path.read_text()))
-        all_configs_runs = Runs(all_dir_configs)
 
         completed: dict[str, Result] = {}
 
@@ -843,8 +888,15 @@ class ExperimentRunner:
         for experiment_dir in experiment_dirs:
             experiment_path = experiment_dir / "experiment.pkl"
 
-            config_json_path = experiment_dir / "config.json"
-            config_data = json.loads(config_json_path.read_text())
+            if is_fresh_start:
+                # Use in-memory config data
+                config_obj = dir_to_config_obj[str(experiment_dir)]
+                config_data = dict(config_obj)
+            else:
+                # Read config from filesystem (continue path)
+                config_json_path = experiment_dir / "config.json"
+                config_data = json.loads(config_json_path.read_text())
+
             config_name = config_data.get("name", "")
             dep_keys = _normalize_depends_on(config_data.get("depends_on"))
 
@@ -854,8 +906,10 @@ class ExperimentRunner:
                 else []
             )
 
-            config_data.pop("depends_on", None)
-            config = Config(config_data)
+            config_data_clean = {
+                k: v for k, v in config_data.items() if k != "depends_on"
+            }
+            config = Config(config_data_clean)
 
             fn = submission_fns.get(config_name)
 
@@ -903,7 +957,14 @@ class ExperimentRunner:
                         error=f"Skipped: {skip_reason}",
                         finished=True,
                     )
-                    experiment_dir.mkdir(parents=True, exist_ok=True)
+                    if is_fresh_start:
+                        _write_run_dir(
+                            experiment_dir,
+                            dir_to_config_obj[str(experiment_dir)],
+                            commit_hash,
+                        )
+                    else:
+                        experiment_dir.mkdir(parents=True, exist_ok=True)
                     with open(experiment_path, "wb") as f:
                         pickle.dump(exp_obj, f)
                     (experiment_dir / ".finished").touch()
@@ -922,7 +983,14 @@ class ExperimentRunner:
                         out=experiment_dir,
                     )
 
-                    experiment_dir.mkdir(parents=True, exist_ok=True)
+                    if is_fresh_start:
+                        _write_run_dir(
+                            experiment_dir,
+                            dir_to_config_obj[str(experiment_dir)],
+                            commit_hash,
+                        )
+                    else:
+                        experiment_dir.mkdir(parents=True, exist_ok=True)
                     with open(experiment_path, "wb") as f:
                         pickle.dump(exp_obj, f)
 
