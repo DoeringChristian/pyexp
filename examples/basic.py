@@ -4,27 +4,12 @@ import pyexp
 from pyexp import Config
 
 
-def dosomething():
-    print("do something")
-
-
-def somethingdifferent():
-    print("do something different")
-
-
 @pyexp.experiment
 def exp(config: Config):
     """Run a single experiment with the given config."""
     lr = config.learning_rate
     epochs = config.epochs
     print(f"Running experiment with lr={lr}, epochs={epochs}")
-
-    exp.chkpt(dosomething)()
-
-    # Should also be run the first time this script is run i.e. don't cache the function
-    exp.chkpt(dosomething)()
-
-    exp.chkpt(somethingdifferent)()
 
     # Simulate experiment result
     return {"accuracy": 0.9 + lr * epochs / 100}
@@ -40,24 +25,7 @@ def configs() -> list[dict]:
     ]
 
 
-# @experiment.report
-# def report(results, report_dir):
-#     """Generate report from all experiment results.
-#
-#     Each experiment instance has: .name, .cfg, .result, .error, .log, .out
-#     """
-#     print("\n=== Experiment Report ===")
-#     for exp in results:
-#         print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
-#     best = max(results, key=lambda exp: exp.result["accuracy"])
-#     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
-
-
 if __name__ == "__main__":
-
-    results = exp.results()
-    print(f"{results=}")
-
     exp.run()
 
     # Load latest results
@@ -66,6 +34,3 @@ if __name__ == "__main__":
 
     # Access output directory via exp.out
     print(f"Output dir: {results[0].out}")
-
-    # Load results from a specific timestamp
-    # results = experiment.results(timestamp="2026-01-28_10-30-00")

@@ -1,67 +1,45 @@
-"""Example demonstrating the class-based Experiment API."""
+"""Example demonstrating the decorator API with report."""
 
 from pathlib import Path
-from pyexp import Experiment, ExperimentRunner, Runs
+import pyexp
+from pyexp import Config, Runs
 
 
-class MyExperiment(Experiment):
-    """Example experiment class demonstrating the class-based API.
+@pyexp.experiment
+def my_experiment(cfg: Config, out: Path):
+    """Run the experiment with config and output directory access."""
+    lr = cfg.learning_rate
+    epochs = cfg.epochs
 
-    The experiment instance IS the result - it gets pickled entirely after
-    running, so you can set any attributes you want in experiment().
-    """
+    print(f"Output dir: {out}")
+    print(f"Running with lr={lr}, epochs={epochs}")
 
-    # Type hints for attributes set in experiment()
-    accuracy: float
-    epochs_run: int
+    return {"accuracy": 0.9 + lr * epochs / 100, "epochs_run": epochs}
 
-    def experiment(self):
-        """Run the experiment. Set attributes on self to store results."""
-        # Access config via self.cfg (has dot notation access)
-        lr = self.cfg.learning_rate
-        epochs = self.cfg.epochs
 
-        # Access output directory via self.out
-        print(f"Output dir: {self.out}")
-        print(f"Running with lr={lr}, epochs={epochs}")
+@my_experiment.configs
+def configs():
+    """Return list of configs to run."""
+    return [
+        {"name": "fast", "learning_rate": 0.01, "epochs": 10},
+        {"name": "medium", "learning_rate": 0.001, "epochs": 20},
+        {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
+    ]
 
-        # Simulate training
-        self.accuracy = 0.9 + lr * epochs / 100
-        self.epochs_run = epochs
 
-    @staticmethod
-    def configs():
-        """Return list of configs to run."""
-        return [
-            {"name": "fast", "learning_rate": 0.01, "epochs": 10},
-            {"name": "medium", "learning_rate": 0.001, "epochs": 20},
-            {"name": "slow", "learning_rate": 0.0001, "epochs": 50},
-        ]
+@my_experiment.report
+def report(results: Runs, out: Path):
+    """Generate report from results."""
+    print("\n=== Experiment Report ===")
+    for exp in results:
+        print(f"{exp.name}: accuracy={exp.result['accuracy']:.4f}, epochs={exp.result['epochs_run']}")
+        print(f"  cfg: {exp.cfg}")
+        print(f"  out: {exp.out}")
+        print(f"  error: {exp.error}")
 
-    @staticmethod
-    def report(results: Runs["MyExperiment"], out: Path):
-        """Generate report from results.
-
-        Args:
-            results: Runs of MyExperiment instances with full type info
-            out: Path to report directory for saving outputs
-        """
-        print("\n=== Experiment Report ===")
-        for exp in results:
-            # Access custom attributes set in experiment()
-            print(f"{exp.name}: accuracy={exp.accuracy:.4f}, epochs={exp.epochs_run}")
-
-            # Access standard properties
-            print(f"  cfg: {exp.cfg}")
-            print(f"  out: {exp.out}")
-            print(f"  error: {exp.error}")
-
-        # Find best result
-        best = max(results, key=lambda exp: exp.accuracy)
-        print(f"\nBest: {best.name} with accuracy {best.accuracy:.4f}")
+    best = max(results, key=lambda exp: exp.result["accuracy"])
+    print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
 
 
 if __name__ == "__main__":
-    # Create runner and execute
-    runner = ExperimentRunner(MyExperiment)
-    runner.run()
+    my_experiment.run()

@@ -1,66 +1,64 @@
-"""Example demonstrating artifact saving with pyexp using the class-based API.
+"""Example demonstrating artifact saving with pyexp.
 
 For experiments that need to save artifacts to the output directory,
-use the class-based Experiment API which provides access to self.out.
+use a function with the (cfg, out) signature.
 """
 
 import json
 from pathlib import Path
-from pyexp import Experiment, ExperimentRunner, Runs
+import pyexp
+from pyexp import Config, Runs
 
 
-class ArtifactExperiment(Experiment):
-    """Experiment that saves artifacts to the output directory."""
+@pyexp.experiment
+def artifact_experiment(cfg: Config, out: Path):
+    """Run experiment and save artifacts to out."""
+    print(f"Running: {cfg.name}")
 
-    # Attributes set in experiment()
-    accuracy: float
-    loss: float
+    # Access nested config with dot notation
+    lr = cfg.optimizer.learning_rate
+    batch_size = cfg.optimizer.batch_size
 
-    def experiment(self):
-        """Run experiment and save artifacts to out."""
-        print(f"Running: {self.name}")
+    # Simulate training
+    accuracy = 0.85 + lr * 10
+    loss = 0.5 - lr * 5
 
-        # Access nested config with dot notation
-        lr = self.cfg.optimizer.learning_rate
-        batch_size = self.cfg.optimizer.batch_size
+    # Save artifacts to the experiment's output directory
+    with open(out / "metrics.json", "w") as f:
+        json.dump({"accuracy": accuracy, "loss": loss}, f, indent=2)
 
-        # Simulate training
-        self.accuracy = 0.85 + lr * 10
-        self.loss = 0.5 - lr * 5
+    return {"accuracy": accuracy, "loss": loss}
 
-        # Save artifacts to the experiment's output directory
-        with open(self.out / "metrics.json", "w") as f:
-            json.dump({"accuracy": self.accuracy, "loss": self.loss}, f, indent=2)
 
-    @staticmethod
-    def configs() -> list[dict]:
-        """Generate configs with nested structure."""
-        return [
-            {
-                "name": "small-lr",
-                "optimizer": {"learning_rate": 0.001, "batch_size": 32},
-            },
-            {
-                "name": "large-lr",
-                "optimizer": {"learning_rate": 0.01, "batch_size": 64},
-            },
-        ]
+@artifact_experiment.configs
+def configs() -> list[dict]:
+    """Generate configs with nested structure."""
+    return [
+        {
+            "name": "small-lr",
+            "optimizer": {"learning_rate": 0.001, "batch_size": 32},
+        },
+        {
+            "name": "large-lr",
+            "optimizer": {"learning_rate": 0.01, "batch_size": 64},
+        },
+    ]
 
-    @staticmethod
-    def report(results: Runs["ArtifactExperiment"], report_dir: Path):
-        """Print summary report."""
-        print("\n=== Results ===")
-        for exp in results:
-            print(f"{exp.name}: acc={exp.accuracy:.3f}, loss={exp.loss:.3f}")
 
-            # Load saved artifacts
-            metrics_path = exp.out / "metrics.json"
-            if metrics_path.exists():
-                with open(metrics_path) as f:
-                    saved = json.load(f)
-                print(f"  Saved metrics: {saved}")
+@artifact_experiment.report
+def report(results: Runs, report_dir: Path):
+    """Print summary report."""
+    print("\n=== Results ===")
+    for exp in results:
+        print(f"{exp.name}: acc={exp.result['accuracy']:.3f}, loss={exp.result['loss']:.3f}")
+
+        # Load saved artifacts
+        metrics_path = exp.out / "metrics.json"
+        if metrics_path.exists():
+            with open(metrics_path) as f:
+                saved = json.load(f)
+            print(f"  Saved metrics: {saved}")
 
 
 if __name__ == "__main__":
-    runner = ExperimentRunner(ArtifactExperiment)
-    runner.run()
+    artifact_experiment.run()

@@ -10,7 +10,7 @@ from .config import (
     sweep,
     to_dict,
 )
-from .experiment import Experiment, ExperimentRunner, chkpt, experiment
+from .experiment import Experiment, ExperimentRunner, experiment
 from .executors import (
     Executor,
     ExecutorName,
@@ -37,7 +37,6 @@ __all__ = [
     "to_dict",
     "Experiment",
     "ExperimentRunner",
-    "chkpt",
     "experiment",
     "Executor",
     "ExecutorName",

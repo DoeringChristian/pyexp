@@ -1,5 +1,6 @@
-"""Experiment runner: Experiment base class, ExperimentRunner, and decorators."""
+"""Experiment runner: Experiment dataclass, ExperimentRunner, and decorators."""
 
+from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -20,237 +21,29 @@ if TYPE_CHECKING:
     from .log import Logger
 
 
+@dataclass
 class Experiment:
-    """Base class for experiments. Users subclass this to define experiments.
+    """Result dataclass for a single experiment run.
 
-    The experiment instance IS the result - it gets pickled entirely after
-    running, so you can access any attributes you set in experiment().
-
-    Read-only properties (set by runner via name-mangled attrs):
-        cfg: The config for this run (Config object with dot notation access)
-        out: Output directory for this experiment run
-        error: Populated after failure with error message
-        log: Populated after run with stdout/stderr output
-        name: Shorthand for cfg.get("name", "")
-
-    Example:
-        class MyExperiment(Experiment):
-            accuracy: float
-            model: Any
-
-            def experiment(self):
-                self.model = train(self.cfg.lr)
-                self.accuracy = evaluate(self.model)
-
-            @staticmethod
-            def configs():
-                return [{"name": "fast", "lr": 0.01}]
-
-            @staticmethod
-            def report(results: Runs["MyExperiment"], out: Path):
-                for exp in results:
-                    print(f"{exp.name}: {exp.accuracy}")
-
-        runner = ExperimentRunner(MyExperiment)
-        runner.run()
+    Fields:
+        cfg: The config for this run (Config object with dot notation access).
+        name: Shorthand for cfg.get("name", "").
+        out: Output directory for this experiment run.
+        result: The return value of the experiment function.
+        error: Error message if experiment failed, None otherwise.
+        log: Captured stdout/stderr from the experiment run.
+        finished: Whether this experiment has finished executing.
+        skipped: Whether this experiment was skipped due to a failed dependency.
     """
 
-    # Private attributes (set by runner via name mangling)
-    _Experiment__cfg: Config | None = None
-    _Experiment__out: Path | None = None
-    _Experiment__error: str | None = None
-    _Experiment__log: str = ""
-    _Experiment__deps: "Runs[Experiment] | None" = None
-    _Experiment__skipped: bool = False
-    _Experiment__finished: bool = False
-
-    @property
-    def cfg(self) -> Config:
-        """The configuration for this experiment run."""
-        if self._Experiment__cfg is None:
-            raise RuntimeError(
-                "Experiment not initialized. cfg is only available inside experiment()."
-            )
-        return self._Experiment__cfg
-
-    @property
-    def out(self) -> Path:
-        """Output directory for this experiment run."""
-        if self._Experiment__out is None:
-            raise RuntimeError(
-                "Experiment not initialized. out is only available inside experiment()."
-            )
-        return self._Experiment__out
-
-    @property
-    def error(self) -> str | None:
-        """Error message if experiment failed, None otherwise."""
-        return self._Experiment__error
-
-    @property
-    def log(self) -> str:
-        """Captured stdout/stderr from the experiment run."""
-        return self._Experiment__log
-
-    @property
-    def name(self) -> str:
-        """Shorthand for cfg.get('name', '')."""
-        if self._Experiment__cfg is None:
-            return ""
-        return self._Experiment__cfg.get("name", "")
-
-    @property
-    def deps(self) -> "Runs[Experiment]":
-        """Completed dependency experiments for this run."""
-        if self._Experiment__deps is None:
-            return Runs([])
-        return self._Experiment__deps
-
-    @property
-    def skipped(self) -> bool:
-        """Whether this experiment was skipped due to a failed dependency."""
-        return self._Experiment__skipped
-
-    @property
-    def finished(self) -> bool:
-        """Whether this experiment has finished executing (successfully or with error)."""
-        return self._Experiment__finished
-
-    def __getstate__(self) -> dict:
-        """Exclude transient deps from pickle serialization."""
-        state = self.__dict__.copy()
-        state.pop("_Experiment__deps", None)
-        return state
-
-    def __setstate__(self, state: dict) -> None:
-        """Restore state from pickle, setting deps to None."""
-        self.__dict__.update(state)
-        self._Experiment__deps = None
-
-    def experiment(self) -> None:
-        """User implements this to define the experiment.
-
-        Set attributes on self to store results. These will be accessible
-        after loading the experiment from disk.
-
-        Example:
-            def experiment(self):
-                self.accuracy = train_and_evaluate(self.cfg)
-        """
-        raise NotImplementedError("Subclass must implement experiment()")
-
-    @staticmethod
-    def configs() -> list[dict] | Runs:
-        """Return list of configs to run, or a Runs of configs.
-
-        Example:
-            @staticmethod
-            def configs():
-                return [
-                    {"name": "fast", "lr": 0.01},
-                    {"name": "slow", "lr": 0.001},
-                ]
-        """
-        raise NotImplementedError("Subclass must implement configs()")
-
-    @staticmethod
-    def report(results: Runs, out: Path) -> Any:
-        """Generate report from experiment results.
-
-        Args:
-            results: Runs of experiment instances with full type info
-            out: Path to report directory for saving outputs
-
-        Example:
-            @staticmethod
-            def report(results: Runs["MyExperiment"], out: Path):
-                for exp in results:
-                    print(f"{exp.name}: {exp.accuracy}")
-        """
-        raise NotImplementedError("Subclass must implement report()")
-
-
-def chkpt(method: Callable | None = None, *, retry: int = 1) -> Callable:
-    """Checkpoint decorator for Experiment methods.
-
-    Caches the state of `self` after the method completes successfully.
-    On subsequent calls (e.g., when resuming with --continue), restores
-    `self` from the cached state instead of re-running the method.
-
-    Checkpoints are stored in `self.out/.checkpoints/{method_name}.pkl`.
-
-    Args:
-        retry: Number of times to retry on failure before giving up. Default is 1 (no retry).
-
-    Example:
-        class MyExperiment(Experiment):
-            @chkpt(retry=3)
-            def train(self):
-                self.model = train_model(self.cfg)
-
-            @chkpt
-            def evaluate(self):
-                self.results = evaluate(self.model)
-
-            def experiment(self):
-                self.train()      # Checkpointed after completion
-                self.evaluate()   # If this fails, train() won't re-run on --continue
-    """
-    import cloudpickle
-
-    def decorator(fn: Callable) -> Callable:
-        @wraps(fn)
-        def wrapper(self: "Experiment", *args, **kwargs):
-            # Generate checkpoint path
-            checkpoint_dir = self.out / ".checkpoints"
-            checkpoint_path = checkpoint_dir / f"{fn.__name__}.pkl"
-
-            # Check for existing checkpoint
-            if checkpoint_path.exists():
-                with open(checkpoint_path, "rb") as f:
-                    cached_data = cloudpickle.load(f)
-
-                # Restore state onto self (excluding runner-managed attributes)
-                for key, value in cached_data["state"].items():
-                    if not key.startswith("_Experiment__"):
-                        setattr(self, key, value)
-
-                return cached_data.get("return_value")
-
-            # Run with retry logic
-            last_error = None
-            for attempt in range(retry):
-                try:
-                    result = fn(self, *args, **kwargs)
-
-                    # Save checkpoint
-                    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-                    state = {
-                        k: v
-                        for k, v in self.__dict__.items()
-                        if not k.startswith("_Experiment__")
-                    }
-                    cached_data = {"state": state, "return_value": result}
-                    with open(checkpoint_path, "wb") as f:
-                        cloudpickle.dump(cached_data, f)
-
-                    return result
-                except Exception as e:
-                    last_error = e
-                    if attempt < retry - 1:
-                        continue
-                    raise
-
-            raise last_error  # Should never reach here, but satisfies type checker
-
-        return wrapper
-
-    if method is not None:
-        # Called without arguments: @chkpt
-        return decorator(method)
-    else:
-        # Called with arguments: @chkpt(retry=3)
-        return decorator
+    cfg: Config
+    name: str
+    out: Path
+    result: Any = None
+    error: str | None = None
+    log: str = ""
+    finished: bool = False
+    skipped: bool = False
 
 
 _VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
@@ -909,7 +702,7 @@ def _resolve_executor(
 
 
 class ExperimentRunner:
-    """Runner for executing experiments defined as Experiment subclasses or decorated functions.
+    """Runner for executing experiments defined as plain functions.
 
     This class handles:
     - CLI argument parsing
@@ -918,38 +711,23 @@ class ExperimentRunner:
     - Result caching and loading
     - Report generation
 
-    Can be used with either class-based or decorator-based experiments:
-
-    Class-based:
-        class MyExperiment(Experiment):
-            def experiment(self):
-                self.accuracy = train(self.cfg)
-
-            @staticmethod
-            def configs():
-                return [{"name": "exp1", "lr": 0.01}]
-
-            @staticmethod
-            def report(results, out):
-                for exp in results:
-                    print(exp.accuracy)
-
-        runner = ExperimentRunner(MyExperiment)
-        runner.run()
-
     Decorator-based:
         @pyexp.experiment
         def my_experiment(cfg):
             return {"accuracy": train(cfg)}
 
         my_experiment.run()  # ExperimentRunner is created internally
+
+    Programmatic:
+        runner = ExperimentRunner(name="my_exp")
+        runner.submit(train_fn, {"name": "fast", "lr": 0.01})
+        runner.run()
     """
 
     def __init__(
         self,
-        experiment_class: type[Experiment],
         *,
-        name: str | None = None,
+        name: str = "experiment",
         output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str = "subprocess",
         retry: int = 4,
@@ -961,8 +739,7 @@ class ExperimentRunner:
         """Create an ExperimentRunner.
 
         Args:
-            experiment_class: Experiment subclass to run.
-            name: Experiment name for output folder. Defaults to class name.
+            name: Experiment name for output folder.
             output_dir: Base directory for results. Defaults to "out" relative to caller.
             executor: Execution strategy ("subprocess", "fork", "inline", "ray", etc.)
             retry: Number of retries on failure.
@@ -971,8 +748,7 @@ class ExperimentRunner:
             stash: Capture git repository state.
             hash_configs: Append config parameter hash to run directory names.
         """
-        self._experiment_class = experiment_class
-        self._name = name or experiment_class.__name__
+        self._name = name
 
         # Determine the default output directory
         if output_dir is not None:
@@ -989,66 +765,19 @@ class ExperimentRunner:
         self._hash_configs_default = hash_configs
         self._configs_fn: Callable[[], list[dict]] | None = None
         self._report_fn: Callable[[Runs, Path], Any] | None = None
-        self._current_experiment: Experiment | None = None
-        self._chkpt_counter: int = 0
+        self._fn: Callable | None = None
+        self._wants_out: bool = False
+        self._wants_deps: bool = False
+        self._submissions: list[tuple[Callable, dict]] = []
 
-    def chkpt(self, fn: Callable) -> Callable:
-        """Checkpoint a function call during experiment execution.
-
-        Returns a wrapper that caches the function's return value. On the
-        first run, the function is executed and its result is saved. On
-        subsequent runs (e.g., with --continue), the cached result is
-        returned without re-executing the function.
-
-        Each call to chkpt() gets a unique checkpoint slot based on call
-        order, so the same function can be checkpointed multiple times.
+    def submit(self, fn: Callable, cfg: dict) -> None:
+        """Submit an experiment function with a specific config.
 
         Args:
-            fn: Function to checkpoint.
-
-        Returns:
-            A wrapper that behaves like fn but with checkpoint caching.
-
-        Example:
-            @pyexp.experiment
-            def my_exp(cfg):
-                result1 = my_exp.chkpt(train)(cfg.lr)
-                result2 = my_exp.chkpt(evaluate)(result1)
-                return result2
+            fn: The experiment function to run.
+            cfg: The config dict for this experiment.
         """
-        import cloudpickle
-
-        exp = self._current_experiment
-        if exp is None:
-            raise RuntimeError(
-                "chkpt() can only be called during experiment execution."
-            )
-
-        # Assign a unique index to this call
-        idx = self._chkpt_counter
-        self._chkpt_counter += 1
-
-        checkpoint_dir = exp.out / ".checkpoints"
-        checkpoint_path = checkpoint_dir / f"chkpt_{idx}_{fn.__name__}.pkl"
-
-        @wraps(fn)
-        def wrapper(*args, **kwargs):
-            # Check for existing checkpoint
-            if checkpoint_path.exists():
-                with open(checkpoint_path, "rb") as f:
-                    return cloudpickle.load(f)
-
-            # Run the function
-            result = fn(*args, **kwargs)
-
-            # Save checkpoint
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            with open(checkpoint_path, "wb") as f:
-                cloudpickle.dump(result, f)
-
-            return result
-
-        return wrapper
+        self._submissions.append((fn, cfg))
 
     def configs(self, fn: Callable[[], list[dict]]) -> Callable[[], list[dict]]:
         """Decorator to register the configs generator function (for decorator API)."""
@@ -1139,35 +868,21 @@ class ExperimentRunner:
         resolved_executor = args.executor or executor or self._executor_default
         exp_name = args.name or name or self._name
 
-        # Resolve configs function: run() arg > decorated > class method
+        # Resolve configs function: run() arg > decorated
         if configs is not None:
             configs_fn = configs
         elif self._configs_fn is not None:
             configs_fn = self._configs_fn
         else:
-            # Use class's configs method
-            try:
-                _ = self._experiment_class.configs()
-                configs_fn = self._experiment_class.configs
-            except NotImplementedError:
-                configs_fn = None
+            configs_fn = None
 
-        # Resolve report function: run() arg > decorated > class method
+        # Resolve report function: run() arg > decorated
         if report is not None:
             report_fn = report
         elif self._report_fn is not None:
             report_fn = self._report_fn
         else:
-            # Use class's report method - test if it's actually implemented
-            try:
-                # Try calling with dummy args to see if it raises NotImplementedError
-                self._experiment_class.report(None, None)
-                report_fn = self._experiment_class.report
-            except NotImplementedError:
-                report_fn = None
-            except Exception:
-                # If it fails for other reasons, assume it's implemented
-                report_fn = self._experiment_class.report
+            report_fn = None
 
         # Output dir: CLI > run() arg > constructor arg
         if args.output_dir:
@@ -1239,10 +954,15 @@ class ExperimentRunner:
         else:
             exec_instance = get_executor(resolved_executor)
 
+        # Build submissions-based configs function if submissions exist
+        if self._submissions and configs_fn is None:
+            submission_configs = [cfg for _, cfg in self._submissions]
+            configs_fn = lambda: submission_configs
+
         if configs_fn is None:
             raise RuntimeError(
-                "No configs function provided. Implement configs() in your Experiment class, "
-                "use @runner.configs decorator, or pass configs= argument."
+                "No configs function provided. "
+                "Use @runner.configs decorator, pass configs= argument, or use runner.submit()."
             )
         # report_fn is optional — if None, skip report phase
 
@@ -1423,7 +1143,13 @@ class ExperimentRunner:
         # PHASE 2: Experiment Execution (skip if --report)
         # =================================================================
         if not args.report:
-            import cloudpickle
+
+            # Build per-config function lookup from submissions
+            submission_fns: dict[str, Callable] = {}
+            if self._submissions:
+                for fn_sub, cfg_sub in self._submissions:
+                    sub_name = cfg_sub.get("name", "")
+                    submission_fns[sub_name] = fn_sub
 
             # Discover experiment directories from filesystem
             experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
@@ -1512,16 +1238,19 @@ class ExperimentRunner:
                 config_data.pop("depends_on", None)
                 config = Config(config_data)
 
+                # Determine the function for this config
+                fn = submission_fns.get(config_name, self._fn)
+
                 # Check if a finished result already exists on disk
                 finished_marker = experiment_dir / ".finished"
                 is_cached = experiment_path.exists() and finished_marker.exists()
 
                 if is_cached:
                     with open(experiment_path, "rb") as f:
-                        instance = pickle.load(f)
+                        exp_obj = pickle.load(f)
                 if is_cached:
                     # Already completed (cached / --continue)
-                    completed[config_name] = instance
+                    completed[config_name] = exp_obj
                     # Ensure marker file exists for viewer discovery
                     marker_path = experiment_dir / ".pyexp"
                     marker_path.touch(exist_ok=True)
@@ -1545,17 +1274,19 @@ class ExperimentRunner:
 
                     if should_skip:
                         # Create skipped experiment
-                        instance = self._experiment_class()
-                        instance._Experiment__cfg = config
-                        instance._Experiment__out = experiment_dir
-                        instance._Experiment__skipped = True
-                        instance._Experiment__error = f"Skipped: {skip_reason}"
-                        instance._Experiment__finished = True
+                        exp_obj = Experiment(
+                            cfg=config,
+                            name=config_name,
+                            out=experiment_dir,
+                            skipped=True,
+                            error=f"Skipped: {skip_reason}",
+                            finished=True,
+                        )
                         experiment_dir.mkdir(parents=True, exist_ok=True)
                         with open(experiment_path, "wb") as f:
-                            cloudpickle.dump(instance, f)
+                            pickle.dump(exp_obj, f)
                         (experiment_dir / ".finished").touch()
-                        completed[config_name] = instance
+                        completed[config_name] = exp_obj
                         status = "skipped"
                     else:
                         # Show running status
@@ -1566,38 +1297,42 @@ class ExperimentRunner:
                         dep_experiments = [completed[n] for n in resolved_deps]
                         deps_runs = Runs(dep_experiments)
 
-                        # Create fresh experiment instance
-                        instance = self._experiment_class()
-                        # Set private attributes via name mangling
-                        instance._Experiment__cfg = config
-                        instance._Experiment__out = experiment_dir
-                        instance._Experiment__deps = deps_runs
+                        # Create fresh Experiment dataclass
+                        exp_obj = Experiment(
+                            cfg=config,
+                            name=config_name,
+                            out=experiment_dir,
+                        )
 
                         # Save initial experiment.pkl so partial/interrupted
                         # experiments are always discoverable on disk
                         experiment_dir.mkdir(parents=True, exist_ok=True)
                         with open(experiment_path, "wb") as f:
-                            cloudpickle.dump(instance, f)
+                            pickle.dump(exp_obj, f)
 
                         # Retry loop
                         for attempt in range(max_retries + 1):
                             exec_instance.run(
-                                instance,
+                                fn,
+                                exp_obj,
+                                deps_runs,
                                 experiment_path,
                                 capture=not args.no_capture,
                                 stash=enable_stash,
                                 snapshot_path=snapshot_path,
+                                wants_out=self._wants_out,
+                                wants_deps=self._wants_deps,
                             )
 
-                            # Reload instance to check result
+                            # Reload experiment to check result
                             with open(experiment_path, "rb") as f:
-                                instance = pickle.load(f)
+                                exp_obj = pickle.load(f)
 
-                            if not instance.error:
+                            if not exp_obj.error:
                                 break  # Success, exit retry loop
 
                             # Print error immediately on each failure
-                            error_msg = instance.error or ""
+                            error_msg = exp_obj.error or ""
                             remaining = max_retries - attempt
                             retry_info = (
                                 f" (retrying, {remaining} left)"
@@ -1608,27 +1343,28 @@ class ExperimentRunner:
                                 f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
                             )
                             print(error_msg)
-                            if instance.log:
+                            if exp_obj.log:
                                 print("--- Log output ---")
-                                print(instance.log)
+                                print(exp_obj.log)
                             print("---")
 
                             if attempt < max_retries:
-                                # Create fresh instance for retry
-                                instance = self._experiment_class()
-                                instance._Experiment__cfg = config
-                                instance._Experiment__out = experiment_dir
-                                instance._Experiment__deps = deps_runs
+                                # Create fresh experiment for retry
+                                exp_obj = Experiment(
+                                    cfg=config,
+                                    name=config_name,
+                                    out=experiment_dir,
+                                )
                                 # Re-save initial (unfinished) pkl for retry
                                 with open(experiment_path, "wb") as f:
-                                    cloudpickle.dump(instance, f)
+                                    pickle.dump(exp_obj, f)
 
-                        completed[config_name] = instance
+                        completed[config_name] = exp_obj
 
                         # Save log to plaintext file
                         log_path = experiment_dir / "log.out"
-                        log_path.write_text(instance.log or "")
-                        status = "failed" if instance.error else "passed"
+                        log_path.write_text(exp_obj.log or "")
+                        status = "failed" if exp_obj.error else "passed"
 
                 # Update progress bar
                 if progress:
@@ -1650,51 +1386,6 @@ class ExperimentRunner:
             return report_fn(results, report_dir)
 
 
-class _DecoratorExperiment(Experiment):
-    """Dynamic Experiment subclass created by the @experiment decorator.
-
-    Stores the function's return value in self.result.
-    """
-
-    result: Any = None
-    # _fn is set on the class by make_runner to be the wrapped function
-    _fn: Callable | None = None
-    # _wants_out is set by make_runner based on function signature
-    _wants_out: bool = False
-    # _wants_deps is set by make_runner based on function signature
-    _wants_deps: bool = False
-    # _runner is set by make_runner to reference the ExperimentRunner
-    _runner: "ExperimentRunner | None" = None
-
-    def experiment(self) -> None:
-        fn = type(self)._fn
-        runner = type(self)._runner
-        if fn is not None:
-            # Set current experiment on runner so chkpt() can access it
-            if runner is not None:
-                runner._current_experiment = self
-                runner._chkpt_counter = 0
-            try:
-                if type(self)._wants_deps:
-                    self.result = fn(self.cfg, self.out, self.deps)
-                elif type(self)._wants_out:
-                    self.result = fn(self.cfg, self.out)
-                else:
-                    self.result = fn(self.cfg)
-            finally:
-                if runner is not None:
-                    runner._current_experiment = None
-                    runner._chkpt_counter = 0
-
-    @staticmethod
-    def configs():
-        raise NotImplementedError()
-
-    @staticmethod
-    def report(results, out):
-        raise NotImplementedError()
-
-
 def experiment(
     fn: Callable[[dict], Any] | None = None,
     *,
@@ -1710,7 +1401,7 @@ def experiment(
     """Decorator to create an ExperimentRunner from a function.
 
     The decorated function becomes an experiment where the return value
-    is stored as exp.result on the experiment instance.
+    is stored as exp.result on the Experiment dataclass.
 
     Args:
         name: Experiment name for the output folder. Defaults to function name.
@@ -1756,18 +1447,11 @@ def experiment(
     def make_runner(f: Callable[[dict], Any]) -> ExperimentRunner:
         import inspect
 
-        # Create a dynamic Experiment subclass that wraps the function
-        class DynamicExperiment(_DecoratorExperiment):
-            pass
-
-        # Store the function on the class (as regular class attribute, not staticmethod)
-        DynamicExperiment._fn = f
-
         # Check if function wants 'out' and/or 'deps' parameter
         sig = inspect.signature(f)
         n_params = len(sig.parameters)
-        DynamicExperiment._wants_out = n_params >= 2
-        DynamicExperiment._wants_deps = n_params >= 3
+        wants_out = n_params >= 2
+        wants_deps = n_params >= 3
 
         # Determine output directory and default name relative to function's file
         resolved_output_dir = output_dir
@@ -1783,9 +1467,8 @@ def experiment(
         else:
             resolved_name = f.__name__
 
-        # Create runner with the dynamic class
+        # Create runner directly
         runner = ExperimentRunner(
-            DynamicExperiment,
             name=resolved_name,
             output_dir=resolved_output_dir,
             executor=executor,
@@ -1796,8 +1479,10 @@ def experiment(
             hash_configs=hash_configs,
         )
 
-        # Link the dynamic class back to the runner for chkpt support
-        DynamicExperiment._runner = runner
+        # Store the function and signature info on the runner
+        runner._fn = f
+        runner._wants_out = wants_out
+        runner._wants_deps = wants_deps
 
         # Copy function metadata to runner for nice repr
         wraps(f)(runner)

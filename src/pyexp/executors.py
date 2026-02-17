@@ -25,6 +25,7 @@ import cloudpickle
 
 if TYPE_CHECKING:
     from .experiment import Experiment
+    from .config import Runs
 
 # Valid executor names
 ExecutorName = Literal["inline", "subprocess", "fork", "ray"]
@@ -39,28 +40,48 @@ class Executor(ABC):
     @abstractmethod
     def run(
         self,
-        instance: "Experiment",
+        fn: Callable,
+        experiment: "Experiment",
+        deps: "Runs | None",
         result_path: Path,
+        *,
         capture: bool = True,
         stash: bool = True,
         snapshot_path: Path | None = None,
+        wants_out: bool = False,
+        wants_deps: bool = False,
     ) -> None:
         """Run a single experiment and pickle the result.
 
         Args:
-            instance: The experiment instance (cfg/out already set).
-            result_path: Path where the pickled instance should be saved.
+            fn: The experiment function to call.
+            experiment: The Experiment dataclass (cfg/name/out already set).
+            deps: Dependency experiments (Runs), or None.
+            result_path: Path where the pickled experiment should be saved.
             capture: If True (default), capture output. If False, show output live.
             stash: If True, capture git commit hash at the start of the experiment.
             snapshot_path: If set, run experiment from this snapshot directory.
+            wants_out: If True, pass out as second arg to fn.
+            wants_deps: If True, pass deps as third arg to fn.
 
         The executor should:
-        1. Call instance.experiment()
-        2. On error: set instance._Experiment__error
-        3. Set instance._Experiment__log with captured stdout/stderr
-        4. Pickle the entire instance to result_path
+        1. Call fn(cfg) / fn(cfg, out) / fn(cfg, out, deps)
+        2. Store return value in experiment.result
+        3. On error: set experiment.error
+        4. Set experiment.log with captured stdout/stderr
+        5. Pickle the experiment to result_path
         """
         pass
+
+
+def _call_fn(fn, experiment, deps, wants_out, wants_deps):
+    """Call the experiment function with the right arguments and store result."""
+    if wants_deps:
+        experiment.result = fn(experiment.cfg, experiment.out, deps)
+    elif wants_out:
+        experiment.result = fn(experiment.cfg, experiment.out)
+    else:
+        experiment.result = fn(experiment.cfg)
 
 
 class InlineExecutor(Executor):
@@ -72,11 +93,16 @@ class InlineExecutor(Executor):
 
     def run(
         self,
-        instance: "Experiment",
+        fn: Callable,
+        experiment: "Experiment",
+        deps: "Runs | None",
         result_path: Path,
+        *,
         capture: bool = True,
         stash: bool = True,
         snapshot_path: Path | None = None,
+        wants_out: bool = False,
+        wants_deps: bool = False,
     ) -> None:
         """Run experiment inline and cache result."""
         import io
@@ -92,21 +118,20 @@ class InlineExecutor(Executor):
             sys.stderr = io.StringIO()
 
         try:
-            instance.experiment()
+            _call_fn(fn, experiment, deps, wants_out, wants_deps)
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            instance._Experiment__error = error_msg
+            experiment.error = error_msg
         finally:
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
 
-        instance._Experiment__log = log
-        instance._Experiment__finished = True
+        experiment.log = log
+        experiment.finished = True
 
-        # Pickle entire instance using cloudpickle for dynamic classes
         with open(result_path, "wb") as f:
-            cloudpickle.dump(instance, f)
+            pickle.dump(experiment, f)
         (result_path.parent / ".finished").touch()
 
 
@@ -115,31 +140,33 @@ class SubprocessExecutor(Executor):
 
     This provides strong isolation - crashes (including segfaults) won't affect
     the main process. Works cross-platform (Windows, macOS, Linux).
-
-    The experiment instance is serialized using cloudpickle, which captures
-    the instance's state. However, imported modules are serialized by
-    reference and will be re-imported in the subprocess.
     """
 
     def run(
         self,
-        instance: "Experiment",
+        fn: Callable,
+        experiment: "Experiment",
+        deps: "Runs | None",
         result_path: Path,
+        *,
         capture: bool = True,
         stash: bool = True,
         snapshot_path: Path | None = None,
+        wants_out: bool = False,
+        wants_deps: bool = False,
     ) -> None:
         """Run experiment in subprocess via cloudpickle serialization."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create payload with serialized instance
-        # Extract deps before pickling (excluded by __getstate__)
-        deps = instance._Experiment__deps
+        # Create payload
         payload = {
-            "instance": instance,
+            "fn": fn,
+            "experiment": experiment,
+            "deps": deps,
             "result_path": str(result_path),
             "stash": stash,
-            "deps": deps,
+            "wants_out": wants_out,
+            "wants_deps": wants_deps,
         }
 
         # Write payload to temp file
@@ -201,23 +228,23 @@ class SubprocessExecutor(Executor):
             if result_path.exists():
                 # Load and update with log
                 with open(result_path, "rb") as f:
-                    instance = pickle.load(f)
+                    experiment = pickle.load(f)
                 # If worker crashed before marking finished, record the error
-                if not instance.finished:
-                    instance._Experiment__error = f"SubprocessError: worker exited with code {proc.returncode}"
-                    instance._Experiment__finished = True
-                instance._Experiment__log = log
+                if not experiment.finished:
+                    experiment.error = f"SubprocessError: worker exited with code {proc.returncode}"
+                    experiment.finished = True
+                experiment.log = log
                 # Re-save with log included
                 with open(result_path, "wb") as f:
-                    cloudpickle.dump(instance, f)
+                    pickle.dump(experiment, f)
                 (result_path.parent / ".finished").touch()
             else:
                 # Subprocess crashed before writing result
-                instance._Experiment__error = f"SubprocessError: exited with code {proc.returncode}"
-                instance._Experiment__log = log
-                instance._Experiment__finished = True
+                experiment.error = f"SubprocessError: exited with code {proc.returncode}"
+                experiment.log = log
+                experiment.finished = True
                 with open(result_path, "wb") as f:
-                    cloudpickle.dump(instance, f)
+                    pickle.dump(experiment, f)
                 (result_path.parent / ".finished").touch()
         finally:
             # Clean up payload file
@@ -248,11 +275,16 @@ class ForkExecutor(Executor):
 
     def run(
         self,
-        instance: "Experiment",
+        fn: Callable,
+        experiment: "Experiment",
+        deps: "Runs | None",
         result_path: Path,
+        *,
         capture: bool = True,
         stash: bool = True,
         snapshot_path: Path | None = None,
+        wants_out: bool = False,
+        wants_deps: bool = False,
     ) -> None:
         """Run experiment in a forked process."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,21 +325,21 @@ class ForkExecutor(Executor):
                     except Exception:
                         pass  # Best-effort: continue without remapping
 
-                instance.experiment()
+                _call_fn(fn, experiment, deps, wants_out, wants_deps)
 
-                instance._Experiment__finished = True
+                experiment.finished = True
                 with open(result_path, "wb") as f:
-                    cloudpickle.dump(instance, f)
+                    pickle.dump(experiment, f)
                 (result_path.parent / ".finished").touch()
                 os._exit(0)
             except Exception as e:
                 # Write error information
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                instance._Experiment__error = error_msg
-                instance._Experiment__finished = True
+                experiment.error = error_msg
+                experiment.finished = True
                 try:
                     with open(result_path, "wb") as f:
-                        cloudpickle.dump(instance, f)
+                        pickle.dump(experiment, f)
                     (result_path.parent / ".finished").touch()
                 except Exception:
                     pass
@@ -333,22 +365,22 @@ class ForkExecutor(Executor):
 
             if result_path.exists():
                 with open(result_path, "rb") as f:
-                    instance = pickle.load(f)
+                    experiment = pickle.load(f)
                 # If child crashed before marking finished, record the error
-                if not instance.finished:
-                    instance._Experiment__error = f"ForkError: child exited with code {exit_code}"
-                    instance._Experiment__finished = True
-                instance._Experiment__log = log
+                if not experiment.finished:
+                    experiment.error = f"ForkError: child exited with code {exit_code}"
+                    experiment.finished = True
+                experiment.log = log
                 with open(result_path, "wb") as f:
-                    cloudpickle.dump(instance, f)
+                    pickle.dump(experiment, f)
                 (result_path.parent / ".finished").touch()
             else:
                 # Child crashed before writing result
-                instance._Experiment__error = f"ForkError: exited with code {exit_code}"
-                instance._Experiment__log = log
-                instance._Experiment__finished = True
+                experiment.error = f"ForkError: exited with code {exit_code}"
+                experiment.log = log
+                experiment.finished = True
                 with open(result_path, "wb") as f:
-                    cloudpickle.dump(instance, f)
+                    pickle.dump(experiment, f)
                 (result_path.parent / ".finished").touch()
 
 
@@ -422,30 +454,28 @@ class RayExecutor(Executor):
 
     def run(
         self,
-        instance: "Experiment",
+        fn: Callable,
+        experiment: "Experiment",
+        deps: "Runs | None",
         result_path: Path,
+        *,
         capture: bool = True,
         stash: bool = True,
         snapshot_path: Path | None = None,
+        wants_out: bool = False,
+        wants_deps: bool = False,
     ) -> None:
         """Run experiment as a Ray task."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Extract deps before serialization (excluded by __getstate__)
-        deps = instance._Experiment__deps
-
         @self._ray.remote
-        def _run_experiment(instance, deps, result_path_str, capture):
+        def _run_experiment(fn, experiment, deps, result_path_str, capture, wants_out, wants_deps):
             """Ray remote function to execute experiment."""
             import io
             import sys
+            import pickle
             import traceback
             from pathlib import Path
-            import cloudpickle
-
-            # Restore transient deps
-            if deps is not None:
-                instance._Experiment__deps = deps
 
             result_path = Path(result_path_str)
             log = ""
@@ -457,33 +487,38 @@ class RayExecutor(Executor):
                 sys.stderr = io.StringIO()
 
             try:
-                instance.experiment()
+                if wants_deps:
+                    experiment.result = fn(experiment.cfg, experiment.out, deps)
+                elif wants_out:
+                    experiment.result = fn(experiment.cfg, experiment.out)
+                else:
+                    experiment.result = fn(experiment.cfg)
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                instance._Experiment__error = error_msg
+                experiment.error = error_msg
             finally:
                 if capture:
                     log = sys.stdout.getvalue() + sys.stderr.getvalue()
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
-            instance._Experiment__log = log
-            instance._Experiment__finished = True
+            experiment.log = log
+            experiment.finished = True
             with open(result_path, "wb") as f:
-                cloudpickle.dump(instance, f)
+                pickle.dump(experiment, f)
             (result_path.parent / ".finished").touch()
-            return instance
+            return experiment
 
         # Submit task and wait for result
-        future = _run_experiment.remote(instance, deps, str(result_path), capture)
+        future = _run_experiment.remote(fn, experiment, deps, str(result_path), capture, wants_out, wants_deps)
         try:
             self._ray.get(future)
         except Exception as e:
             # Task failed at Ray level
-            instance._Experiment__error = f"RayError: {e}\n{traceback.format_exc()}"
-            instance._Experiment__log = ""
-            instance._Experiment__finished = True
+            experiment.error = f"RayError: {e}\n{traceback.format_exc()}"
+            experiment.log = ""
+            experiment.finished = True
             with open(result_path, "wb") as f:
-                cloudpickle.dump(instance, f)
+                pickle.dump(experiment, f)
             (result_path.parent / ".finished").touch()
 
 
