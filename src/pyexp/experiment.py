@@ -380,7 +380,9 @@ def _normalize_depends_on(deps: Any) -> list[str | dict]:
     return list(deps)
 
 
-def _resolve_depends_on(depends_on: list[str | dict], configs_runs: Runs, config_name: str) -> list[str]:
+def _resolve_depends_on(
+    depends_on: list[str | dict], configs_runs: Runs, config_name: str
+) -> list[str]:
     """Resolve depends_on keys to concrete config names using Runs indexing.
 
     Each key in depends_on uses the same lookup mechanism as Runs.__getitem__:
@@ -406,9 +408,15 @@ def _resolve_depends_on(depends_on: list[str | dict], configs_runs: Runs, config
             matches = [result]
 
         for item in matches:
-            name = item.get("name", "") if isinstance(item, dict) else getattr(item, "name", "")
+            name = (
+                item.get("name", "")
+                if isinstance(item, dict)
+                else getattr(item, "name", "")
+            )
             if name == config_name:
-                raise ValueError(f"Config '{config_name}' depends on itself (via {key!r}).")
+                raise ValueError(
+                    f"Config '{config_name}' depends on itself (via {key!r})."
+                )
             if name not in resolved:
                 resolved.append(name)
     return resolved
@@ -444,9 +452,7 @@ def _validate_dependencies(configs: list[dict]) -> None:
             if color[neighbor] == GRAY:
                 cycle_start = path.index(neighbor)
                 cycle = path[cycle_start:] + [neighbor]
-                raise ValueError(
-                    f"Dependency cycle detected: {' -> '.join(cycle)}"
-                )
+                raise ValueError(f"Dependency cycle detected: {' -> '.join(cycle)}")
             if color[neighbor] == WHITE:
                 dfs(neighbor, path)
         path.pop()
@@ -1429,8 +1435,13 @@ class ExperimentRunner:
                 dir_configs.append(cfg)
             if any(c.get("depends_on") for c in dir_configs):
                 sorted_configs = _topological_sort(dir_configs)
-                name_to_dir = {c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)}
+                name_to_dir = {
+                    c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)
+                }
                 experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
+
+            # Save full (unfiltered) list for dependency resolution
+            all_experiment_dirs = list(experiment_dirs)
 
             # Apply filter if specified
             if args.filter:
@@ -1457,15 +1468,29 @@ class ExperimentRunner:
             show_progress = not args.no_capture
             progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
 
-            # Build Runs of all configs for dependency resolution
+            # Build Runs of all configs (unfiltered) for dependency resolution
             all_dir_configs = []
-            for experiment_dir in experiment_dirs:
-                config_json_path = experiment_dir / "config.json"
+            for exp_dir in all_experiment_dirs:
+                config_json_path = exp_dir / "config.json"
                 all_dir_configs.append(json.loads(config_json_path.read_text()))
             all_configs_runs = Runs(all_dir_configs)
 
             # Track completed experiments by name for dependency injection
             completed: dict[str, Experiment] = {}
+
+            # Pre-load finished experiments from filtered-out dirs for dependency injection
+            if args.filter:
+                filtered_set = set(str(d) for d in experiment_dirs)
+                for exp_dir in all_experiment_dirs:
+                    if str(exp_dir) in filtered_set:
+                        continue
+                    finished_marker = exp_dir / ".finished"
+                    exp_pkl = exp_dir / "experiment.pkl"
+                    if finished_marker.exists() and exp_pkl.exists():
+                        cfg_data = json.loads((exp_dir / "config.json").read_text())
+                        dep_name = cfg_data.get("name", "")
+                        with open(exp_pkl, "rb") as f:
+                            completed[dep_name] = pickle.load(f)
 
             for experiment_dir in experiment_dirs:
                 experiment_path = experiment_dir / "experiment.pkl"
@@ -1477,9 +1502,11 @@ class ExperimentRunner:
                 dep_keys = _normalize_depends_on(config_data.get("depends_on"))
 
                 # Resolve dependency keys to concrete names via Runs indexing
-                resolved_deps = _resolve_depends_on(
-                    dep_keys, all_configs_runs, config_name
-                ) if dep_keys else []
+                resolved_deps = (
+                    _resolve_depends_on(dep_keys, all_configs_runs, config_name)
+                    if dep_keys
+                    else []
+                )
 
                 # Strip depends_on before creating Config object
                 config_data.pop("depends_on", None)
@@ -1511,7 +1538,9 @@ class ExperimentRunner:
                             break
                         if dep_exp.skipped or dep_exp.error:
                             should_skip = True
-                            skip_reason = f"Dependency '{dep_name}' failed or was skipped"
+                            skip_reason = (
+                                f"Dependency '{dep_name}' failed or was skipped"
+                            )
                             break
 
                     if should_skip:
@@ -1571,7 +1600,9 @@ class ExperimentRunner:
                             error_msg = instance.error or ""
                             remaining = max_retries - attempt
                             retry_info = (
-                                f" (retrying, {remaining} left)" if remaining > 0 else ""
+                                f" (retrying, {remaining} left)"
+                                if remaining > 0
+                                else ""
                             )
                             print(
                                 f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"

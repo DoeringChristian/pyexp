@@ -2562,4 +2562,144 @@ class TestSourceSnapshotting:
         assert result.result["marker"] == "repo_content"
 
 
+class TestFilterWithDependencies:
+    """Tests for --filter interacting with depends_on dependency graphs."""
+
+    def test_filter_loads_finished_dependency(self, tmp_path):
+        """--filter + --continue should load finished deps from disk and not crash."""
+        import pickle
+
+        @experiment(name="pipeline")
+        def pipeline(cfg, out, deps):
+            if cfg["name"] == "finetune":
+                return {"ft_result": True, "pretrain_val": deps[0].result["pt_val"]}
+            return {"pt_val": 42}
+
+        @pipeline.configs
+        def configs():
+            return [
+                {"name": "pretrain", "lr": 0.01},
+                {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
+            ]
+
+        # Phase 1: run full pipeline (no filter)
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            pipeline.run(output_dir=tmp_path, executor="inline")
+
+        # Verify both ran successfully
+        base_dir = tmp_path / "pipeline"
+        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts = _get_latest_timestamp(base_dir)
+        exp_dirs = _discover_experiment_dirs(base_dir, ts)
+        assert len(exp_dirs) == 2
+        for d in exp_dirs:
+            assert (d / ".finished").exists()
+
+        # Phase 2: re-run with --continue --filter "finetune"
+        # This should NOT crash (previously would ValueError on missing pretrain)
+        with patch.object(
+            sys,
+            "argv",
+            ["test", "--continue", "--no-stash", "--filter", "finetune"],
+        ):
+            pipeline.run(output_dir=tmp_path, executor="inline")
+
+        # finetune should still be cached and valid
+        for d in exp_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                with open(d / "experiment.pkl", "rb") as f:
+                    ft_exp = pickle.load(f)
+                assert ft_exp.result["pretrain_val"] == 42
+                assert ft_exp.finished
+                break
+
+    def test_filter_rerun_with_dependency_access(self, tmp_path):
+        """--filter on a fresh downstream run should inject finished upstream deps."""
+        import pickle
+
+        @experiment(name="pipeline2")
+        def pipeline2(cfg, out, deps):
+            if cfg["name"] == "finetune":
+                return {"ft_result": True, "pretrain_val": deps[0].result["pt_val"]}
+            return {"pt_val": 99}
+
+        @pipeline2.configs
+        def configs():
+            return [
+                {"name": "pretrain", "lr": 0.01},
+                {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
+            ]
+
+        # Phase 1: run full pipeline
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            pipeline2.run(output_dir=tmp_path, executor="inline")
+
+        # Phase 2: delete finetune's .finished marker so it re-runs
+        base_dir = tmp_path / "pipeline2"
+        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts = _get_latest_timestamp(base_dir)
+        exp_dirs = _discover_experiment_dirs(base_dir, ts)
+        for d in exp_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                (d / ".finished").unlink()
+                (d / "experiment.pkl").unlink()
+                break
+
+        # Phase 3: re-run with --continue --filter "finetune"
+        with patch.object(
+            sys,
+            "argv",
+            ["test", "--continue", "--no-stash", "--filter", "finetune"],
+        ):
+            pipeline2.run(output_dir=tmp_path, executor="inline")
+
+        # Verify finetune re-ran and got the pretrain dependency
+        for d in exp_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                with open(d / "experiment.pkl", "rb") as f:
+                    ft_exp = pickle.load(f)
+                assert ft_exp.result["pretrain_val"] == 99
+                assert ft_exp.finished
+                assert not ft_exp.skipped
+                break
+
+    def test_filter_skips_when_dependency_not_finished(self, tmp_path):
+        """--filter should skip downstream if upstream dep has no finished result."""
+        import pickle
+
+        @experiment(name="pipeline3")
+        def pipeline3(cfg, out, deps):
+            return {"val": 1}
+
+        @pipeline3.configs
+        def configs():
+            return [
+                {"name": "pretrain", "lr": 0.01},
+                {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
+            ]
+
+        # Run with filter "finetune" only -- pretrain never ran, no finished result
+        with patch.object(sys, "argv", ["test", "--no-stash", "--filter", "finetune"]):
+            pipeline3.run(output_dir=tmp_path, executor="inline")
+
+        # Verify finetune was marked as skipped
+        base_dir = tmp_path / "pipeline3"
+        from pyexp.experiment import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts = _get_latest_timestamp(base_dir)
+        exp_dirs = _discover_experiment_dirs(base_dir, ts)
+        for d in exp_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                with open(d / "experiment.pkl", "rb") as f:
+                    ft_exp = pickle.load(f)
+                assert ft_exp.skipped
+                break
+
+
 
