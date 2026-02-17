@@ -76,24 +76,17 @@ def configs() -> list[dict]:
     return cfgs
 
 
-@experiment.report
-def report(results: Runs, report_dir):
-    """Generate report from all experiment results.
+if __name__ == "__main__":
+    experiment.run()
 
-    Each experiment instance has: .name, .cfg, .result, .error, .log, .out
-    """
-    print("\n=== Experiment Report ===")
+    # Print results summary
+    results = experiment.results()
+    print("\n=== Experiment Results ===")
     for exp in results:
         print(f"Config: {exp.name} -> Accuracy: {exp.result['accuracy']:.4f}")
 
-    # Filter results by config values
     lr01_results = results[{"cfg.learning_rate": 0.1}]
     print(f"\nResults with lr=0.1: {len(lr01_results)} runs")
 
-    # Find best result
     best = max(results, key=lambda exp: exp.result["accuracy"])
     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
-
-
-if __name__ == "__main__":
-    experiment.run()

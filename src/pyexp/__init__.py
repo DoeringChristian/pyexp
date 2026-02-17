@@ -10,7 +10,7 @@ from .config import (
     sweep,
     to_dict,
 )
-from .experiment import Experiment, ExperimentRunner, experiment
+from .experiment import Result, ExperimentRunner, Experiment, experiment
 from .executors import (
     Executor,
     ExecutorName,
@@ -35,8 +35,9 @@ __all__ = [
     "stash_and_snapshot",
     "sweep",
     "to_dict",
-    "Experiment",
+    "Result",
     "ExperimentRunner",
+    "Experiment",
     "experiment",
     "Executor",
     "ExecutorName",

@@ -45,9 +45,11 @@ def configs() -> list[dict]:
     ]
 
 
-@artifact_experiment.report
-def report(results: Runs, report_dir: Path):
-    """Print summary report."""
+if __name__ == "__main__":
+    artifact_experiment.run()
+
+    # Print results summary
+    results = artifact_experiment.results()
     print("\n=== Results ===")
     for exp in results:
         print(f"{exp.name}: acc={exp.result['accuracy']:.3f}, loss={exp.result['loss']:.3f}")
@@ -58,7 +60,3 @@ def report(results: Runs, report_dir: Path):
             with open(metrics_path) as f:
                 saved = json.load(f)
             print(f"  Saved metrics: {saved}")
-
-
-if __name__ == "__main__":
-    artifact_experiment.run()

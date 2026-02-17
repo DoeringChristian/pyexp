@@ -1,4 +1,4 @@
-"""Example demonstrating the decorator API with report."""
+"""Example demonstrating the decorator API with output directory access."""
 
 from pathlib import Path
 import pyexp
@@ -27,10 +27,12 @@ def configs():
     ]
 
 
-@my_experiment.report
-def report(results: Runs, out: Path):
-    """Generate report from results."""
-    print("\n=== Experiment Report ===")
+if __name__ == "__main__":
+    my_experiment.run()
+
+    # Load results after run
+    results = my_experiment.results()
+    print("\n=== Results ===")
     for exp in results:
         print(f"{exp.name}: accuracy={exp.result['accuracy']:.4f}, epochs={exp.result['epochs_run']}")
         print(f"  cfg: {exp.cfg}")
@@ -39,7 +41,3 @@ def report(results: Runs, out: Path):
 
     best = max(results, key=lambda exp: exp.result["accuracy"])
     print(f"\nBest: {best.name} with accuracy {best.result['accuracy']:.4f}")
-
-
-if __name__ == "__main__":
-    my_experiment.run()

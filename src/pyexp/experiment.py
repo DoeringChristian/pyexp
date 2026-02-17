@@ -1,4 +1,4 @@
-"""Experiment runner: Experiment dataclass, ExperimentRunner, and decorators."""
+"""Experiment runner: Result dataclass, ExperimentRunner, and decorators."""
 
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class Experiment:
+class Result:
     """Result dataclass for a single experiment run.
 
     Fields:
@@ -422,7 +422,7 @@ def _get_latest_finished_timestamp(base_dir: Path) -> str | None:
 
 def _load_experiments(
     base_dir: Path, timestamp: str, *, finished_only: bool = False
-) -> Runs[Experiment]:
+) -> Runs[Result]:
     """Load all experiments for a batch into a 1D Runs.
 
     Discovers runs by scanning the filesystem for directories containing
@@ -434,7 +434,7 @@ def _load_experiments(
         finished_only: If True, only load experiments that have a .finished marker.
 
     Returns:
-        1D Runs of Experiment instances.
+        1D Runs of Result instances.
     """
     experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
 
@@ -524,15 +524,6 @@ def _print_dependency_graph(configs: list[dict]) -> None:
 def _parse_args() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(description="Experiment runner")
-    parser.add_argument(
-        "--report",
-        nargs="?",
-        const="latest",
-        default=None,
-        metavar="TIMESTAMP",
-        help="Generate report from cached results. Without argument, uses the most recent run. "
-        "With argument (e.g., --report=2024-01-25_14-30-00), uses that specific run.",
-    )
     parser.add_argument(
         "--continue",
         dest="continue_run",
@@ -702,24 +693,13 @@ def _resolve_executor(
 
 
 class ExperimentRunner:
-    """Runner for executing experiments defined as plain functions.
+    """Stripped-down execution engine for running experiments.
 
-    This class handles:
-    - CLI argument parsing
-    - Config generation and validation
-    - Experiment execution via executors
-    - Result caching and loading
-    - Report generation
+    Handles: directory setup, config validation, execution loop, retry,
+    caching, dependencies, progress bar.
 
-    Decorator-based:
-        @pyexp.experiment
-        def my_experiment(cfg):
-            return {"accuracy": train(cfg)}
-
-        my_experiment.run()  # ExperimentRunner is created internally
-
-    Programmatic:
-        runner = ExperimentRunner(name="my_exp")
+    Usage:
+        runner = ExperimentRunner(name="my_exp", output_dir="out", retry=4)
         runner.submit(train_fn, {"name": "fast", "lr": 0.01})
         runner.run()
     """
@@ -729,6 +709,403 @@ class ExperimentRunner:
         *,
         name: str = "experiment",
         output_dir: str | Path | None = None,
+        retry: int = 4,
+    ):
+        self._name = name
+        self._output_dir = Path(output_dir) if output_dir else Path("out")
+        self._retry = retry
+        self._submissions: list[tuple[Callable, dict]] = []
+
+    def submit(self, fn: Callable, cfg: dict) -> None:
+        """Submit an experiment function with a specific config."""
+        self._submissions.append((fn, cfg))
+
+    def run(
+        self,
+        *,
+        executor: ExecutorName | Executor | str = "subprocess",
+        capture: bool = True,
+        stash: bool = True,
+        snapshot_path: Path | None = None,
+        hash_configs: bool = False,
+        filter: str | None = None,
+        continue_run: str | None = None,
+    ) -> None:
+        """Execute all submitted experiments.
+
+        Args:
+            executor: Execution strategy for running experiments.
+            capture: If True, capture output and show progress bar.
+            stash: If True, capture git repository state.
+            snapshot_path: Pre-existing snapshot path to use.
+            hash_configs: Append config parameter hash to run directory names.
+            filter: Regex pattern to filter configs by name.
+            continue_run: Timestamp of a previous run to continue.
+        """
+        if not self._submissions:
+            raise RuntimeError(
+                "No experiments submitted. Use runner.submit(fn, cfg) first."
+            )
+
+        # Resolve executor
+        if isinstance(executor, Executor):
+            exec_instance = executor
+        elif isinstance(executor, str) and (
+            executor.startswith("ray://")
+            or (executor.startswith("ray:") and not executor.startswith("ray://"))
+        ):
+            from .executors import RayExecutor
+            address = executor if executor.startswith("ray://") else executor[4:]
+            exec_instance = RayExecutor(
+                address=address, runtime_env={"working_dir": "."},
+            )
+        else:
+            exec_instance = get_executor(executor)
+
+        base_dir = self._output_dir / self._name
+        max_retries = self._retry
+
+        # Track snapshot state
+        commit_hash: str | None = None
+
+        # Determine the timestamp
+        if continue_run:
+            if continue_run == "latest":
+                latest = _get_latest_timestamp(base_dir)
+                if latest is None:
+                    raise RuntimeError(f"No previous runs found in {base_dir}")
+                timestamp = latest
+            else:
+                timestamp = continue_run
+                if not _discover_experiment_dirs(base_dir, timestamp):
+                    raise RuntimeError(f"Run not found: {timestamp}")
+
+            # Detect existing snapshot
+            for exp_dir in _discover_experiment_dirs(base_dir, timestamp):
+                commit_file = exp_dir / ".commit"
+                if commit_file.exists():
+                    prev_commit = commit_file.read_text().strip()
+                    prev_snapshot = base_dir / ".snapshots" / prev_commit
+                    if prev_snapshot.exists():
+                        snapshot_path = prev_snapshot
+                        commit_hash = prev_commit
+                    break
+        else:
+            timestamp = _generate_timestamp()
+
+        # Print run info
+        print(f"Run: {self._name}/{timestamp}")
+
+        # =================================================================
+        # Config Generation (only on fresh start)
+        # =================================================================
+        is_fresh_start = not continue_run
+
+        if is_fresh_start:
+            flat_configs = [cfg for _, cfg in self._submissions]
+            _validate_configs(flat_configs)
+            _validate_unique_names(flat_configs)
+            _validate_dependencies(flat_configs)
+            flat_configs = _topological_sort(flat_configs)
+
+            if hash_configs:
+                _validate_unique_hashes(flat_configs)
+
+            experiment_dirs = [
+                _get_experiment_dir(
+                    config, base_dir, timestamp, hash_configs=hash_configs
+                )
+                for config in flat_configs
+            ]
+
+            run_dirs = []
+            for config in flat_configs:
+                cfg_name = _sanitize_name(config.get("name", "experiment"))
+                if hash_configs:
+                    run_dirs.append(f"{cfg_name}-{_config_hash(config)}")
+                else:
+                    run_dirs.append(cfg_name)
+
+            configs_for_save = []
+            for config in flat_configs:
+                assert "out" not in config, "Config cannot contain 'out' key; it is reserved"
+                configs_for_save.append(Config(config))
+
+            base_dir.mkdir(parents=True, exist_ok=True)
+
+            if stash:
+                try:
+                    from .utils import stash_and_snapshot
+                    import tempfile
+
+                    with tempfile.TemporaryDirectory() as tmp:
+                        commit_hash, tmp_snapshot = stash_and_snapshot(Path(tmp) / "src")
+
+                    shared_snapshot = base_dir / ".snapshots" / commit_hash
+                    if not shared_snapshot.exists():
+                        _, snapshot_path = stash_and_snapshot(shared_snapshot)
+                    else:
+                        snapshot_path = shared_snapshot
+
+                    print(f"Source snapshot: {commit_hash[:12]} -> {snapshot_path}")
+                except Exception as e:
+                    print(f"Warning: Could not create source snapshot: {e}")
+                    snapshot_path = None
+                    commit_hash = None
+
+            _save_batch_manifest(base_dir, timestamp, run_dirs, commit=commit_hash)
+
+            for config, experiment_dir in zip(configs_for_save, experiment_dirs):
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                config_json_path = experiment_dir / "config.json"
+                config_json_path.write_text(
+                    json.dumps(dict(config), indent=2, default=str)
+                )
+                if commit_hash is not None:
+                    (experiment_dir / ".commit").write_text(commit_hash)
+
+        # =================================================================
+        # Experiment Execution
+        # =================================================================
+
+        # Build per-config function lookup from submissions
+        submission_fns: dict[str, Callable] = {}
+        for fn_sub, cfg_sub in self._submissions:
+            sub_name = cfg_sub.get("name", "")
+            submission_fns[sub_name] = fn_sub
+
+        # Discover experiment directories from filesystem
+        experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
+
+        # Topologically sort discovered dirs by depends_on from config.json
+        dir_configs = []
+        for d in experiment_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            dir_configs.append(cfg)
+        if any(c.get("depends_on") for c in dir_configs):
+            sorted_configs = _topological_sort(dir_configs)
+            name_to_dir = {
+                c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)
+            }
+            experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
+
+        all_experiment_dirs = list(experiment_dirs)
+
+        # Apply filter if specified
+        if filter:
+            def get_config_name(exp_dir: Path) -> str:
+                config_path = exp_dir / "config.json"
+                if config_path.exists():
+                    config = json.loads(config_path.read_text())
+                    return config.get("name", "")
+                return ""
+
+            original_count = len(experiment_dirs)
+            experiment_dirs = _filter_by_name(
+                experiment_dirs, filter, get_config_name
+            )
+            if not experiment_dirs:
+                print(f"No configs match filter '{filter}'")
+                return None
+            print(
+                f"Filter '{filter}': {len(experiment_dirs)}/{original_count} configs selected"
+            )
+
+        show_progress = capture
+        progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
+
+        all_dir_configs = []
+        for exp_dir in all_experiment_dirs:
+            config_json_path = exp_dir / "config.json"
+            all_dir_configs.append(json.loads(config_json_path.read_text()))
+        all_configs_runs = Runs(all_dir_configs)
+
+        completed: dict[str, Result] = {}
+
+        if filter:
+            filtered_set = set(str(d) for d in experiment_dirs)
+            for exp_dir in all_experiment_dirs:
+                if str(exp_dir) in filtered_set:
+                    continue
+                finished_marker = exp_dir / ".finished"
+                exp_pkl = exp_dir / "experiment.pkl"
+                if finished_marker.exists() and exp_pkl.exists():
+                    cfg_data = json.loads((exp_dir / "config.json").read_text())
+                    dep_name = cfg_data.get("name", "")
+                    with open(exp_pkl, "rb") as f:
+                        completed[dep_name] = pickle.load(f)
+
+        for experiment_dir in experiment_dirs:
+            experiment_path = experiment_dir / "experiment.pkl"
+
+            config_json_path = experiment_dir / "config.json"
+            config_data = json.loads(config_json_path.read_text())
+            config_name = config_data.get("name", "")
+            dep_keys = _normalize_depends_on(config_data.get("depends_on"))
+
+            resolved_deps = (
+                _resolve_depends_on(dep_keys, all_configs_runs, config_name)
+                if dep_keys
+                else []
+            )
+
+            config_data.pop("depends_on", None)
+            config = Config(config_data)
+
+            fn = submission_fns.get(config_name)
+
+            # Detect signature for wants_out/wants_deps per-submission
+            import inspect
+            if fn is not None:
+                sig = inspect.signature(fn)
+                n_params = len(sig.parameters)
+                wants_out = n_params >= 2
+                wants_deps = n_params >= 3
+            else:
+                wants_out = False
+                wants_deps = False
+
+            finished_marker = experiment_dir / ".finished"
+            is_cached = experiment_path.exists() and finished_marker.exists()
+
+            if is_cached:
+                with open(experiment_path, "rb") as f:
+                    exp_obj = pickle.load(f)
+            if is_cached:
+                completed[config_name] = exp_obj
+                marker_path = experiment_dir / ".pyexp"
+                marker_path.touch(exist_ok=True)
+                status = "cached"
+            else:
+                should_skip = False
+                skip_reason = None
+                for dep_name in resolved_deps:
+                    dep_exp = completed.get(dep_name)
+                    if dep_exp is None:
+                        should_skip = True
+                        skip_reason = f"Dependency '{dep_name}' was not found"
+                        break
+                    if dep_exp.skipped or dep_exp.error:
+                        should_skip = True
+                        skip_reason = f"Dependency '{dep_name}' failed or was skipped"
+                        break
+
+                if should_skip:
+                    exp_obj = Result(
+                        cfg=config,
+                        name=config_name,
+                        out=experiment_dir,
+                        skipped=True,
+                        error=f"Skipped: {skip_reason}",
+                        finished=True,
+                    )
+                    experiment_dir.mkdir(parents=True, exist_ok=True)
+                    with open(experiment_path, "wb") as f:
+                        pickle.dump(exp_obj, f)
+                    (experiment_dir / ".finished").touch()
+                    completed[config_name] = exp_obj
+                    status = "skipped"
+                else:
+                    if progress:
+                        progress.start(config_name)
+
+                    dep_experiments = [completed[n] for n in resolved_deps]
+                    deps_runs = Runs(dep_experiments)
+
+                    exp_obj = Result(
+                        cfg=config,
+                        name=config_name,
+                        out=experiment_dir,
+                    )
+
+                    experiment_dir.mkdir(parents=True, exist_ok=True)
+                    with open(experiment_path, "wb") as f:
+                        pickle.dump(exp_obj, f)
+
+                    for attempt in range(max_retries + 1):
+                        exec_instance.run(
+                            fn,
+                            exp_obj,
+                            deps_runs,
+                            experiment_path,
+                            capture=capture,
+                            stash=stash,
+                            snapshot_path=snapshot_path,
+                            wants_out=wants_out,
+                            wants_deps=wants_deps,
+                        )
+
+                        with open(experiment_path, "rb") as f:
+                            exp_obj = pickle.load(f)
+
+                        if not exp_obj.error:
+                            break
+
+                        error_msg = exp_obj.error or ""
+                        remaining = max_retries - attempt
+                        retry_info = (
+                            f" (retrying, {remaining} left)"
+                            if remaining > 0
+                            else ""
+                        )
+                        print(
+                            f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
+                        )
+                        print(error_msg)
+                        if exp_obj.log:
+                            print("--- Log output ---")
+                            print(exp_obj.log)
+                        print("---")
+
+                        if attempt < max_retries:
+                            exp_obj = Result(
+                                cfg=config,
+                                name=config_name,
+                                out=experiment_dir,
+                            )
+                            with open(experiment_path, "wb") as f:
+                                pickle.dump(exp_obj, f)
+
+                    completed[config_name] = exp_obj
+
+                    log_path = experiment_dir / "log.out"
+                    log_path.write_text(exp_obj.log or "")
+                    status = "failed" if exp_obj.error else "passed"
+
+            if progress:
+                progress.update(status, config_name)
+
+        if progress:
+            progress.finish()
+
+
+class Experiment:
+    """User-facing experiment wrapper.
+
+    Created via the @experiment decorator. Provides configs registration,
+    CLI argument parsing, result loading, and delegates execution to
+    ExperimentRunner.
+
+    Usage:
+        @pyexp.experiment
+        def my_exp(cfg):
+            return {"accuracy": 0.95}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "lr": 0.01}]
+
+        my_exp.run()
+        result = my_exp["test"]           # load result by name
+        results = my_exp["pretrain.*"]    # Runs of matching Results
+    """
+
+    def __init__(
+        self,
+        fn: Callable,
+        *,
+        name: str | None = None,
+        output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str = "subprocess",
         retry: int = 4,
         viewer: bool = False,
@@ -736,27 +1113,11 @@ class ExperimentRunner:
         stash: bool = True,
         hash_configs: bool = False,
     ):
-        """Create an ExperimentRunner.
+        import inspect
 
-        Args:
-            name: Experiment name for output folder.
-            output_dir: Base directory for results. Defaults to "out" relative to caller.
-            executor: Execution strategy ("subprocess", "fork", "inline", "ray", etc.)
-            retry: Number of retries on failure.
-            viewer: Start viewer after experiments complete.
-            viewer_port: Port for the viewer.
-            stash: Capture git repository state.
-            hash_configs: Append config parameter hash to run directory names.
-        """
+        self._fn = fn
         self._name = name
-
-        # Determine the default output directory
-        if output_dir is not None:
-            self._output_dir_default = Path(output_dir)
-        else:
-            # Use current working directory / out
-            self._output_dir_default = Path("out")
-
+        self._output_dir = Path(output_dir) if output_dir else None
         self._executor_default = executor
         self._retry_default = retry
         self._viewer_default = viewer
@@ -764,29 +1125,16 @@ class ExperimentRunner:
         self._stash_default = stash
         self._hash_configs_default = hash_configs
         self._configs_fn: Callable[[], list[dict]] | None = None
-        self._report_fn: Callable[[Runs, Path], Any] | None = None
-        self._fn: Callable | None = None
-        self._wants_out: bool = False
-        self._wants_deps: bool = False
-        self._submissions: list[tuple[Callable, dict]] = []
 
-    def submit(self, fn: Callable, cfg: dict) -> None:
-        """Submit an experiment function with a specific config.
-
-        Args:
-            fn: The experiment function to run.
-            cfg: The config dict for this experiment.
-        """
-        self._submissions.append((fn, cfg))
+        # Detect signature
+        sig = inspect.signature(fn)
+        n_params = len(sig.parameters)
+        self._wants_out = n_params >= 2
+        self._wants_deps = n_params >= 3
 
     def configs(self, fn: Callable[[], list[dict]]) -> Callable[[], list[dict]]:
-        """Decorator to register the configs generator function (for decorator API)."""
+        """Decorator to register configs generator."""
         self._configs_fn = fn
-        return fn
-
-    def report(self, fn: Callable[[Runs, Path], Any]) -> Callable[[Runs, Path], Any]:
-        """Decorator to register the report function (for decorator API)."""
-        self._report_fn = fn
         return fn
 
     def results(
@@ -794,28 +1142,26 @@ class ExperimentRunner:
         timestamp: str | None = None,
         output_dir: str | Path | None = None,
         name: str | None = None,
-        run: str | None = None,
         finished: bool = False,
-    ) -> Runs[Experiment]:
-        """Load results from a previous experiment run.
+    ) -> Runs[Result]:
+        """Load results from disk.
 
         Args:
-            timestamp: Timestamp of the run to load (e.g., "2026-01-28_10-30-00").
-                      If None or "latest", loads the most recent run.
+            timestamp: Timestamp of the run to load. If None or "latest",
+                      loads the most recent run.
             output_dir: Base directory where experiment results are stored.
-            name: Experiment name. Defaults to class/function name.
-            run: Optional single run name to load (returns 1D Runs with one element).
-            finished: If True, only include finished experiments. When searching
-                     for "latest", searches backwards in time until it finds a
-                     batch where all runs are finished.
+            name: Experiment name. Defaults to the experiment's name.
+            finished: If True, only include finished experiments.
 
         Returns:
-            1D Runs of Experiment instances with full attribute access.
+            1D Runs of Result instances.
         """
         exp_name = name or self._name
         resolved_output_dir = (
-            Path(output_dir) if output_dir else self._output_dir_default
+            Path(output_dir) if output_dir else self._output_dir
         )
+        if resolved_output_dir is None:
+            resolved_output_dir = Path("out")
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
@@ -827,7 +1173,6 @@ class ExperimentRunner:
                 return Runs([])
             timestamp = latest
 
-        # Verify that at least one run directory exists for this timestamp
         experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
         if not experiment_dirs:
             raise FileNotFoundError(f"Run not found: {timestamp}")
@@ -837,7 +1182,6 @@ class ExperimentRunner:
     def run(
         self,
         configs: Callable[[], list[dict]] | None = None,
-        report: Callable[[Runs, Path], Any] | None = None,
         output_dir: str | Path | None = None,
         executor: ExecutorName | Executor | str | None = None,
         name: str | None = None,
@@ -846,13 +1190,12 @@ class ExperimentRunner:
         viewer_port: int | None = None,
         stash: bool | None = None,
         hash_configs: bool | None = None,
-    ) -> Any:
-        """Execute the full pipeline: configs -> experiments -> report.
+    ) -> None:
+        """Full pipeline: parse CLI args, create runner, submit, execute.
 
         Args:
-            configs: Optional configs function. Uses class method or @configs decorated function.
-            report: Optional report function. Uses class method or @report decorated function.
-            output_dir: Base directory for caching experiment results.
+            configs: Optional configs function override.
+            output_dir: Base directory for experiment results.
             executor: Execution strategy for running experiments.
             name: Experiment name for the output folder.
             retry: Number of times to retry a failed experiment.
@@ -863,8 +1206,7 @@ class ExperimentRunner:
         """
         args = _parse_args()
 
-        # Resolve parameters with CLI override priority:
-        # CLI args > run() args > constructor args
+        # Resolve parameters: CLI > run() > constructor
         resolved_executor = args.executor or executor or self._executor_default
         exp_name = args.name or name or self._name
 
@@ -876,21 +1218,15 @@ class ExperimentRunner:
         else:
             configs_fn = None
 
-        # Resolve report function: run() arg > decorated
-        if report is not None:
-            report_fn = report
-        elif self._report_fn is not None:
-            report_fn = self._report_fn
-        else:
-            report_fn = None
-
         # Output dir: CLI > run() arg > constructor arg
         if args.output_dir:
             resolved_output_dir = Path(args.output_dir)
         elif output_dir is not None:
             resolved_output_dir = Path(output_dir)
+        elif self._output_dir is not None:
+            resolved_output_dir = self._output_dir
         else:
-            resolved_output_dir = self._output_dir_default
+            resolved_output_dir = Path("out")
 
         # Retry: CLI > run() arg > constructor arg
         if args.retry is not None:
@@ -909,7 +1245,7 @@ class ExperimentRunner:
             start_viewer = self._viewer_default
 
         # Viewer port: CLI > run() arg > constructor arg
-        if args.viewer_port != 8765:  # Non-default means explicitly set
+        if args.viewer_port != 8765:
             resolved_viewer_port = args.viewer_port
         elif viewer_port is not None:
             resolved_viewer_port = viewer_port
@@ -930,41 +1266,11 @@ class ExperimentRunner:
         else:
             enable_hash_configs = self._hash_configs_default
 
-        # If executor is already an Executor instance, use it directly
-        if isinstance(resolved_executor, Executor):
-            exec_instance = resolved_executor
-        # Parse "ray://..." (Ray URI) or "ray:<address>" format for remote Ray execution
-        elif isinstance(resolved_executor, str) and (
-            resolved_executor.startswith("ray://")
-            or (
-                resolved_executor.startswith("ray:")
-                and not resolved_executor.startswith("ray://")
-            )
-        ):
-            from .executors import RayExecutor
-
-            if resolved_executor.startswith("ray://"):
-                address = resolved_executor  # Use full URI as address
-            else:
-                address = resolved_executor[4:]  # Remove "ray:" prefix
-            exec_instance = RayExecutor(
-                address=address,
-                runtime_env={"working_dir": "."},
-            )
-        else:
-            exec_instance = get_executor(resolved_executor)
-
-        # Build submissions-based configs function if submissions exist
-        if self._submissions and configs_fn is None:
-            submission_configs = [cfg for _, cfg in self._submissions]
-            configs_fn = lambda: submission_configs
-
         if configs_fn is None:
             raise RuntimeError(
                 "No configs function provided. "
-                "Use @runner.configs decorator, pass configs= argument, or use runner.submit()."
+                "Use @exp.configs decorator or pass configs= argument."
             )
-        # report_fn is optional — if None, skip report phase
 
         base_dir = Path(resolved_output_dir) / exp_name
 
@@ -984,43 +1290,6 @@ class ExperimentRunner:
             print(f"Dependency graph for {exp_name}:")
             _print_dependency_graph(flat_configs)
             return None
-
-        # --report implies --continue (use report's timestamp or latest)
-        if args.report is not None and not args.continue_run:
-            args.continue_run = args.report
-
-        # Track snapshot state
-        snapshot_path: Path | None = None
-        commit_hash: str | None = None
-
-        # Determine the timestamp
-        if args.continue_run:
-            if args.continue_run == "latest":
-                latest = _get_latest_timestamp(base_dir)
-                if latest is None:
-                    raise RuntimeError(f"No previous runs found in {base_dir}")
-                timestamp = latest
-            else:
-                timestamp = args.continue_run
-                if not _discover_experiment_dirs(base_dir, timestamp):
-                    raise RuntimeError(f"Run not found: {timestamp}")
-
-            # Detect existing snapshot from a .commit file in any run directory
-            for exp_dir in _discover_experiment_dirs(base_dir, timestamp):
-                commit_file = exp_dir / ".commit"
-                if commit_file.exists():
-                    prev_commit = commit_file.read_text().strip()
-                    prev_snapshot = base_dir / ".snapshots" / prev_commit
-                    if prev_snapshot.exists():
-                        snapshot_path = prev_snapshot
-                        commit_hash = prev_commit
-                    break
-        else:
-            # Generate new timestamp
-            timestamp = _generate_timestamp()
-
-        # Print run info
-        print(f"Run: {exp_name}/{timestamp}")
 
         # Start viewer in background if requested
         viewer_process = None
@@ -1048,342 +1317,35 @@ class ExperimentRunner:
                 stderr=sp.DEVNULL,
             )
 
-        # =================================================================
-        # PHASE 1: Config Generation (only on fresh start)
-        # =================================================================
-        is_fresh_start = not args.continue_run and not args.report
+        # Resolve configs
+        config_list = configs_fn()
 
-        if is_fresh_start:
-            config_list = configs_fn()
-            _validate_configs(list(config_list))
+        # Create runner and submit all configs
+        runner = ExperimentRunner(
+            name=exp_name,
+            output_dir=resolved_output_dir,
+            retry=max_retries,
+        )
+        for cfg in config_list:
+            runner.submit(self._fn, cfg)
 
-            # Flatten config_list for iteration
-            flat_configs = list(config_list)
+        # Run
+        runner.run(
+            executor=resolved_executor,
+            capture=not args.no_capture,
+            stash=enable_stash,
+            hash_configs=enable_hash_configs,
+            filter=args.filter,
+            continue_run=args.continue_run,
+        )
 
-            # Validate unique names (after flattening)
-            _validate_unique_names(flat_configs)
+    def __getitem__(self, key):
+        """Load results from latest run and index by key."""
+        return self.results()[key]
 
-            # Validate dependencies and topologically sort
-            _validate_dependencies(flat_configs)
-            flat_configs = _topological_sort(flat_configs)
-
-            # Validate unique hashes when hashing is enabled
-            if enable_hash_configs:
-                _validate_unique_hashes(flat_configs)
-
-            # Compute experiment directories
-            experiment_dirs = [
-                _get_experiment_dir(
-                    config, base_dir, timestamp, hash_configs=enable_hash_configs
-                )
-                for config in flat_configs
-            ]
-
-            # Collect run directory names for the batch manifest
-            run_dirs = []
-            for config in flat_configs:
-                name = _sanitize_name(config.get("name", "experiment"))
-                if enable_hash_configs:
-                    run_dirs.append(f"{name}-{_config_hash(config)}")
-                else:
-                    run_dirs.append(name)
-
-            # Build configs (without 'out')
-            configs_for_save = []
-            for config in flat_configs:
-                assert (
-                    "out" not in config
-                ), "Config cannot contain 'out' key; it is reserved"
-                configs_for_save.append(Config(config))
-
-            # Create base directory
-            base_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create shared source snapshot if stash is enabled
-            if enable_stash:
-                try:
-                    from .utils import stash_and_snapshot
-
-                    # Use a temporary path first to get the commit hash
-                    import tempfile
-
-                    with tempfile.TemporaryDirectory() as tmp:
-                        commit_hash, tmp_snapshot = stash_and_snapshot(
-                            Path(tmp) / "src"
-                        )
-
-                    # Now create the shared snapshot at .snapshots/<commit>/
-                    shared_snapshot = base_dir / ".snapshots" / commit_hash
-                    if not shared_snapshot.exists():
-                        _, snapshot_path = stash_and_snapshot(shared_snapshot)
-                    else:
-                        snapshot_path = shared_snapshot
-
-                    print(f"Source snapshot: {commit_hash[:12]} -> {snapshot_path}")
-                except Exception as e:
-                    print(f"Warning: Could not create source snapshot: {e}")
-                    snapshot_path = None
-                    commit_hash = None
-
-            # Save batch manifest
-            _save_batch_manifest(base_dir, timestamp, run_dirs, commit=commit_hash)
-
-            # Create all experiment directories and save individual config.json files
-            for config, experiment_dir in zip(configs_for_save, experiment_dirs):
-                experiment_dir.mkdir(parents=True, exist_ok=True)
-                config_json_path = experiment_dir / "config.json"
-                config_json_path.write_text(
-                    json.dumps(dict(config), indent=2, default=str)
-                )
-                # Write commit reference so each run is self-contained
-                if commit_hash is not None:
-                    (experiment_dir / ".commit").write_text(commit_hash)
-
-        # =================================================================
-        # PHASE 2: Experiment Execution (skip if --report)
-        # =================================================================
-        if not args.report:
-
-            # Build per-config function lookup from submissions
-            submission_fns: dict[str, Callable] = {}
-            if self._submissions:
-                for fn_sub, cfg_sub in self._submissions:
-                    sub_name = cfg_sub.get("name", "")
-                    submission_fns[sub_name] = fn_sub
-
-            # Discover experiment directories from filesystem
-            experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
-
-            # Topologically sort discovered dirs by depends_on from config.json
-            dir_configs = []
-            for d in experiment_dirs:
-                cfg = json.loads((d / "config.json").read_text())
-                dir_configs.append(cfg)
-            if any(c.get("depends_on") for c in dir_configs):
-                sorted_configs = _topological_sort(dir_configs)
-                name_to_dir = {
-                    c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)
-                }
-                experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
-
-            # Save full (unfiltered) list for dependency resolution
-            all_experiment_dirs = list(experiment_dirs)
-
-            # Apply filter if specified
-            if args.filter:
-
-                def get_config_name(exp_dir: Path) -> str:
-                    config_path = exp_dir / "config.json"
-                    if config_path.exists():
-                        config = json.loads(config_path.read_text())
-                        return config.get("name", "")
-                    return ""
-
-                original_count = len(experiment_dirs)
-                experiment_dirs = _filter_by_name(
-                    experiment_dirs, args.filter, get_config_name
-                )
-                if not experiment_dirs:
-                    print(f"No configs match filter '{args.filter}'")
-                    return None
-                print(
-                    f"Filter '{args.filter}': {len(experiment_dirs)}/{original_count} configs selected"
-                )
-
-            # Initialize progress bar if capturing output
-            show_progress = not args.no_capture
-            progress = _ProgressBar(len(experiment_dirs)) if show_progress else None
-
-            # Build Runs of all configs (unfiltered) for dependency resolution
-            all_dir_configs = []
-            for exp_dir in all_experiment_dirs:
-                config_json_path = exp_dir / "config.json"
-                all_dir_configs.append(json.loads(config_json_path.read_text()))
-            all_configs_runs = Runs(all_dir_configs)
-
-            # Track completed experiments by name for dependency injection
-            completed: dict[str, Experiment] = {}
-
-            # Pre-load finished experiments from filtered-out dirs for dependency injection
-            if args.filter:
-                filtered_set = set(str(d) for d in experiment_dirs)
-                for exp_dir in all_experiment_dirs:
-                    if str(exp_dir) in filtered_set:
-                        continue
-                    finished_marker = exp_dir / ".finished"
-                    exp_pkl = exp_dir / "experiment.pkl"
-                    if finished_marker.exists() and exp_pkl.exists():
-                        cfg_data = json.loads((exp_dir / "config.json").read_text())
-                        dep_name = cfg_data.get("name", "")
-                        with open(exp_pkl, "rb") as f:
-                            completed[dep_name] = pickle.load(f)
-
-            for experiment_dir in experiment_dirs:
-                experiment_path = experiment_dir / "experiment.pkl"
-
-                # Load config from saved config.json
-                config_json_path = experiment_dir / "config.json"
-                config_data = json.loads(config_json_path.read_text())
-                config_name = config_data.get("name", "")
-                dep_keys = _normalize_depends_on(config_data.get("depends_on"))
-
-                # Resolve dependency keys to concrete names via Runs indexing
-                resolved_deps = (
-                    _resolve_depends_on(dep_keys, all_configs_runs, config_name)
-                    if dep_keys
-                    else []
-                )
-
-                # Strip depends_on before creating Config object
-                config_data.pop("depends_on", None)
-                config = Config(config_data)
-
-                # Determine the function for this config
-                fn = submission_fns.get(config_name, self._fn)
-
-                # Check if a finished result already exists on disk
-                finished_marker = experiment_dir / ".finished"
-                is_cached = experiment_path.exists() and finished_marker.exists()
-
-                if is_cached:
-                    with open(experiment_path, "rb") as f:
-                        exp_obj = pickle.load(f)
-                if is_cached:
-                    # Already completed (cached / --continue)
-                    completed[config_name] = exp_obj
-                    # Ensure marker file exists for viewer discovery
-                    marker_path = experiment_dir / ".pyexp"
-                    marker_path.touch(exist_ok=True)
-                    status = "cached"
-                else:
-                    # Check if any dependency failed or was skipped
-                    should_skip = False
-                    skip_reason = None
-                    for dep_name in resolved_deps:
-                        dep_exp = completed.get(dep_name)
-                        if dep_exp is None:
-                            should_skip = True
-                            skip_reason = f"Dependency '{dep_name}' was not found"
-                            break
-                        if dep_exp.skipped or dep_exp.error:
-                            should_skip = True
-                            skip_reason = (
-                                f"Dependency '{dep_name}' failed or was skipped"
-                            )
-                            break
-
-                    if should_skip:
-                        # Create skipped experiment
-                        exp_obj = Experiment(
-                            cfg=config,
-                            name=config_name,
-                            out=experiment_dir,
-                            skipped=True,
-                            error=f"Skipped: {skip_reason}",
-                            finished=True,
-                        )
-                        experiment_dir.mkdir(parents=True, exist_ok=True)
-                        with open(experiment_path, "wb") as f:
-                            pickle.dump(exp_obj, f)
-                        (experiment_dir / ".finished").touch()
-                        completed[config_name] = exp_obj
-                        status = "skipped"
-                    else:
-                        # Show running status
-                        if progress:
-                            progress.start(config_name)
-
-                        # Build deps Runs from completed experiments
-                        dep_experiments = [completed[n] for n in resolved_deps]
-                        deps_runs = Runs(dep_experiments)
-
-                        # Create fresh Experiment dataclass
-                        exp_obj = Experiment(
-                            cfg=config,
-                            name=config_name,
-                            out=experiment_dir,
-                        )
-
-                        # Save initial experiment.pkl so partial/interrupted
-                        # experiments are always discoverable on disk
-                        experiment_dir.mkdir(parents=True, exist_ok=True)
-                        with open(experiment_path, "wb") as f:
-                            pickle.dump(exp_obj, f)
-
-                        # Retry loop
-                        for attempt in range(max_retries + 1):
-                            exec_instance.run(
-                                fn,
-                                exp_obj,
-                                deps_runs,
-                                experiment_path,
-                                capture=not args.no_capture,
-                                stash=enable_stash,
-                                snapshot_path=snapshot_path,
-                                wants_out=self._wants_out,
-                                wants_deps=self._wants_deps,
-                            )
-
-                            # Reload experiment to check result
-                            with open(experiment_path, "rb") as f:
-                                exp_obj = pickle.load(f)
-
-                            if not exp_obj.error:
-                                break  # Success, exit retry loop
-
-                            # Print error immediately on each failure
-                            error_msg = exp_obj.error or ""
-                            remaining = max_retries - attempt
-                            retry_info = (
-                                f" (retrying, {remaining} left)"
-                                if remaining > 0
-                                else ""
-                            )
-                            print(
-                                f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
-                            )
-                            print(error_msg)
-                            if exp_obj.log:
-                                print("--- Log output ---")
-                                print(exp_obj.log)
-                            print("---")
-
-                            if attempt < max_retries:
-                                # Create fresh experiment for retry
-                                exp_obj = Experiment(
-                                    cfg=config,
-                                    name=config_name,
-                                    out=experiment_dir,
-                                )
-                                # Re-save initial (unfinished) pkl for retry
-                                with open(experiment_path, "wb") as f:
-                                    pickle.dump(exp_obj, f)
-
-                        completed[config_name] = exp_obj
-
-                        # Save log to plaintext file
-                        log_path = experiment_dir / "log.out"
-                        log_path.write_text(exp_obj.log or "")
-                        status = "failed" if exp_obj.error else "passed"
-
-                # Update progress bar
-                if progress:
-                    progress.update(status, config_name)
-
-            # Finish progress bar
-            if progress:
-                progress.finish()
-
-        # =================================================================
-        # PHASE 3: Report Generation (optional)
-        # =================================================================
-        if report_fn is not None:
-            results = _load_experiments(base_dir, timestamp)
-
-            report_dir = base_dir / "report" / timestamp
-            report_dir.mkdir(parents=True, exist_ok=True)
-
-            return report_fn(results, report_dir)
+    def __call__(self, *args, **kwargs):
+        """Call the underlying experiment function directly."""
+        return self._fn(*args, **kwargs)
 
 
 def experiment(
@@ -1397,11 +1359,11 @@ def experiment(
     viewer_port: int = 8765,
     stash: bool = True,
     hash_configs: bool = False,
-) -> "ExperimentRunner | Callable[[Callable[[dict], Any]], ExperimentRunner]":
-    """Decorator to create an ExperimentRunner from a function.
+) -> "Experiment | Callable[[Callable[[dict], Any]], Experiment]":
+    """Decorator to create an Experiment from a function.
 
     The decorated function becomes an experiment where the return value
-    is stored as exp.result on the Experiment dataclass.
+    is stored as exp.result on the Result dataclass.
 
     Args:
         name: Experiment name for the output folder. Defaults to function name.
@@ -1414,45 +1376,20 @@ def experiment(
         stash: If True, capture git repository state.
         hash_configs: Append config parameter hash to run directory names.
 
-    The decorated function can have one of three signatures:
-        - fn(cfg) - receives only the config
-        - fn(cfg, out) - receives config and output directory path
-        - fn(cfg, out, deps) - receives config, output directory, and dependency runs
-
     Example usage:
 
         @pyexp.experiment
         def my_experiment(cfg):
             return {"accuracy": train(cfg.lr)}
 
-        # With output directory access:
-        @pyexp.experiment
-        def my_experiment(cfg, out):
-            logger = Logger(out)
-            # ... training with logging ...
-            return {"accuracy": 0.95}
-
         @my_experiment.configs
         def configs():
             return [{"name": "exp", "lr": 0.01}]
 
-        @my_experiment.report
-        def report(results, out):
-            for exp in results:
-                print(f"{exp.name}: {exp.result['accuracy']}")
-
         my_experiment.run()
     """
 
-    def make_runner(f: Callable[[dict], Any]) -> ExperimentRunner:
-        import inspect
-
-        # Check if function wants 'out' and/or 'deps' parameter
-        sig = inspect.signature(f)
-        n_params = len(sig.parameters)
-        wants_out = n_params >= 2
-        wants_deps = n_params >= 3
-
+    def make_experiment(f: Callable[[dict], Any]) -> Experiment:
         # Determine output directory and default name relative to function's file
         resolved_output_dir = output_dir
         fn_file = f.__globals__.get("__file__")
@@ -1467,8 +1404,8 @@ def experiment(
         else:
             resolved_name = f.__name__
 
-        # Create runner directly
-        runner = ExperimentRunner(
+        exp = Experiment(
+            f,
             name=resolved_name,
             output_dir=resolved_output_dir,
             executor=executor,
@@ -1479,18 +1416,11 @@ def experiment(
             hash_configs=hash_configs,
         )
 
-        # Store the function and signature info on the runner
-        runner._fn = f
-        runner._wants_out = wants_out
-        runner._wants_deps = wants_deps
-
-        # Copy function metadata to runner for nice repr
-        wraps(f)(runner)
-        return runner
+        # Copy function metadata for nice repr
+        wraps(f)(exp)
+        return exp
 
     if fn is not None:
-        # Called without arguments: @experiment
-        return make_runner(fn)
+        return make_experiment(fn)
     else:
-        # Called with arguments: @experiment(name="mnist", executor="fork")
-        return make_runner
+        return make_experiment

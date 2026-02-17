@@ -24,7 +24,7 @@ import traceback
 import cloudpickle
 
 if TYPE_CHECKING:
-    from .experiment import Experiment
+    from .experiment import Result
     from .config import Runs
 
 # Valid executor names
@@ -41,7 +41,7 @@ class Executor(ABC):
     def run(
         self,
         fn: Callable,
-        experiment: "Experiment",
+        experiment: "Result",
         deps: "Runs | None",
         result_path: Path,
         *,
@@ -55,7 +55,7 @@ class Executor(ABC):
 
         Args:
             fn: The experiment function to call.
-            experiment: The Experiment dataclass (cfg/name/out already set).
+            experiment: The Result dataclass (cfg/name/out already set).
             deps: Dependency experiments (Runs), or None.
             result_path: Path where the pickled experiment should be saved.
             capture: If True (default), capture output. If False, show output live.
@@ -94,7 +94,7 @@ class InlineExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Experiment",
+        experiment: "Result",
         deps: "Runs | None",
         result_path: Path,
         *,
@@ -145,7 +145,7 @@ class SubprocessExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Experiment",
+        experiment: "Result",
         deps: "Runs | None",
         result_path: Path,
         *,
@@ -276,7 +276,7 @@ class ForkExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Experiment",
+        experiment: "Result",
         deps: "Runs | None",
         result_path: Path,
         *,
@@ -455,7 +455,7 @@ class RayExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Experiment",
+        experiment: "Result",
         deps: "Runs | None",
         result_path: Path,
         *,

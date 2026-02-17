@@ -11,9 +11,8 @@ def pipeline(config: Config, out, deps):
     Args:
         config: Experiment config with dot notation access.
         out: Output directory for this run.
-        deps: Runs[Experiment] of completed dependency runs.
+        deps: Runs[Result] of completed dependency runs.
     """
-    pipeline.results()
     if config.name.startswith("pretrain"):
         print(f"Pretraining with lr={config.lr}, epochs={config.epochs}")
         # Simulate pretraining

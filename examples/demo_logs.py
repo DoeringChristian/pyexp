@@ -111,28 +111,21 @@ def configs():
     ]
 
 
-@train.report
-def report(results: Runs, report_dir: Path):
-    """Print final results."""
+if __name__ == "__main__":
+    train.run()
+
+    # Print results summary
     from pyexp import LogReader
 
+    results = train.results()
     print("\nResults:")
     for exp in results:
         if exp.error:
             print(f"  {exp.name}: ERROR - {exp.error}")
         else:
-            # Access logged data via LogReader
             log_reader = LogReader(exp.out)
             it, loss = log_reader["loss"]
             res = exp.result
             print(
                 f"  {exp.name}: loss={res['final_loss']:.4f}, accuracy={res['final_accuracy']:.4f}"
             )
-
-    print(
-        f"\nView logs with: uv run --extra viewer python -m pyexp.viewer {report_dir}"
-    )
-
-
-if __name__ == "__main__":
-    train.run()

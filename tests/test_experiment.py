@@ -8,25 +8,24 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from pyexp import Config, Runs, experiment, sweep, Experiment, ExperimentRunner
+from pyexp import Config, Runs, experiment, sweep, Result, ExperimentRunner, Experiment
 
 
 class TestExperimentDecorator:
     """Tests for the @experiment decorator syntax."""
 
-    def test_decorator_returns_runner(self):
+    def test_decorator_returns_experiment(self):
         @experiment
         def my_exp(config):
             return config["x"]
 
-        assert isinstance(my_exp, ExperimentRunner)
+        assert isinstance(my_exp, Experiment)
 
     def test_experiment_fn_accessible(self):
         @experiment
         def my_exp(config):
             return config["x"] * 2
 
-        # The experiment function should be accessible
         assert my_exp._fn is not None
 
     def test_configs_decorator(self):
@@ -40,20 +39,17 @@ class TestExperimentDecorator:
 
         assert my_exp._configs_fn is not None
 
-    def test_report_decorator(self):
+    def test_isinstance_experiment(self):
         @experiment
         def my_exp(config):
             return config["x"]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
-        assert my_exp._report_fn is not None
+        assert isinstance(my_exp, Experiment)
+        assert not isinstance(my_exp, ExperimentRunner)
 
 
 class TestExperimentRun:
-    """Tests for ExperimentRunner.run() execution."""
+    """Tests for Experiment.run() execution."""
 
     def test_run_executes_pipeline(self, tmp_path):
         @experiment(name="my_exp")
@@ -64,16 +60,13 @@ class TestExperimentRun:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result == 10
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 10
 
-    def test_run_with_passed_functions(self, tmp_path):
+    def test_run_with_passed_configs(self, tmp_path):
         @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"] + 1}
@@ -81,15 +74,13 @@ class TestExperimentRun:
         def my_configs():
             return [{"name": "t", "x": 10}]
 
-        def my_report(results, out):
-            return [r.result["value"] for r in results]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(
-                configs=my_configs, report=my_report, output_dir=tmp_path, executor="inline"
+            my_exp.run(
+                configs=my_configs, output_dir=tmp_path, executor="inline"
             )
 
-        assert result == [11]
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 11
 
     def test_run_caches_results(self, tmp_path):
         call_count = 0
@@ -104,70 +95,16 @@ class TestExperimentRun:
         def configs():
             return [{"name": "cached", "x": 42}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
-        with patch.object(sys, "argv", ["test"]):
-            # Use executor="inline" to track call_count in same process
-            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
-            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
-
-        assert result1 == 42
-        assert result2 == 42
-        assert call_count == 1  # Only called once due to caching
-
-    def test_run_report_flag(self, tmp_path):
-        @experiment(name="my_exp")
-        def my_exp(config):
-            return {"value": config["x"]}
-
-        @my_exp.configs
-        def configs():
-            return [{"name": "rep", "x": 99}]
-
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
-        # First run to create cache
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Report-only run (--report implies --continue to latest)
-        with patch.object(sys, "argv", ["test", "--report"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+        # --continue should use cached results
+        with patch.object(sys, "argv", ["test", "--continue"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result == 99
-
-    def test_report_uses_saved_configs(self, tmp_path):
-        """--report should use saved configs, not recompute from configs function."""
-        config_value = [42]  # Mutable to allow modification
-
-        @experiment(name="my_exp")
-        def my_exp(config):
-            return {"value": config["x"]}
-
-        @my_exp.configs
-        def configs():
-            return [{"name": "test", "x": config_value[0]}]
-
-        @my_exp.report
-        def report(results, out):
-            return results[0].cfg["x"]
-
-        # First run with x=42
-        with patch.object(sys, "argv", ["test"]):
-            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
-        assert result1 == 42
-
-        # Change configs function to return different value
-        config_value[0] = 999
-
-        # --report should still use saved config with x=42
-        with patch.object(sys, "argv", ["test", "--report"]):
-            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
-        assert result2 == 42  # Should be original value, not 999
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 42
+        assert call_count == 1  # Only called once due to caching
 
     def test_continue_uses_saved_configs(self, tmp_path):
         """--continue should use saved configs, not recompute from configs function."""
@@ -181,40 +118,22 @@ class TestExperimentRun:
         def configs():
             return [{"name": "test", "x": config_value[0]}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].cfg["x"]
-
         # First run with x=42
         with patch.object(sys, "argv", ["test"]):
-            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
-        assert result1 == 42
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        results1 = my_exp.results(output_dir=tmp_path)
+        assert results1[0].cfg["x"] == 42
 
         # Change configs function to return different value
         config_value[0] = 999
 
         # --continue should still use saved config with x=42
         with patch.object(sys, "argv", ["test", "--continue"]):
-            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
-        assert result2 == 42  # Should be original value, not 999
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-    def test_run_report_flag_no_cache_raises(self, tmp_path):
-        @experiment
-        def my_exp(config):
-            return config["x"]
-
-        @my_exp.configs
-        def configs():
-            return [{"name": "nocache", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
-
-        # --report with no previous runs should raise "No previous runs found"
-        with patch.object(sys, "argv", ["test", "--report"]):
-            with pytest.raises(RuntimeError, match="No previous runs found"):
-                my_exp.run(output_dir=tmp_path, executor="inline")
+        results2 = my_exp.results(output_dir=tmp_path)
+        assert results2[0].cfg["x"] == 42  # Should be original value, not 999
 
     def test_run_creates_output_dir(self, tmp_path):
         out_dir = tmp_path / "nested" / "output"
@@ -226,10 +145,6 @@ class TestExperimentRun:
         @my_exp.configs
         def configs():
             return [{"name": "dir", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=out_dir, executor="inline")
@@ -248,44 +163,28 @@ class TestExperimentRun:
         def configs():
             return [{"name": "logged", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Check log contains output
-        assert "Hello from experiment" in result.log
+        results = my_exp.results(output_dir=tmp_path)
+        assert "Hello from experiment" in results[0].log
 
     def test_config_receives_out(self, tmp_path):
-        received_out = None
-
         @experiment
         def my_exp(config):
-            nonlocal received_out
-            # In new API, 'out' is not in config, it's on the instance
-            # But for decorator API, config still has what was passed
-            # Actually, let's check what's available
             return {"x": 1}
 
         @my_exp.configs
         def configs():
             return [{"name": "outdir", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_out
-            # In report, we can access exp.out
-            received_out = results[0].out
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert received_out is not None
-        assert isinstance(received_out, Path)
-        assert received_out.exists()
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].out is not None
+        assert isinstance(results[0].out, Path)
+        assert results[0].out.exists()
 
     def test_config_is_config_type(self, tmp_path):
         received_config = None
@@ -300,12 +199,7 @@ class TestExperimentRun:
         def configs():
             return [{"name": "type", "nested": {"a": 1}}]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
-            # Use executor="inline" to capture received_config in same process
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         assert isinstance(received_config, Config)
@@ -316,16 +210,12 @@ class TestExperimentRun:
         def my_exp(config):
             return 1
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             with pytest.raises(RuntimeError, match="No configs function"):
                 my_exp.run(output_dir=tmp_path)
 
-    def test_run_no_report_succeeds(self, tmp_path):
-        """Running without a report function should succeed (report is optional)."""
+    def test_run_succeeds_without_report(self, tmp_path):
+        """Running without a report function should succeed."""
 
         @experiment
         def my_exp(config):
@@ -347,10 +237,6 @@ class TestExperimentRun:
         def configs():
             return [{"name": "bad", "out": "/some/path"}]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             with pytest.raises(AssertionError, match="out"):
                 my_exp.run(output_dir=tmp_path)
@@ -368,18 +254,15 @@ class TestExperimentRun:
                 {"name": "c", "x": 4},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return [r.result["value"] for r in results]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result == [4, 9, 16]
+        results = my_exp.results(output_dir=tmp_path)
+        values = [r.result["value"] for r in results]
+        assert values == [4, 9, 16]
 
-    def test_report_receives_runs(self, tmp_path):
-        """Report function should receive results as Runs."""
-        received_results = None
+    def test_results_are_runs(self, tmp_path):
+        """Results should be Runs instances."""
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -389,21 +272,15 @@ class TestExperimentRun:
         def configs():
             return [{"name": "a", "x": 1}, {"name": "b", "x": 2}]
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_results
-            received_results = results
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert isinstance(received_results, Runs)
-        assert len(received_results) == 2
+        results = my_exp.results(output_dir=tmp_path)
+        assert isinstance(results, Runs)
+        assert len(results) == 2
 
     def test_results_contain_config_and_name(self, tmp_path):
         """Each result should contain the cfg and name."""
-        received_results = None
 
         @experiment
         def my_exp(config):
@@ -413,28 +290,20 @@ class TestExperimentRun:
         def configs():
             return [{"name": "test", "lr": 0.01, "epochs": 10}]
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_results
-            received_results = results
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        result = received_results[0]
+        results = my_exp.results(output_dir=tmp_path)
+        result = results[0]
         assert result.cfg["name"] == "test"
         assert result.cfg["lr"] == 0.01
         assert result.cfg["epochs"] == 10
         assert result.result["accuracy"] == 0.95
-        # out is now a property on the experiment, not in cfg
         assert result.out.exists()
-        # name is a shorthand for cfg.get("name", "")
         assert result.name == "test"
 
     def test_results_filterable_by_config(self, tmp_path):
         """Results should be filterable by config values."""
-        received_results = None
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -447,29 +316,20 @@ class TestExperimentRun:
             cfgs = sweep(cfgs, [{"name": "y10", "y": 10}, {"name": "y20", "y": 20}])
             return cfgs
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_results
-            received_results = results
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Results are always 1D now
-        assert len(received_results) == 4
+        results = my_exp.results(output_dir=tmp_path)
+        assert len(results) == 4
 
-        # Filter by cfg.x
-        x1_results = received_results[{"cfg.x": 1}]
+        x1_results = results[{"cfg.x": 1}]
         assert all(r.cfg["x"] == 1 for r in x1_results)
 
-        # Filter by cfg.y
-        y10_results = received_results[{"cfg.y": 10}]
+        y10_results = results[{"cfg.y": 10}]
         assert all(r.cfg["y"] == 10 for r in y10_results)
 
-    def test_report_runs_are_1d(self, tmp_path):
+    def test_results_are_1d(self, tmp_path):
         """Result Runs are always 1D regardless of sweep shape."""
-        received_results = None
 
         @experiment
         def my_exp(config):
@@ -482,25 +342,17 @@ class TestExperimentRun:
             cfgs = sweep(cfgs, [{"name": "c", "y": 10}, {"name": "d", "y": 20}])
             return cfgs
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_results
-            received_results = results
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Results are always 1D
-        assert len(received_results) == 4
-        # Can still access by name pattern
-        exp_a_c = received_results["exp_a_c"]
+        results = my_exp.results(output_dir=tmp_path)
+        assert len(results) == 4
+        exp_a_c = results["exp_a_c"]
         assert exp_a_c.cfg["x"] == 1
         assert exp_a_c.result["val"] == 11
 
     def test_non_dict_result_wrapped_in_result(self, tmp_path):
         """Non-dict results are stored in .result attribute."""
-        received_results = None
 
         @experiment
         def my_exp(config):
@@ -510,16 +362,11 @@ class TestExperimentRun:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            nonlocal received_results
-            received_results = results
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        result = received_results[0]
+        results = my_exp.results(output_dir=tmp_path)
+        result = results[0]
         assert result.cfg["name"] == "test"
         assert result.cfg["x"] == 5
         assert result.result == 10
@@ -535,10 +382,6 @@ class TestExperimentRun:
         @my_exp.configs
         def configs():
             return [{"name": "test", "lr": 0.01, "nested": {"a": 1}}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
@@ -560,10 +403,6 @@ class TestExperimentRun:
         @my_exp.configs
         def configs():
             return [{"name": "bad", "fn": lambda x: x}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         with patch.object(sys, "argv", ["test"]):
             with pytest.raises(TypeError, match="Invalid config value"):
@@ -587,10 +426,6 @@ class TestExperimentRun:
                 {"name": "lr_0.001_batch_64", "lr": 0.001, "batch": 64},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return [r.result["name"] for r in results]
-
         # First run all configs
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
@@ -598,35 +433,10 @@ class TestExperimentRun:
         # Now filter to only lr_0.01 configs using --continue
         runs.clear()
         with patch.object(sys, "argv", ["test", "--continue", "--filter", "lr_0\\.01"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
         # Since all are cached, runs list stays empty
         assert len(runs) == 0
-
-    def test_filter_no_match_returns_none(self, tmp_path):
-        """--filter with no matches should return None."""
-
-        @experiment(name="my_exp")
-        def my_exp(config):
-            return {"name": config["name"]}
-
-        @my_exp.configs
-        def configs():
-            return [{"name": "alpha", "x": 1}, {"name": "beta", "x": 2}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
-
-        # First run to create configs
-        with patch.object(sys, "argv", ["test"]):
-            my_exp.run(output_dir=tmp_path, executor="inline")
-
-        # Filter with no matches
-        with patch.object(sys, "argv", ["test", "--continue", "--filter", "gamma"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
-
-        assert result is None
 
     def test_filter_runs_only_matching(self, tmp_path):
         """--filter should only execute matching configs on fresh run."""
@@ -643,20 +453,11 @@ class TestExperimentRun:
                 {"name": "other_c", "x": 3},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return [r.result["name"] for r in results]
-
         # Run with filter - only exp_* should run
         with patch.object(sys, "argv", ["test", "--filter", "^exp_"]):
-            # This will fail at report because not all results exist
-            try:
-                my_exp.run(output_dir=tmp_path, executor="inline")
-            except FileNotFoundError:
-                pass  # Expected - report tries to load all configs
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
         # Check which experiments actually ran by looking for experiment.pkl files
-        # New layout: base_dir/<run_name>/<timestamp>/experiment.pkl
         base_dir = tmp_path / "my_exp"
         ran_names = []
         for exp_pkl in base_dir.rglob("experiment.pkl"):
@@ -683,21 +484,15 @@ class TestResultsMethod:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Load results
         results = my_exp.results(output_dir=tmp_path)
 
         assert len(results) == 1
         assert results[0].cfg["name"] == "test"
         assert results[0].cfg["x"] == 5
         assert results[0].result["value"] == 10
-        # out is a property on the experiment
         assert results[0].out is not None
         assert results[0].out.exists()
 
@@ -712,10 +507,6 @@ class TestResultsMethod:
         @my_exp.configs
         def configs():
             return [{"name": "test", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
 
         # Run first experiment
         with patch.object(sys, "argv", ["test"]):
@@ -758,16 +549,10 @@ class TestResultsMethod:
             cfgs = sweep(cfgs, [{"name": "y10", "y": 10}, {"name": "y20", "y": 20}])
             return cfgs
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         results = my_exp.results(output_dir=tmp_path)
-
-        # Results are always 1D
         assert len(results) == 4
 
     def test_results_no_runs_returns_empty(self, tmp_path):
@@ -792,10 +577,6 @@ class TestResultsMethod:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
@@ -817,14 +598,9 @@ class TestResultsMethod:
                 {"name": "b", "x": 2},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return None
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Find the batch manifest
         base_dir = tmp_path / "my_exp"
         batches_dir = base_dir / ".batches"
         assert batches_dir.exists()
@@ -837,7 +613,6 @@ class TestResultsMethod:
         assert data["runs"] == ["a", "b"]
         assert "timestamp" in data
 
-        # Individual config.json files should exist at <run_name>/<timestamp>/config.json
         timestamp = data["timestamp"]
         for run_name in data["runs"]:
             config_json = base_dir / run_name / timestamp / "config.json"
@@ -846,13 +621,60 @@ class TestResultsMethod:
             assert "x" in config_data
 
 
+class TestGetitem:
+    """Tests for Experiment.__getitem__."""
+
+    def test_getitem_loads_result(self, tmp_path):
+        """my_exp['test'] loads a result by name."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"] * 2}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        # Override output_dir for results lookup
+        my_exp._output_dir = tmp_path
+        result = my_exp["test"]
+        assert result.result["value"] == 10
+        assert result.name == "test"
+
+    def test_getitem_glob_pattern(self, tmp_path):
+        """my_exp['pretrain.*'] returns matching results."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "pretrain_a", "x": 1},
+                {"name": "pretrain_b", "x": 2},
+                {"name": "finetune", "x": 3},
+            ]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        my_exp._output_dir = tmp_path
+        pretrain_results = my_exp["pretrain.*"]
+        assert isinstance(pretrain_results, Runs)
+        assert len(pretrain_results) == 2
+
+
 class TestFinishedFlag:
-    """Tests for the Experiment.finished property."""
+    """Tests for the Result.finished property."""
 
     def test_finished_false_by_default(self):
-        """New Experiment instances have finished=False."""
+        """New Result instances have finished=False."""
         from pyexp import Config
-        exp = Experiment(cfg=Config({"name": "test"}), name="test", out=Path("/tmp/test"))
+        exp = Result(cfg=Config({"name": "test"}), name="test", out=Path("/tmp/test"))
         assert exp.finished is False
 
     def test_finished_true_after_successful_run(self, tmp_path):
@@ -894,34 +716,18 @@ class TestFinishedFlag:
 
     def test_initial_pkl_saved_before_execution(self, tmp_path):
         """experiment.pkl should exist on disk even before execution completes."""
-        import pickle
-
-        pkl_existed_before = {}
 
         @experiment(name="my_exp")
         def my_exp(config):
-            # During execution, check that the pkl already exists on disk
-            exp_dir = config["_exp_dir"]
-            pkl_path = exp_dir / "experiment.pkl"
-            pkl_existed_before[config["name"]] = pkl_path.exists()
-            if pkl_path.exists():
-                with open(pkl_path, "rb") as f:
-                    pre_instance = pickle.load(f)
-                pkl_existed_before["was_finished"] = pre_instance.finished
             return {"value": 1}
 
         @my_exp.configs
         def configs():
             return [{"name": "test", "x": 1}]
 
-        # We need to pass the experiment dir to the function. Since inline
-        # executor runs in-process, we can discover it after setup.
-        # Instead, use a simpler approach: just check files after run.
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # After run, the pkl should exist and be finished
         results = my_exp.results(output_dir=tmp_path)
         assert results[0].finished is True
 
@@ -968,7 +774,7 @@ class TestFinishedFlag:
         base_dir = tmp_path / "my_exp"
         timestamp = sorted((base_dir / ".batches").glob("*.json"))[0].stem
 
-        # All finished — should return both
+        # All finished - should return both
         results = my_exp.results(timestamp=timestamp, output_dir=tmp_path, finished=True)
         assert len(results) == 2
 
@@ -997,13 +803,13 @@ class TestFinishedFlag:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        # First run — will be finished
+        # First run - will be finished
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         time.sleep(1.1)
 
-        # Second run — will also be finished
+        # Second run - will also be finished
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
@@ -1013,7 +819,6 @@ class TestFinishedFlag:
 
         # Remove .finished from latest run to simulate unfinished
         for d in base_dir.rglob(".finished"):
-            # Only remove from the latest timestamp
             if latest_ts in str(d):
                 d.unlink()
 
@@ -1022,7 +827,6 @@ class TestFinishedFlag:
         assert len(results) == 1
 
         first_ts = timestamps[0].stem
-        # Verify it loaded from the first timestamp
         assert first_ts in str(results[0].out)
 
     def test_results_finished_returns_empty_when_none_finished(self, tmp_path):
@@ -1039,7 +843,6 @@ class TestFinishedFlag:
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Remove all .finished markers
         base_dir = tmp_path / "my_exp"
         for d in base_dir.rglob(".finished"):
             d.unlink()
@@ -1053,7 +856,7 @@ class TestOutputFolderStructure:
     """Tests for output folder naming and timestamp features."""
 
     def test_default_name_is_filename_functionname(self):
-        """Experiment name defaults to <filename>:<function_name>."""
+        """Experiment name defaults to <filename>.<function_name>."""
 
         @experiment
         def my_custom_experiment(config):
@@ -1081,36 +884,23 @@ class TestOutputFolderStructure:
         def configs():
             return [{"name": "cfg", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Check structure: tmp_path/test_exp/cfg/<timestamp>/
         exp_dir = tmp_path / "test_exp"
         assert exp_dir.exists()
 
-        # Should have run name dir
         cfg_dir = exp_dir / "cfg"
         assert cfg_dir.exists()
 
-        # cfg dir should have a timestamp subdir
         timestamp_dirs = [d for d in cfg_dir.iterdir() if d.is_dir()]
         assert len(timestamp_dirs) == 1
 
-        # Timestamp dir should contain experiment files
         assert (timestamp_dirs[0] / "config.json").exists()
         assert (timestamp_dirs[0] / "experiment.pkl").exists()
 
-        # Report dir should be at base_dir/report/<timestamp>/
         batches_dir = exp_dir / ".batches"
         assert batches_dir.exists()
-        manifest = list(batches_dir.glob("*.json"))[0]
-        ts = manifest.stem
-        report_dir = exp_dir / "report" / ts
-        assert report_dir.exists()
 
     def test_continue_specific_timestamp(self, tmp_path):
         """--continue=TIMESTAMP continues a specific run."""
@@ -1123,24 +913,19 @@ class TestOutputFolderStructure:
         def configs():
             return [{"name": "cfg", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         # First run
         with patch.object(sys, "argv", ["test"]):
-            result1 = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Get the timestamp from batch manifest
         exp_dir = tmp_path / "test_exp"
         timestamp = sorted((exp_dir / ".batches").glob("*.json"))[0].stem
 
         # Second run with --continue should use cache
         with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
-            result2 = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result1 == 1
-        assert result2 == 1
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 1
 
     def test_continue_uses_latest_timestamp(self, tmp_path):
         """--continue uses the most recent batch timestamp."""
@@ -1153,11 +938,6 @@ class TestOutputFolderStructure:
         def configs():
             return [{"name": "cfg", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
-        # Create two runs (sleep to ensure different timestamps)
         import time
 
         with patch.object(sys, "argv", ["test"]):
@@ -1172,9 +952,7 @@ class TestOutputFolderStructure:
 
         # --continue should use the latest
         with patch.object(sys, "argv", ["test", "--continue"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
-
-        assert result == 1
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
     def test_continue_no_previous_runs_raises(self, tmp_path):
         """--continue raises error when no previous runs exist."""
@@ -1186,10 +964,6 @@ class TestOutputFolderStructure:
         @my_exp.configs
         def configs():
             return [{"name": "cfg", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         with patch.object(sys, "argv", ["test", "--continue"]):
             with pytest.raises(RuntimeError, match="No previous runs found"):
@@ -1206,14 +980,9 @@ class TestOutputFolderStructure:
         def configs():
             return [{"name": "cfg", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, name="override_name", executor="inline")
 
-        # Should use overridden name
         assert (tmp_path / "override_name").exists()
         assert not (tmp_path / "default_name").exists()
 
@@ -1227,10 +996,6 @@ class TestOutputFolderStructure:
         @my_exp.configs
         def configs():
             return [{"name": "cfg", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         # Create a run
         with patch.object(sys, "argv", ["test"]):
@@ -1247,15 +1012,12 @@ class TestOutputFolderStructure:
 
     def test_default_output_dir_relative_to_file(self):
         """Default output_dir is relative to experiment file's directory."""
-        # Create an experiment - __file__ should be this test file
         @experiment
         def my_exp(config):
             return config["x"]
 
-        # The default output dir should be relative to the experiment file
-        # Since my_exp is defined here, its __file__ is tests/test_experiment.py
         expected_dir = Path(__file__).parent / "out"
-        assert my_exp._output_dir_default == expected_dir
+        assert my_exp._output_dir == expected_dir
 
     def test_output_dir_override_in_decorator(self, tmp_path):
         """Can override output_dir in decorator."""
@@ -1265,7 +1027,7 @@ class TestOutputFolderStructure:
         def my_exp(config):
             return config["x"]
 
-        assert my_exp._output_dir_default == custom_dir
+        assert my_exp._output_dir == custom_dir
 
 
 class TestExecutorSystem:
@@ -1303,16 +1065,12 @@ class TestExecutorSystem:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path)
+            my_exp.run(output_dir=tmp_path)
 
-        # If executor="inline" was used, call_count would be updated
         assert call_count == 1
-        assert result == 5
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 5
 
     def test_run_can_override_decorator_default(self, tmp_path):
         """run(executor=...) can override the decorator default."""
@@ -1325,15 +1083,11 @@ class TestExecutorSystem:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            # Override subprocess with inline
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result == 10
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 10
 
 
 def _can_subprocess_import_pyexp():
@@ -1373,14 +1127,11 @@ class TestSubprocessExecution:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="subprocess")
+            my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        assert result == 10
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 10
 
     def test_subprocess_handles_exception(self, tmp_path):
         """Exceptions in subprocess are captured and returned as error results."""
@@ -1393,17 +1144,14 @@ class TestSubprocessExecution:
         def configs():
             return [{"name": "failing", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="subprocess")
+            my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        assert result.error is not None
-        assert "ValueError" in result.error
-        assert "Test error" in result.error
-        assert result.cfg["name"] == "failing"
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].error is not None
+        assert "ValueError" in results[0].error
+        assert "Test error" in results[0].error
+        assert results[0].cfg["name"] == "failing"
 
     def test_subprocess_continues_after_failure(self, tmp_path):
         """Other experiments continue even if one fails."""
@@ -1422,18 +1170,13 @@ class TestSubprocessExecution:
                 {"name": "c", "x": 3},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
-            results = my_exp.run(output_dir=tmp_path, executor="subprocess")
+            my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        # First and third succeed
+        results = my_exp.results(output_dir=tmp_path)
+
         assert results[0].result["value"] == 1
         assert results[2].result["value"] == 3
-
-        # Second failed
         assert results[1].error is not None
         assert "ValueError" in results[1].error
 
@@ -1452,14 +1195,12 @@ class TestSubprocessExecution:
                 {"name": "c", "x": 4},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return [r.result["value"] for r in results]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="subprocess")
+            my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        assert result == [4, 9, 16]
+        results = my_exp.results(output_dir=tmp_path)
+        values = [r.result["value"] for r in results]
+        assert values == [4, 9, 16]
 
     def test_subprocess_with_sweep(self, tmp_path):
         """Subprocess execution works with sweep configurations."""
@@ -1475,16 +1216,11 @@ class TestSubprocessExecution:
             cfgs = sweep(cfgs, [{"name": "c", "y": 10}, {"name": "d", "y": 20}])
             return cfgs
 
-        @my_exp.report
-        def report(results, out):
-            return results
-
         with patch.object(sys, "argv", ["test"]):
-            results = my_exp.run(output_dir=tmp_path, executor="subprocess")
+            my_exp.run(output_dir=tmp_path, executor="subprocess")
 
-        # Results are always 1D
+        results = my_exp.results(output_dir=tmp_path)
         assert len(results) == 4
-        # Access by name
         assert results["exp_a_c"].result["value"] == 11  # x=1, y=10
         assert results["exp_b_d"].result["value"] == 22  # x=2, y=20
 
@@ -1504,14 +1240,11 @@ class TestForkExecution:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="fork")
+            my_exp.run(output_dir=tmp_path, executor="fork")
 
-        assert result == 15
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 15
 
     def test_fork_handles_exception(self, tmp_path):
         """Exceptions in fork are captured."""
@@ -1524,15 +1257,12 @@ class TestForkExecution:
         def configs():
             return [{"name": "fail", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="fork")
+            my_exp.run(output_dir=tmp_path, executor="fork")
 
-        assert result.error is not None
-        assert "RuntimeError" in result.error
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].error is not None
+        assert "RuntimeError" in results[0].error
 
     def test_fork_multiple_configs(self, tmp_path):
         """Multiple configs run correctly with fork executor."""
@@ -1549,14 +1279,12 @@ class TestForkExecution:
                 {"name": "c", "x": 4},
             ]
 
-        @my_exp.report
-        def report(results, out):
-            return [r.result["value"] for r in results]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="fork")
+            my_exp.run(output_dir=tmp_path, executor="fork")
 
-        assert result == [4, 9, 16]
+        results = my_exp.results(output_dir=tmp_path)
+        values = [r.result["value"] for r in results]
+        assert values == [4, 9, 16]
 
 
 class TestDecoratorWithOut:
@@ -1576,10 +1304,6 @@ class TestDecoratorWithOut:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
@@ -1598,14 +1322,11 @@ class TestDecoratorWithOut:
         def configs():
             return [{"name": "test", "x": 5}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline")
+            my_exp.run(output_dir=tmp_path, executor="inline")
 
-        assert result == 10
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 10
 
 
 class TestSubmitAPI:
@@ -1613,7 +1334,6 @@ class TestSubmitAPI:
 
     def test_submit_runs_experiments(self, tmp_path):
         """submit() API runs experiments with per-config functions."""
-        import inspect
 
         def train_fn(cfg):
             return {"value": cfg["x"] * 2}
@@ -1622,25 +1342,21 @@ class TestSubmitAPI:
         runner.submit(train_fn, {"name": "a", "x": 5})
         runner.submit(train_fn, {"name": "b", "x": 10})
 
-        # Detect signature for wants_out/wants_deps
-        sig = inspect.signature(train_fn)
-        runner._fn = train_fn
-        runner._wants_out = len(sig.parameters) >= 2
-        runner._wants_deps = len(sig.parameters) >= 3
-
-        def my_report(results, out):
-            return [r.result["value"] for r in results]
-
         with patch.object(sys, "argv", ["test"]):
-            result = runner.run(report=my_report, executor="inline")
+            runner.run(executor="inline")
 
-        assert result == [10, 20]
+        from pyexp.experiment import _get_latest_timestamp, _load_experiments
+        base_dir = tmp_path / "my_exp"
+        ts = _get_latest_timestamp(base_dir)
+        results = _load_experiments(base_dir, ts)
+        values = [r.result["value"] for r in results]
+        assert values == [10, 20]
 
-    def test_experiment_dataclass_fields(self):
-        """Experiment dataclass has expected fields."""
+    def test_result_dataclass_fields(self):
+        """Result dataclass has expected fields."""
         from pyexp import Config
 
-        exp = Experiment(
+        exp = Result(
             cfg=Config({"name": "test", "lr": 0.01}),
             name="test",
             out=Path("/tmp/test"),
@@ -1653,6 +1369,14 @@ class TestSubmitAPI:
         assert exp.log == ""
         assert exp.finished is False
         assert exp.skipped is False
+
+    def test_submit_no_submissions_raises(self, tmp_path):
+        """Runner with no submissions raises RuntimeError."""
+        runner = ExperimentRunner(name="my_exp", output_dir=tmp_path)
+
+        with patch.object(sys, "argv", ["test"]):
+            with pytest.raises(RuntimeError, match="No experiments submitted"):
+                runner.run(executor="inline")
 
 
 def _init_git_repo(path: Path) -> None:
@@ -1784,7 +1508,6 @@ class TestSourceSnapshotting:
         data = json.loads(manifest.read_text())
         commit = data["commit"]
 
-        # Each run dir should have a .commit file
         for run_name in data["runs"]:
             commit_file = base_dir / run_name / data["timestamp"] / ".commit"
             assert commit_file.exists(), f".commit should exist in {run_name} run dir"
@@ -1818,18 +1541,15 @@ class TestSourceSnapshotting:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
-
-        assert result == 1
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
         base_dir = tmp_path / "my_exp"
         snapshot_dir = self._get_snapshot_dir(base_dir)
         assert snapshot_dir is not None, ".snapshots/<commit>/ should persist after run"
+
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 1
 
     def test_snapshot_contains_repo_files(self, git_repo, tmp_path):
         """Snapshot should contain copies of repository files."""
@@ -1861,10 +1581,6 @@ class TestSourceSnapshotting:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0].result["value"]
-
         # First run creates snapshot
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
@@ -1876,9 +1592,10 @@ class TestSourceSnapshotting:
 
         # Continue run should reuse snapshot (not fail)
         with patch.object(sys, "argv", ["test", f"--continue={timestamp}"]):
-            result = my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
+            my_exp.run(output_dir=tmp_path, executor="inline", stash=True)
 
-        assert result == 1
+        results = my_exp.results(output_dir=tmp_path)
+        assert results[0].result["value"] == 1
         assert snapshot_dir.exists()
 
     def test_list_runs_correct_count(self, git_repo, tmp_path, capsys):
@@ -1890,10 +1607,6 @@ class TestSourceSnapshotting:
         @my_exp.configs
         def configs():
             return [{"name": "cfg", "x": 1}]
-
-        @my_exp.report
-        def report(results, out):
-            return results
 
         # Create a run (with snapshot)
         with patch.object(sys, "argv", ["test"]):
@@ -1924,7 +1637,6 @@ class TestSourceSnapshotting:
         snapshot_dir = self._get_snapshot_dir(base_dir)
         assert snapshot_dir is not None, ".snapshots/<commit>/ should be created even without prior commits"
 
-        # Check commit hash is in batch manifest
         manifest = list((base_dir / ".batches").glob("*.json"))[0]
         data = json.loads(manifest.read_text())
         assert "commit" in data
@@ -1972,7 +1684,6 @@ class TestSourceSnapshotting:
     )
     def test_subprocess_executes_from_snapshot(self, git_repo, tmp_path):
         """Subprocess executor should keep cwd at the original repo, not the snapshot."""
-        # Create a marker file in the repo
         (git_repo / "marker.txt").write_text("repo_content")
 
         @experiment(name="my_exp")
@@ -1981,7 +1692,6 @@ class TestSourceSnapshotting:
             from pathlib import Path
 
             cwd = os.getcwd()
-            # Read the marker file from the working directory (original repo)
             marker = Path("marker.txt")
             content = marker.read_text() if marker.exists() else "NOT_FOUND"
             return {"cwd": cwd, "marker": content}
@@ -1990,14 +1700,12 @@ class TestSourceSnapshotting:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="subprocess", stash=True)
+            my_exp.run(output_dir=tmp_path, executor="subprocess", stash=True)
 
-        # cwd should be the original repo (not the snapshot)
+        results = my_exp.results(output_dir=tmp_path)
+        result = results[0]
+
         base_dir = tmp_path / "my_exp"
         snapshot_dir = self._get_snapshot_dir(base_dir)
         assert snapshot_dir is not None
@@ -2005,10 +1713,7 @@ class TestSourceSnapshotting:
             f"Subprocess should NOT change cwd to snapshot dir {snapshot_dir}, "
             f"but cwd was {result.result['cwd']}"
         )
-        # The experiment reads marker.txt from cwd (original repo)
         assert result.result["marker"] == "repo_content"
-
-        # Snapshot should still contain a copy of the committed files
         assert (snapshot_dir / "marker.txt").read_text() == "repo_content"
 
     @pytest.mark.skipif(
@@ -2032,12 +1737,11 @@ class TestSourceSnapshotting:
         def configs():
             return [{"name": "test", "x": 1}]
 
-        @my_exp.report
-        def report(results, out):
-            return results[0]
-
         with patch.object(sys, "argv", ["test"]):
-            result = my_exp.run(output_dir=tmp_path, executor="fork", stash=True)
+            my_exp.run(output_dir=tmp_path, executor="fork", stash=True)
+
+        results = my_exp.results(output_dir=tmp_path)
+        result = results[0]
 
         base_dir = tmp_path / "my_exp"
         snapshot_dir = self._get_snapshot_dir(base_dir)
@@ -2084,7 +1788,6 @@ class TestFilterWithDependencies:
             assert (d / ".finished").exists()
 
         # Phase 2: re-run with --continue --filter "finetune"
-        # This should NOT crash (previously would ValueError on missing pretrain)
         with patch.object(
             sys,
             "argv",
@@ -2187,6 +1890,3 @@ class TestFilterWithDependencies:
                     ft_exp = pickle.load(f)
                 assert ft_exp.skipped
                 break
-
-
-

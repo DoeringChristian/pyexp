@@ -344,89 +344,21 @@ class TestRegistry:
         assert obj.size == 256
 
 
-class TestExperiment:
-    """Tests for the Experiment base class."""
+class TestResult:
+    """Tests for the Result dataclass."""
 
-    def test_experiment_properties_raise_before_init(self):
-        """Experiment properties raise RuntimeError before initialization."""
-        from pyexp import Experiment
-
-        class MyExp(Experiment):
-            def experiment(self):
-                pass
-
-            @staticmethod
-            def configs():
-                return []
-
-            @staticmethod
-            def report(results, out):
-                pass
-
-        exp = MyExp()
-
-        import pytest
-        with pytest.raises(RuntimeError, match="not initialized"):
-            _ = exp.cfg
-
-        with pytest.raises(RuntimeError, match="not initialized"):
-            _ = exp.out
-
-    def test_experiment_properties_after_init(self):
-        """Experiment properties work after initialization by runner."""
+    def test_result_fields(self):
+        """Result dataclass has expected fields with defaults."""
         from pathlib import Path
-        from pyexp import Experiment, Config
+        from pyexp import Result, Config
 
-        class MyExp(Experiment):
-            def experiment(self):
-                pass
-
-            @staticmethod
-            def configs():
-                return []
-
-            @staticmethod
-            def report(results, out):
-                pass
-
-        exp = MyExp()
-        # Simulate runner setting private attributes
-        exp._Experiment__cfg = Config({"name": "test", "lr": 0.01})
-        exp._Experiment__out = Path("/tmp/test")
-        exp._Experiment__error = None
-        exp._Experiment__log = "some log"
-
-        assert exp.cfg["name"] == "test"
-        assert exp.cfg.lr == 0.01
-        assert exp.out == Path("/tmp/test")
-        assert exp.error is None
-        assert exp.log == "some log"
-        assert exp.name == "test"
-
-    def test_experiment_name_shorthand(self):
-        """Experiment.name is shorthand for cfg.get('name', '')."""
-        from pyexp import Experiment, Config
-
-        class MyExp(Experiment):
-            def experiment(self):
-                pass
-
-            @staticmethod
-            def configs():
-                return []
-
-            @staticmethod
-            def report(results, out):
-                pass
-
-        exp = MyExp()
-        # Name returns empty string if cfg not set
-        assert exp.name == ""
-
-        # Name returns config name if set
-        exp._Experiment__cfg = Config({"name": "my_experiment"})
-        assert exp.name == "my_experiment"
-
-        # Name returns empty string if config has no name
-        exp._Experiment__cfg = Config({"lr": 0.01})
-        assert exp.name == ""
+        r = Result(cfg=Config({"name": "test", "lr": 0.01}), name="test", out=Path("/tmp/test"))
+        assert r.cfg["name"] == "test"
+        assert r.cfg.lr == 0.01
+        assert r.out == Path("/tmp/test")
+        assert r.error is None
+        assert r.log == ""
+        assert r.name == "test"
+        assert r.result is None
+        assert r.finished is False
+        assert r.skipped is False

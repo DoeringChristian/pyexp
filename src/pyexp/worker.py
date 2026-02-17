@@ -11,7 +11,7 @@ Usage:
 The payload file contains cloudpickle-serialized data:
     {
         "fn": <experiment function>,
-        "experiment": <Experiment dataclass with cfg/name/out set>,
+        "experiment": <Result dataclass with cfg/name/out set>,
         "deps": <Runs of dependency experiments or None>,
         "result_path": <path to write pickled experiment>,
         "stash": <bool>,

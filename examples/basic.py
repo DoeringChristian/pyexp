@@ -28,9 +28,11 @@ def configs() -> list[dict]:
 if __name__ == "__main__":
     exp.run()
 
-    # Load latest results
-    results = exp.results()
-    print(f"\nLoaded {len(list(results))} results from latest run")
+    # Load results by name using __getitem__
+    fast = exp["fast"]
+    print(f"\nFast result: accuracy={fast.result['accuracy']:.4f}")
 
-    # Access output directory via exp.out
+    # Load all results
+    results = exp.results()
+    print(f"Loaded {len(list(results))} results from latest run")
     print(f"Output dir: {results[0].out}")
