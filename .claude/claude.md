@@ -57,6 +57,16 @@ def run(self, ..., my_param=None):
 - The `capture` parameter controls output suppression
 - Custom executors should accept `**kwargs` for forward compatibility
 
+## Deferred Run Directory Creation
+
+Run directories are **not** created upfront during config generation. Instead:
+- Phase A (Config Generation) computes configs, experiment dirs, and saves the batch manifest, but does **not** create run directories or write `config.json` files
+- Phase B (Experiment Execution) creates each run directory via `_write_run_dir()` only when that experiment actually starts executing or is skipped
+- This ensures that if an experiment is never reached (e.g., due to an early failure), no directory or `config.json` is left on disk
+- For `--continue` runs, directories already exist from the original run, so the existing `mkdir` logic is used instead of `_write_run_dir()`
+- The `_write_run_dir()` helper writes the full config (including `depends_on`) to `config.json` so that `--continue` can resolve dependencies from disk
+- Config data passed to the experiment function has `depends_on` stripped via a dict comprehension (not `pop()`) to avoid mutating shared in-memory data
+
 ## YAML Config Loading
 
 Configs can be loaded from YAML files with composition support via `load_config()`.

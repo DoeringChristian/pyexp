@@ -65,10 +65,13 @@ The experiment framework separates execution into three phases:
 1. **Config Generation** (only on fresh start - no `--continue` or `--report`):
    - Runs the `@experiment.configs` function to generate configurations
    - Validates names, dependencies, and topologically sorts configs
-   - Creates experiment folders and saves individual `config.json` files
+   - Saves the batch manifest (`.batches/<timestamp>.json`)
+   - Run directories and `config.json` files are **not** created yet — they are deferred until each experiment actually starts
 
 2. **Experiment Execution** (fresh start or `--continue`, skipped for `--report`):
-   - Discovers experiment runs by scanning the filesystem for `config.json` files
+   - On fresh start: uses in-memory config data from Phase 1
+   - On `--continue`: discovers experiment runs by scanning the filesystem for `config.json` files
+   - Creates each run directory and writes `config.json` only when the experiment begins executing (or is skipped)
    - Runs experiments in dependency order and saves results to `experiment.pkl`
    - Skips experiments whose dependencies failed
 
@@ -76,7 +79,7 @@ The experiment framework separates execution into three phases:
    - Loads all results from disk
    - Runs the `@experiment.report` function
 
-This separation ensures that `--continue` and `--report` modes are immune to changes in the config generation code - they always use the saved configurations from the original run.
+This separation ensures that `--continue` and `--report` modes are immune to changes in the config generation code - they always use the saved configurations from the original run. The deferred directory creation ensures that only experiments that actually execute (or are explicitly skipped) leave artifacts on disk.
 
 ### Loading Previous Results
 
@@ -124,7 +127,7 @@ Results are organized by experiment name and timestamp. By default, the output d
       <timestamp>/                  # Report outputs
 ```
 
-Run directories are self-contained and discovered by scanning the filesystem for `config.json` files, not from any manifest.
+Run directories are created on demand when each experiment starts executing (not upfront). On `--continue`, they are discovered by scanning the filesystem for `config.json` files.
 
 **Directory name sanitization:** Config names are automatically sanitized for use as directory names. Characters `/\:*?"<>|` are replaced with `_` to ensure cross-platform compatibility and prevent accidental subdirectory creation.
 
