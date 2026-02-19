@@ -74,8 +74,10 @@ class Executor(ABC):
         pass
 
 
-def _call_fn(fn, experiment, deps, wants_out, wants_deps):
+def _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path=None):
     """Call the experiment function with the right arguments and store result."""
+    if result_path is not None:
+        experiment.out = result_path.parent
     if wants_deps:
         experiment.result = fn(experiment.cfg, experiment.out, deps)
     elif wants_out:
@@ -118,7 +120,7 @@ class InlineExecutor(Executor):
             sys.stderr = io.StringIO()
 
         try:
-            _call_fn(fn, experiment, deps, wants_out, wants_deps)
+            _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             experiment.error = error_msg
@@ -229,6 +231,7 @@ class SubprocessExecutor(Executor):
                 # Load and update with log
                 with open(result_path, "rb") as f:
                     experiment = pickle.load(f)
+                experiment.out = result_path.parent
                 # If worker crashed before marking finished, record the error
                 if not experiment.finished:
                     experiment.error = f"SubprocessError: worker exited with code {proc.returncode}"
@@ -325,7 +328,7 @@ class ForkExecutor(Executor):
                     except Exception:
                         pass  # Best-effort: continue without remapping
 
-                _call_fn(fn, experiment, deps, wants_out, wants_deps)
+                _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
 
                 experiment.finished = True
                 with open(result_path, "wb") as f:
@@ -366,6 +369,7 @@ class ForkExecutor(Executor):
             if result_path.exists():
                 with open(result_path, "rb") as f:
                     experiment = pickle.load(f)
+                experiment.out = result_path.parent
                 # If child crashed before marking finished, record the error
                 if not experiment.finished:
                     experiment.error = f"ForkError: child exited with code {exit_code}"
@@ -478,6 +482,7 @@ class RayExecutor(Executor):
             from pathlib import Path
 
             result_path = Path(result_path_str)
+            experiment.out = result_path.parent
             log = ""
 
             # Capture output

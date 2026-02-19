@@ -49,6 +49,7 @@ def run_worker(payload_path: str) -> int:
         fn = payload["fn"]
         experiment = payload["experiment"]
         result_path = Path(payload["result_path"])
+        experiment.out = result_path.parent
         deps = payload.get("deps")
         wants_out = payload.get("wants_out", False)
         wants_deps = payload.get("wants_deps", False)

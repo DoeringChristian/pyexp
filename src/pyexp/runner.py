@@ -24,7 +24,7 @@ class Result:
     Fields:
         cfg: The config for this run (Config object with dot notation access).
         name: Shorthand for cfg.get("name", "").
-        out: Output directory for this experiment run.
+        out: Output directory for this experiment run (set at runtime, not persisted in pickle).
         result: The return value of the experiment function.
         error: Error message if experiment failed, None otherwise.
         log: Captured stdout/stderr from the experiment run.
@@ -34,12 +34,17 @@ class Result:
 
     cfg: Config
     name: str
-    out: Path
+    out: Path | None = None
     result: Any = None
     error: str | None = None
     log: str = ""
     finished: bool = False
     skipped: bool = False
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state['out'] = None
+        return state
 
 
 _VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
@@ -444,6 +449,7 @@ def _load_experiments(
         if experiment_path.exists():
             with open(experiment_path, "rb") as f:
                 instance = pickle.load(f)
+            instance.out = experiment_dir
             results.append(instance)
 
     return Runs(results)
@@ -883,7 +889,9 @@ class ExperimentRunner:
                     cfg_data = json.loads((exp_dir / "config.json").read_text())
                     dep_name = cfg_data.get("name", "")
                     with open(exp_pkl, "rb") as f:
-                        completed[dep_name] = pickle.load(f)
+                        dep_result = pickle.load(f)
+                    dep_result.out = exp_dir
+                    completed[dep_name] = dep_result
 
         for experiment_dir in experiment_dirs:
             experiment_path = experiment_dir / "experiment.pkl"
@@ -929,6 +937,7 @@ class ExperimentRunner:
             if is_cached:
                 with open(experiment_path, "rb") as f:
                     exp_obj = pickle.load(f)
+                exp_obj.out = experiment_dir
             if is_cached:
                 completed[config_name] = exp_obj
                 marker_path = experiment_dir / ".pyexp"
@@ -952,11 +961,11 @@ class ExperimentRunner:
                     exp_obj = Result(
                         cfg=config,
                         name=config_name,
-                        out=experiment_dir,
                         skipped=True,
                         error=f"Skipped: {skip_reason}",
                         finished=True,
                     )
+                    exp_obj.out = experiment_dir
                     if is_fresh_start:
                         _write_run_dir(
                             experiment_dir,
@@ -980,8 +989,8 @@ class ExperimentRunner:
                     exp_obj = Result(
                         cfg=config,
                         name=config_name,
-                        out=experiment_dir,
                     )
+                    exp_obj.out = experiment_dir
 
                     if is_fresh_start:
                         _write_run_dir(
@@ -1009,6 +1018,7 @@ class ExperimentRunner:
 
                         with open(experiment_path, "rb") as f:
                             exp_obj = pickle.load(f)
+                        exp_obj.out = experiment_dir
 
                         if not exp_obj.error:
                             break
