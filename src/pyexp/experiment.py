@@ -14,9 +14,11 @@ from .runner import (
     _validate_dependencies,
     _topological_sort,
     _discover_experiment_dirs,
+    _discover_all_experiments_latest,
     _get_latest_timestamp,
     _get_latest_finished_timestamp,
     _load_experiments,
+    _load_experiments_from_dirs,
     _list_runs,
     _print_dependency_graph,
 )
@@ -176,13 +178,12 @@ class Experiment:
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
-            if finished:
-                latest = _get_latest_finished_timestamp(base_dir)
-            else:
-                latest = _get_latest_timestamp(base_dir)
-            if latest is None:
+            experiment_dirs = _discover_all_experiments_latest(
+                base_dir, finished_only=finished
+            )
+            if not experiment_dirs:
                 return Runs([])
-            timestamp = latest
+            return _load_experiments_from_dirs(experiment_dirs, finished_only=finished)
 
         experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
         if not experiment_dirs:

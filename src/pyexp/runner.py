@@ -381,6 +381,41 @@ def _discover_experiment_dirs(base_dir: Path, timestamp: str) -> list[Path]:
     return dirs
 
 
+def _discover_all_experiments_latest(
+    base_dir: Path, *, finished_only: bool = False
+) -> list[Path]:
+    """Discover the latest timestamp directory for each experiment.
+
+    Scans all experiment subdirs in base_dir and for each one finds the latest
+    (or latest finished) timestamp directory. This allows results from different
+    batches to be combined — each experiment is represented by its own most recent run.
+
+    Args:
+        base_dir: The experiment base directory.
+        finished_only: If True, only consider timestamp dirs that have a .finished marker.
+
+    Returns:
+        List of experiment directories (one per experiment, each from its own latest timestamp).
+    """
+    if not base_dir.exists():
+        return []
+    dirs = []
+    for entry in sorted(base_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        # Find all timestamp subdirs for this experiment
+        ts_dirs = []
+        for ts_dir in entry.iterdir():
+            if ts_dir.is_dir() and (ts_dir / "config.json").exists():
+                if finished_only and not (ts_dir / ".finished").exists():
+                    continue
+                ts_dirs.append(ts_dir)
+        if ts_dirs:
+            latest = sorted(ts_dirs, key=lambda d: d.name, reverse=True)[0]
+            dirs.append(latest)
+    return dirs
+
+
 def _get_all_timestamps(base_dir: Path) -> list[str]:
     """Return all batch timestamps sorted newest-first by scanning run directories."""
     if not base_dir.exists():
@@ -421,6 +456,37 @@ def _get_latest_finished_timestamp(base_dir: Path) -> str | None:
     return None
 
 
+def _load_experiments_from_dirs(
+    experiment_dirs: list[Path], *, finished_only: bool = False
+) -> Runs[Result]:
+    """Load experiments from a list of pre-discovered directories into a 1D Runs.
+
+    Unlike _load_experiments, the directories may span multiple timestamps
+    (e.g., each experiment from its own latest run).
+
+    Args:
+        experiment_dirs: List of experiment directories to load from.
+        finished_only: If True, only load experiments that have a .finished marker.
+
+    Returns:
+        1D Runs of Result instances.
+    """
+    results = []
+    for experiment_dir in experiment_dirs:
+        experiment_path = experiment_dir / "experiment.pkl"
+
+        if finished_only and not (experiment_dir / ".finished").exists():
+            continue
+
+        if experiment_path.exists():
+            with open(experiment_path, "rb") as f:
+                instance = pickle.load(f)
+            instance.out = experiment_dir
+            results.append(instance)
+
+    return Runs(results)
+
+
 def _load_experiments(
     base_dir: Path, timestamp: str, *, finished_only: bool = False
 ) -> Runs[Result]:
@@ -438,21 +504,7 @@ def _load_experiments(
         1D Runs of Result instances.
     """
     experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
-
-    results = []
-    for experiment_dir in experiment_dirs:
-        experiment_path = experiment_dir / "experiment.pkl"
-
-        if finished_only and not (experiment_dir / ".finished").exists():
-            continue
-
-        if experiment_path.exists():
-            with open(experiment_path, "rb") as f:
-                instance = pickle.load(f)
-            instance.out = experiment_dir
-            results.append(instance)
-
-    return Runs(results)
+    return _load_experiments_from_dirs(experiment_dirs, finished_only=finished_only)
 
 
 def _generate_timestamp() -> str:

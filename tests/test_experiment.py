@@ -1890,3 +1890,181 @@ class TestFilterWithDependencies:
                     ft_exp = pickle.load(f)
                 assert ft_exp.skipped
                 break
+
+
+class TestCrossTimestampResults:
+    """Tests for results() returning experiments across multiple batch timestamps.
+
+    When a user runs all experiments, then runs only a subset (e.g. with --filter),
+    results() should still return all experiments — each from its own latest run.
+    """
+
+    def _setup_two_batches(self, tmp_path):
+        """Helper: run batch 1 with a,b,c then batch 2 with a only.
+
+        Returns (exp instance, base_dir, ts1, ts2).
+        """
+        import time
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "run_a", "x": 1},
+                {"name": "run_b", "x": 2},
+                {"name": "run_c", "x": 3},
+            ]
+
+        # Batch 1: all three
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+        ts1 = sorted((base_dir / ".batches").glob("*.json"))[0].stem
+
+        time.sleep(1.1)
+
+        # Batch 2: only run_a (via filter)
+        with patch.object(sys, "argv", ["test", "--no-stash", "--filter", "run_a"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        ts2 = sorted((base_dir / ".batches").glob("*.json"))[-1].stem
+        assert ts1 != ts2
+
+        return my_exp, base_dir, ts1, ts2
+
+    def test_results_returns_all_experiments_across_batches(self, tmp_path):
+        """results() with no timestamp should return all experiments, each from its latest run."""
+        my_exp, base_dir, ts1, ts2 = self._setup_two_batches(tmp_path)
+
+        results = my_exp.results(output_dir=tmp_path)
+        names = sorted(r.name for r in results)
+        assert names == ["run_a", "run_b", "run_c"]
+
+        # run_a should come from the newer batch (ts2)
+        run_a = results["run_a"]
+        assert ts2 in str(run_a.out)
+
+        # run_b and run_c should come from the older batch (ts1)
+        run_b = results["run_b"]
+        run_c = results["run_c"]
+        assert ts1 in str(run_b.out)
+        assert ts1 in str(run_c.out)
+
+    def test_explicit_timestamp_returns_only_that_batch(self, tmp_path):
+        """results(timestamp=ts1) should return only experiments from that batch."""
+        my_exp, base_dir, ts1, ts2 = self._setup_two_batches(tmp_path)
+
+        # ts1 had all three
+        results_ts1 = my_exp.results(timestamp=ts1, output_dir=tmp_path)
+        assert len(results_ts1) == 3
+
+        # ts2 had only run_a
+        results_ts2 = my_exp.results(timestamp=ts2, output_dir=tmp_path)
+        assert len(results_ts2) == 1
+        assert results_ts2[0].name == "run_a"
+
+    def test_finished_only_works_per_experiment(self, tmp_path):
+        """results(finished=True) should find each experiment's latest finished run."""
+        import time
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "run_a", "x": 1},
+                {"name": "run_b", "x": 2},
+            ]
+
+        # Batch 1: both finished
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+        ts1 = sorted((base_dir / ".batches").glob("*.json"))[0].stem
+
+        time.sleep(1.1)
+
+        # Batch 2: only run_a
+        with patch.object(sys, "argv", ["test", "--no-stash", "--filter", "run_a"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        ts2 = sorted((base_dir / ".batches").glob("*.json"))[-1].stem
+
+        # Remove .finished from run_a in ts2 to simulate unfinished
+        run_a_ts2_dir = base_dir / "run_a" / ts2
+        (run_a_ts2_dir / ".finished").unlink()
+
+        # finished=True: run_a should fall back to ts1, run_b from ts1
+        results = my_exp.results(output_dir=tmp_path, finished=True)
+        names = sorted(r.name for r in results)
+        assert names == ["run_a", "run_b"]
+
+        run_a = results["run_a"]
+        assert ts1 in str(run_a.out), "run_a should fall back to the older finished run"
+
+    def test_experiment_only_in_old_batch_still_found(self, tmp_path):
+        """An experiment that only exists in an older batch should still appear in results()."""
+        import time
+        import pickle
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [
+                {"name": "run_a", "x": 1},
+                {"name": "run_b", "x": 2},
+            ]
+
+        # Batch 1: both experiments
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "my_exp"
+
+        time.sleep(1.1)
+
+        # Batch 2: completely new experiment (run_c) — simulate by creating manually
+        ts2 = "2099-01-01_00-00-00"
+        run_c_dir = base_dir / "run_c" / ts2
+        run_c_dir.mkdir(parents=True)
+        (run_c_dir / "config.json").write_text('{"name": "run_c", "x": 99}')
+        from pyexp import Config
+        result_obj = Result(
+            cfg=Config({"name": "run_c", "x": 99}),
+            name="run_c",
+            result={"value": 99},
+            finished=True,
+        )
+        with open(run_c_dir / "experiment.pkl", "wb") as f:
+            pickle.dump(result_obj, f)
+        (run_c_dir / ".finished").touch()
+
+        results = my_exp.results(output_dir=tmp_path)
+        names = sorted(r.name for r in results)
+        assert names == ["run_a", "run_b", "run_c"]
+
+    def test_getitem_finds_across_timestamps(self, tmp_path):
+        """__getitem__ should find experiments across timestamps."""
+        my_exp, base_dir, ts1, ts2 = self._setup_two_batches(tmp_path)
+
+        my_exp._output_dir = tmp_path
+
+        # run_b only exists in ts1
+        run_b = my_exp["run_b"]
+        assert run_b.name == "run_b"
+        assert run_b.result["value"] == 2
+
+        # run_a exists in both, should get the latest (ts2)
+        run_a = my_exp["run_a"]
+        assert run_a.name == "run_a"
+        assert ts2 in str(run_a.out)
