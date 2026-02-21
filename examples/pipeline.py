@@ -32,6 +32,7 @@ def pipeline(config: Config, out, deps):
     if config.name == "evaluate":
         model = deps["finetune"].result["model"]
         print(f"Evaluating model (type={model['type']})")
+        print(f"{deps=}")
         return {"accuracy": 0.95}
 
 

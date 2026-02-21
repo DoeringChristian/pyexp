@@ -1891,6 +1891,102 @@ class TestFilterWithDependencies:
                 assert ft_exp.skipped
                 break
 
+    def test_filter_loads_dependency_from_previous_batch(self, tmp_path):
+        """--filter should load deps from a previous batch when not in current batch."""
+        import pickle
+
+        @experiment(name="crossbatch")
+        def crossbatch(cfg, out, deps):
+            if cfg["name"] == "finetune":
+                return {"ft_result": True, "pretrain_val": deps[0].result["pt_val"]}
+            return {"pt_val": 77}
+
+        @crossbatch.configs
+        def configs():
+            return [
+                {"name": "pretrain", "lr": 0.01},
+                {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
+            ]
+
+        from pyexp.runner import (
+            _get_latest_timestamp,
+            _discover_experiment_dirs,
+            _generate_timestamp,
+        )
+
+        # Batch 1: run full pipeline (pretrain + finetune) with a fixed timestamp
+        ts1 = "2020-01-01_00-00-00"
+        with patch.object(sys, "argv", ["test", "--no-stash"]), patch(
+            "pyexp.runner._generate_timestamp", return_value=ts1
+        ):
+            crossbatch.run(output_dir=tmp_path, executor="inline")
+
+        # Verify both finished in batch 1
+        base_dir = tmp_path / "crossbatch"
+        exp_dirs1 = _discover_experiment_dirs(base_dir, ts1)
+        assert len(exp_dirs1) == 2
+        for d in exp_dirs1:
+            assert (d / ".finished").exists()
+
+        # Batch 2: fresh run with --filter finetune (no --continue)
+        # This creates a NEW timestamp. pretrain dir will exist but be empty
+        # (never ran this batch), so the fallback should load pretrain from batch 1.
+        ts2 = "2020-01-02_00-00-00"
+        with patch.object(
+            sys, "argv", ["test", "--no-stash", "--filter", "finetune"]
+        ), patch("pyexp.runner._generate_timestamp", return_value=ts2):
+            crossbatch.run(output_dir=tmp_path, executor="inline")
+
+        # Find batch 2's experiments
+        exp_dirs2 = _discover_experiment_dirs(base_dir, ts2)
+        # Only finetune should have been created in batch 2
+        for d in exp_dirs2:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                assert (d / ".finished").exists()
+                with open(d / "experiment.pkl", "rb") as f:
+                    ft_exp = pickle.load(f)
+                assert ft_exp.result["pretrain_val"] == 77
+                assert ft_exp.finished
+                assert not ft_exp.skipped
+                break
+        else:
+            pytest.fail("finetune dir not found in batch 2")
+
+    def test_filter_skips_when_dep_never_ran_any_batch(self, tmp_path):
+        """--filter should still skip if the dependency never ran in any batch."""
+        import pickle
+
+        @experiment(name="nobatch")
+        def nobatch(cfg, out, deps):
+            return {"val": 1}
+
+        @nobatch.configs
+        def configs():
+            return [
+                {"name": "pretrain", "lr": 0.01},
+                {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
+            ]
+
+        # Run with --filter finetune only; pretrain never ran anywhere
+        with patch.object(
+            sys, "argv", ["test", "--no-stash", "--filter", "finetune"]
+        ):
+            nobatch.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "nobatch"
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts = _get_latest_timestamp(base_dir)
+        exp_dirs = _discover_experiment_dirs(base_dir, ts)
+        for d in exp_dirs:
+            cfg = json.loads((d / "config.json").read_text())
+            if cfg["name"] == "finetune":
+                with open(d / "experiment.pkl", "rb") as f:
+                    ft_exp = pickle.load(f)
+                assert ft_exp.skipped
+                break
+
 
 class TestCrossTimestampResults:
     """Tests for results() returning experiments across multiple batch timestamps.

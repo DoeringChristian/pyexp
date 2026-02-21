@@ -945,6 +945,40 @@ class ExperimentRunner:
                     dep_result.out = exp_dir
                     completed[dep_name] = dep_result
 
+            # Fallback: load filtered-out deps from previous runs if not
+            # found in current batch
+            needed_deps: set[str] = set()
+            for exp_dir in experiment_dirs:
+                if is_fresh_start:
+                    cfg_data = dict(dir_to_config_obj.get(str(exp_dir), {}))
+                else:
+                    cfg_data = json.loads((exp_dir / "config.json").read_text())
+                dep_keys = _normalize_depends_on(cfg_data.get("depends_on"))
+                if dep_keys:
+                    resolved = _resolve_depends_on(
+                        dep_keys, all_configs_runs, cfg_data.get("name", "")
+                    )
+                    for dep_name in resolved:
+                        if dep_name not in completed:
+                            needed_deps.add(dep_name)
+
+            if needed_deps:
+                all_latest_dirs = _discover_all_experiments_latest(
+                    base_dir, finished_only=True
+                )
+                for latest_dir in all_latest_dirs:
+                    exp_pkl = latest_dir / "experiment.pkl"
+                    if exp_pkl.exists():
+                        cfg_data = json.loads(
+                            (latest_dir / "config.json").read_text()
+                        )
+                        dep_name = cfg_data.get("name", "")
+                        if dep_name in needed_deps and dep_name not in completed:
+                            with open(exp_pkl, "rb") as f:
+                                dep_result = pickle.load(f)
+                            dep_result.out = latest_dir
+                            completed[dep_name] = dep_result
+
         for experiment_dir in experiment_dirs:
             experiment_path = experiment_dir / "experiment.pkl"
 

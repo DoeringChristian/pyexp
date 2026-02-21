@@ -219,12 +219,16 @@ class SubprocessExecutor(Executor):
                 )
                 log = proc.stdout + proc.stderr
             else:
-                # Show output live
+                # Show stdout live, but always capture stderr so crash
+                # tracebacks are available for the error message
                 proc = subprocess.run(
                     cmd,
+                    stdout=None,
+                    stderr=subprocess.PIPE,
+                    text=True,
                     env=env,
                 )
-                log = ""
+                log = proc.stderr or ""
 
             # Check if result was written
             if result_path.exists():
@@ -234,7 +238,10 @@ class SubprocessExecutor(Executor):
                 experiment.out = result_path.parent
                 # If worker crashed before marking finished, record the error
                 if not experiment.finished:
-                    experiment.error = f"SubprocessError: worker exited with code {proc.returncode}"
+                    error_msg = f"SubprocessError: worker exited with code {proc.returncode}"
+                    if log.strip():
+                        error_msg += f"\n{log}"
+                    experiment.error = error_msg
                     experiment.finished = True
                 experiment.log = log
                 # Re-save with log included
@@ -243,7 +250,10 @@ class SubprocessExecutor(Executor):
                 (result_path.parent / ".finished").touch()
             else:
                 # Subprocess crashed before writing result
-                experiment.error = f"SubprocessError: exited with code {proc.returncode}"
+                error_msg = f"SubprocessError: exited with code {proc.returncode}"
+                if log.strip():
+                    error_msg += f"\n{log}"
+                experiment.error = error_msg
                 experiment.log = log
                 experiment.finished = True
                 with open(result_path, "wb") as f:
