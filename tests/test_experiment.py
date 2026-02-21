@@ -1224,6 +1224,33 @@ class TestSubprocessExecution:
         assert results["exp_a_c"].result["value"] == 11  # x=1, y=10
         assert results["exp_b_d"].result["value"] == 22  # x=2, y=20
 
+    def test_subprocess_deps_out_is_set(self, tmp_path):
+        """deps[0].out should not be None in subprocess execution."""
+
+        @experiment(name="dep_pipeline")
+        def dep_pipeline(cfg, out, deps):
+            if cfg["name"] == "downstream":
+                # This would fail with TypeError if deps[0].out is None
+                assert deps[0].out is not None
+                return {"dep_out": str(deps[0].out), "dep_val": deps[0].result["val"]}
+            return {"val": 42}
+
+        @dep_pipeline.configs
+        def configs():
+            return [
+                {"name": "upstream", "x": 1},
+                {"name": "downstream", "x": 2, "depends_on": "upstream"},
+            ]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            dep_pipeline.run(output_dir=tmp_path, executor="subprocess")
+
+        results = dep_pipeline.results(output_dir=tmp_path)
+        downstream = results["downstream"]
+        assert downstream.error is None, f"downstream failed: {downstream.error}"
+        assert downstream.result["dep_val"] == 42
+        assert downstream.result["dep_out"] is not None
+
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="Fork not available on this platform")
 class TestForkExecution:

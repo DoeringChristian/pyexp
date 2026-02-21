@@ -160,11 +160,10 @@ class SubprocessExecutor(Executor):
         """Run experiment in subprocess via cloudpickle serialization."""
         result_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create payload
+        # Create payload (deps not included — worker resolves them from disk)
         payload = {
             "fn": fn,
             "experiment": experiment,
-            "deps": deps,
             "result_path": str(result_path),
             "stash": stash,
             "wants_out": wants_out,
