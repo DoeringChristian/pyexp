@@ -218,15 +218,26 @@ class SubprocessExecutor(Executor):
                 )
                 log = proc.stdout + proc.stderr
             else:
-                # Show both stdout and stderr live so tqdm bars
-                # and other stderr output (e.g. progress bars) are visible
-                proc = subprocess.run(
+                # Tee: show output live AND capture it for the log file.
+                # Merge stderr into stdout so tqdm bars (which write to
+                # stderr) are visible in real time.
+                proc = subprocess.Popen(
                     cmd,
-                    stdout=None,
-                    stderr=None,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     env=env,
                 )
-                log = ""
+                log_parts = []
+                fd = proc.stdout.fileno()
+                while True:
+                    chunk = os.read(fd, 8192)
+                    if not chunk:
+                        break
+                    sys.stdout.buffer.write(chunk)
+                    sys.stdout.buffer.flush()
+                    log_parts.append(chunk)
+                proc.wait()
+                log = b"".join(log_parts).decode("utf-8", errors="replace")
 
             # Check if result was written
             if result_path.exists():
