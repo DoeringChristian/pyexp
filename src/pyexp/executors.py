@@ -218,16 +218,15 @@ class SubprocessExecutor(Executor):
                 )
                 log = proc.stdout + proc.stderr
             else:
-                # Show stdout live, but always capture stderr so crash
-                # tracebacks are available for the error message
+                # Show both stdout and stderr live so tqdm bars
+                # and other stderr output (e.g. progress bars) are visible
                 proc = subprocess.run(
                     cmd,
                     stdout=None,
-                    stderr=subprocess.PIPE,
-                    text=True,
+                    stderr=None,
                     env=env,
                 )
-                log = proc.stderr or ""
+                log = ""
 
             # Check if result was written
             if result_path.exists():

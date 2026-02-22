@@ -2,6 +2,7 @@
 
 import pyexp
 from pyexp import Config
+import tqdm
 
 
 @pyexp.experiment
@@ -10,6 +11,9 @@ def exp(config: Config):
     lr = config.learning_rate
     epochs = config.epochs
     print(f"Running experiment with lr={lr}, epochs={epochs}")
+
+    for i in tqdm.tqdm(range(1000)):
+        pass
 
     # Simulate experiment result
     return {"accuracy": 0.9 + lr * epochs / 100}
