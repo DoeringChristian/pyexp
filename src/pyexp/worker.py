@@ -2,8 +2,7 @@
 
 This module is invoked as a subprocess to run a single experiment in isolation.
 It receives a serialized payload (fn + experiment dataclass) via a temp file,
-executes the experiment function, and writes the pickled experiment to the
-designated output path.
+executes the experiment function, and writes the result to the designated output path.
 
 Usage:
     python -m pyexp.worker <payload_path>
@@ -12,14 +11,20 @@ The payload file contains cloudpickle-serialized data:
     {
         "fn": <experiment function>,
         "experiment": <Result dataclass with cfg/name/out set>,
-        "result_path": <path to write pickled experiment>,
+        "result_path": <path to write pickled result>,
         "stash": <bool>,
         "wants_out": <bool>,
         "wants_deps": <bool>,
     }
 
-Dependencies are resolved from disk (config.json + experiment.pkl files)
+Dependencies are resolved from disk (config.json + result.pkl files)
 rather than being serialized in the payload.
+
+Output files written:
+    - result.pkl: The pickled return value of the experiment function
+    - error.txt: Error message if the experiment failed
+    - log.out: Captured stdout/stderr (written by the executor after worker completes)
+    - .finished: Marker file indicating the experiment completed
 """
 
 import json
@@ -35,14 +40,15 @@ def _resolve_deps_from_disk(result_path: Path):
     """Resolve and load dependency experiments from disk.
 
     Reads depends_on from config.json, discovers the latest finished experiments
-    in the base directory, resolves dependency names, and loads their pickled results.
+    in the base directory, resolves dependency names, and loads their results.
 
     Returns:
         A Runs instance containing the resolved dependency Results, or None if
         no dependencies are declared.
     """
-    from pyexp.config import Runs
+    from pyexp.config import Config, Runs
     from pyexp.runner import (
+        Result,
         _normalize_depends_on,
         _resolve_depends_on,
         _discover_all_experiments_latest,
@@ -58,7 +64,7 @@ def _resolve_deps_from_disk(result_path: Path):
     if not depends_on:
         return None
 
-    # base_dir is 3 levels up: experiment.pkl -> <timestamp> -> <name> -> base_dir
+    # base_dir is 3 levels up: result.pkl -> <timestamp> -> <name> -> base_dir
     base_dir = experiment_dir.parent.parent
 
     # Discover all latest finished experiments to build a Runs for resolution
@@ -80,11 +86,41 @@ def _resolve_deps_from_disk(result_path: Path):
         dep_dir = dir_by_name.get(dep_name)
         if dep_dir is None:
             continue
-        dep_pkl = dep_dir / "experiment.pkl"
-        if dep_pkl.exists():
-            with open(dep_pkl, "rb") as f:
-                dep_result = pickle.load(f)
-            dep_result.out = dep_dir
+
+        # Load dependency result from new format
+        dep_config_path = dep_dir / "config.json"
+        dep_result_path = dep_dir / "result.pkl"
+        dep_error_path = dep_dir / "error.txt"
+        dep_log_path = dep_dir / "log.out"
+
+        if dep_config_path.exists():
+            dep_cfg_data = json.loads(dep_config_path.read_text())
+            dep_cfg_clean = {k: v for k, v in dep_cfg_data.items() if k != "depends_on"}
+            dep_cfg = Config(dep_cfg_clean)
+
+            result_value = None
+            if dep_result_path.exists():
+                with open(dep_result_path, "rb") as f:
+                    result_value = pickle.load(f)
+
+            error = None
+            if dep_error_path.exists():
+                error = dep_error_path.read_text()
+
+            log = ""
+            if dep_log_path.exists():
+                log = dep_log_path.read_text()
+
+            dep_result = Result(
+                cfg=dep_cfg,
+                name=dep_cfg_data.get("name", ""),
+                out=dep_dir,
+                result=result_value,
+                error=error,
+                log=log,
+                finished=True,
+                skipped=(dep_dir / ".skipped").exists(),
+            )
             dep_results.append(dep_result)
 
     return Runs(dep_results)
@@ -99,7 +135,7 @@ def run_worker(payload_path: str) -> int:
     Returns:
         Exit code: 0 for success, 1 for failure.
 
-    The worker saves the pickled experiment (with results).
+    The worker saves only the result value to result.pkl and errors to error.txt.
     """
     experiment = None
     result_path = None
@@ -111,7 +147,8 @@ def run_worker(payload_path: str) -> int:
         fn = payload["fn"]
         experiment = payload["experiment"]
         result_path = Path(payload["result_path"])
-        experiment.out = result_path.parent
+        experiment_dir = result_path.parent
+        experiment.out = experiment_dir
         wants_out = payload.get("wants_out", False)
         wants_deps = payload.get("wants_deps", False)
 
@@ -122,33 +159,29 @@ def run_worker(payload_path: str) -> int:
 
         # Call the experiment function
         if wants_deps:
-            experiment.result = fn(experiment.cfg, experiment.out, deps)
+            result_value = fn(experiment.cfg, experiment.out, deps)
         elif wants_out:
-            experiment.result = fn(experiment.cfg, experiment.out)
+            result_value = fn(experiment.cfg, experiment.out)
         else:
-            experiment.result = fn(experiment.cfg)
+            result_value = fn(experiment.cfg)
 
-        # Write pickled experiment
-        experiment.finished = True
-        result_path.parent.mkdir(parents=True, exist_ok=True)
+        # Write only the result value to result.pkl
+        experiment_dir.mkdir(parents=True, exist_ok=True)
         with open(result_path, "wb") as f:
-            pickle.dump(experiment, f)
-        (result_path.parent / ".finished").touch()
+            pickle.dump(result_value, f)
+        (experiment_dir / ".finished").touch()
 
         return 0
 
     except Exception as e:
-        # Write error information to experiment and save
+        # Write error information to error.txt
         try:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            if experiment is not None:
-                experiment.error = error_msg
-                experiment.finished = True
-                if result_path is not None:
-                    result_path.parent.mkdir(parents=True, exist_ok=True)
-                    with open(result_path, "wb") as f:
-                        pickle.dump(experiment, f)
-                    (result_path.parent / ".finished").touch()
+            if result_path is not None:
+                experiment_dir = result_path.parent
+                experiment_dir.mkdir(parents=True, exist_ok=True)
+                (experiment_dir / "error.txt").write_text(error_msg)
+                (experiment_dir / ".finished").touch()
         except Exception:
             # If we can't even write the error, just print it
             traceback.print_exc()

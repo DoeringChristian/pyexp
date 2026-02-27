@@ -110,10 +110,13 @@ class InlineExecutor(Executor):
         import io
         import sys
 
-        result_path.parent.mkdir(parents=True, exist_ok=True)
+        experiment_dir = result_path.parent
+        experiment_dir.mkdir(parents=True, exist_ok=True)
 
         # Capture output if requested
         log = ""
+        error_msg = None
+        result_value = None
         if capture:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = io.StringIO()
@@ -121,6 +124,7 @@ class InlineExecutor(Executor):
 
         try:
             _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
+            result_value = experiment.result
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             experiment.error = error_msg
@@ -131,14 +135,24 @@ class InlineExecutor(Executor):
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
 
-        if experiment.error and experiment.error not in log:
-            log = log + experiment.error if log else experiment.error
+        if error_msg and error_msg not in log:
+            log = log + error_msg if log else error_msg
         experiment.log = log
         experiment.finished = True
 
-        with open(result_path, "wb") as f:
-            pickle.dump(experiment, f)
-        (result_path.parent / ".finished").touch()
+        # Save only the result value
+        if result_value is not None:
+            with open(result_path, "wb") as f:
+                pickle.dump(result_value, f)
+
+        # Save error if any
+        if error_msg:
+            (experiment_dir / "error.txt").write_text(error_msg)
+
+        # Save log
+        (experiment_dir / "log.out").write_text(log)
+
+        (experiment_dir / ".finished").touch()
 
 
 class SubprocessExecutor(Executor):
@@ -162,7 +176,8 @@ class SubprocessExecutor(Executor):
         wants_deps: bool = False,
     ) -> None:
         """Run experiment in subprocess via cloudpickle serialization."""
-        result_path.parent.mkdir(parents=True, exist_ok=True)
+        experiment_dir = result_path.parent
+        experiment_dir.mkdir(parents=True, exist_ok=True)
 
         # Create payload (deps not included — worker resolves them from disk)
         payload = {
@@ -243,35 +258,33 @@ class SubprocessExecutor(Executor):
                 proc.wait()
                 log = b"".join(log_parts).decode("utf-8", errors="replace")
 
-            # Check if result was written
-            if result_path.exists():
-                # Load and update with log
-                with open(result_path, "rb") as f:
-                    experiment = pickle.load(f)
-                experiment.out = result_path.parent
-                # If worker crashed before marking finished, record the error
-                if not experiment.finished:
-                    error_msg = f"SubprocessError: worker exited with code {proc.returncode}"
-                    if log.strip():
-                        error_msg += f"\n{log}"
-                    experiment.error = error_msg
-                    experiment.finished = True
+            # Save log file
+            (experiment_dir / "log.out").write_text(log)
+
+            finished_marker = experiment_dir / ".finished"
+            error_path = experiment_dir / "error.txt"
+
+            # Check if worker completed (wrote .finished marker)
+            if finished_marker.exists():
+                # Worker completed, read any error it may have written
+                if error_path.exists():
+                    experiment.error = error_path.read_text()
+                if result_path.exists():
+                    with open(result_path, "rb") as f:
+                        experiment.result = pickle.load(f)
                 experiment.log = log
-                # Re-save with log included
-                with open(result_path, "wb") as f:
-                    pickle.dump(experiment, f)
-                (result_path.parent / ".finished").touch()
+                experiment.finished = True
             else:
-                # Subprocess crashed before writing result
+                # Subprocess crashed before completing
                 error_msg = f"SubprocessError: exited with code {proc.returncode}"
                 if log.strip():
                     error_msg += f"\n{log}"
                 experiment.error = error_msg
                 experiment.log = log
                 experiment.finished = True
-                with open(result_path, "wb") as f:
-                    pickle.dump(experiment, f)
-                (result_path.parent / ".finished").touch()
+                # Write error file
+                error_path.write_text(error_msg)
+                finished_marker.touch()
         finally:
             # Clean up payload file
             Path(payload_path).unlink(missing_ok=True)
@@ -313,7 +326,8 @@ class ForkExecutor(Executor):
         wants_deps: bool = False,
     ) -> None:
         """Run experiment in a forked process."""
-        result_path.parent.mkdir(parents=True, exist_ok=True)
+        experiment_dir = result_path.parent
+        experiment_dir.mkdir(parents=True, exist_ok=True)
 
         # Create pipe for capturing output
         if capture:
@@ -353,22 +367,19 @@ class ForkExecutor(Executor):
 
                 _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
 
-                experiment.finished = True
+                # Save only the result value
                 with open(result_path, "wb") as f:
-                    pickle.dump(experiment, f)
-                (result_path.parent / ".finished").touch()
+                    pickle.dump(experiment.result, f)
+                (experiment_dir / ".finished").touch()
                 os._exit(0)
             except Exception as e:
                 # Write error information
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                experiment.error = error_msg
-                experiment.finished = True
                 if not capture:
                     print(error_msg, file=sys.stderr)
                 try:
-                    with open(result_path, "wb") as f:
-                        pickle.dump(experiment, f)
-                    (result_path.parent / ".finished").touch()
+                    (experiment_dir / "error.txt").write_text(error_msg)
+                    (experiment_dir / ".finished").touch()
                 except Exception:
                     pass
                 os._exit(1)
@@ -391,30 +402,38 @@ class ForkExecutor(Executor):
             _, status = os.waitpid(pid, 0)
             exit_code = os.waitstatus_to_exitcode(status)
 
-            if result_path.exists():
-                with open(result_path, "rb") as f:
-                    experiment = pickle.load(f)
-                experiment.out = result_path.parent
-                # If child crashed before marking finished, record the error
-                if not experiment.finished:
-                    experiment.error = f"ForkError: child exited with code {exit_code}"
-                    experiment.finished = True
-                if experiment.error and experiment.error not in log:
-                    log = log + experiment.error if log else experiment.error
-                experiment.log = log
-                with open(result_path, "wb") as f:
-                    pickle.dump(experiment, f)
-                (result_path.parent / ".finished").touch()
-            else:
-                # Child crashed before writing result
-                experiment.error = f"ForkError: exited with code {exit_code}"
-                if experiment.error not in log:
-                    log = log + experiment.error if log else experiment.error
+            finished_marker = experiment_dir / ".finished"
+            error_path = experiment_dir / "error.txt"
+
+            # Check if child completed
+            if finished_marker.exists():
+                # Child completed, read any error it may have written
+                if error_path.exists():
+                    error_msg = error_path.read_text()
+                    experiment.error = error_msg
+                    if error_msg not in log:
+                        log = log + error_msg if log else error_msg
+                if result_path.exists():
+                    with open(result_path, "rb") as f:
+                        experiment.result = pickle.load(f)
+                experiment.out = experiment_dir
                 experiment.log = log
                 experiment.finished = True
-                with open(result_path, "wb") as f:
-                    pickle.dump(experiment, f)
-                (result_path.parent / ".finished").touch()
+            else:
+                # Child crashed before completing
+                error_msg = f"ForkError: exited with code {exit_code}"
+                if error_msg not in log:
+                    log = log + error_msg if log else error_msg
+                experiment.error = error_msg
+                experiment.log = log
+                experiment.finished = True
+                experiment.out = experiment_dir
+                # Write error file
+                error_path.write_text(error_msg)
+                finished_marker.touch()
+
+            # Save log file
+            (experiment_dir / "log.out").write_text(log)
 
 
 class RayExecutor(Executor):
@@ -499,7 +518,8 @@ class RayExecutor(Executor):
         wants_deps: bool = False,
     ) -> None:
         """Run experiment as a Ray task."""
-        result_path.parent.mkdir(parents=True, exist_ok=True)
+        experiment_dir = result_path.parent
+        experiment_dir.mkdir(parents=True, exist_ok=True)
 
         @self._ray.remote
         def _run_experiment(fn, experiment, deps, result_path_str, capture, wants_out, wants_deps):
@@ -511,8 +531,11 @@ class RayExecutor(Executor):
             from pathlib import Path
 
             result_path = Path(result_path_str)
-            experiment.out = result_path.parent
+            experiment_dir = result_path.parent
+            experiment.out = experiment_dir
             log = ""
+            error_msg = None
+            result_value = None
 
             # Capture output
             if capture:
@@ -522,38 +545,50 @@ class RayExecutor(Executor):
 
             try:
                 if wants_deps:
-                    experiment.result = fn(experiment.cfg, experiment.out, deps)
+                    result_value = fn(experiment.cfg, experiment.out, deps)
                 elif wants_out:
-                    experiment.result = fn(experiment.cfg, experiment.out)
+                    result_value = fn(experiment.cfg, experiment.out)
                 else:
-                    experiment.result = fn(experiment.cfg)
+                    result_value = fn(experiment.cfg)
             except Exception as e:
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                experiment.error = error_msg
             finally:
                 if capture:
                     log = sys.stdout.getvalue() + sys.stderr.getvalue()
                     sys.stdout, sys.stderr = old_stdout, old_stderr
 
-            experiment.log = log
-            experiment.finished = True
-            with open(result_path, "wb") as f:
-                pickle.dump(experiment, f)
-            (result_path.parent / ".finished").touch()
-            return experiment
+            # Save only the result value
+            if result_value is not None:
+                with open(result_path, "wb") as f:
+                    pickle.dump(result_value, f)
+
+            # Save error if any
+            if error_msg:
+                (experiment_dir / "error.txt").write_text(error_msg)
+
+            # Save log
+            (experiment_dir / "log.out").write_text(log)
+
+            (experiment_dir / ".finished").touch()
+            return {"result": result_value, "error": error_msg, "log": log}
 
         # Submit task and wait for result
         future = _run_experiment.remote(fn, experiment, deps, str(result_path), capture, wants_out, wants_deps)
         try:
-            self._ray.get(future)
+            result_data = self._ray.get(future)
+            experiment.result = result_data["result"]
+            experiment.error = result_data["error"]
+            experiment.log = result_data["log"]
+            experiment.finished = True
         except Exception as e:
             # Task failed at Ray level
-            experiment.error = f"RayError: {e}\n{traceback.format_exc()}"
+            error_msg = f"RayError: {e}\n{traceback.format_exc()}"
+            experiment.error = error_msg
             experiment.log = ""
             experiment.finished = True
-            with open(result_path, "wb") as f:
-                pickle.dump(experiment, f)
-            (result_path.parent / ".finished").touch()
+            (experiment_dir / "error.txt").write_text(error_msg)
+            (experiment_dir / "log.out").write_text("")
+            (experiment_dir / ".finished").touch()
 
 
 # Registry of built-in executors

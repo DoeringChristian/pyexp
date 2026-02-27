@@ -44,7 +44,7 @@ class Result:
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state['out'] = None
+        state["out"] = None
         return state
 
 
@@ -480,6 +480,71 @@ def _get_latest_finished_timestamp(base_dir: Path) -> str | None:
     return None
 
 
+def _load_result_from_dir(experiment_dir: Path) -> Result | None:
+    """Load a Result from an experiment directory by reconstructing from files.
+
+    Reads config.json, result.pkl, error.txt, and log.out to construct the Result.
+    Falls back to legacy experiment.pkl if new format files don't exist.
+
+    Args:
+        experiment_dir: Path to the experiment directory.
+
+    Returns:
+        A Result instance, or None if the experiment cannot be loaded.
+    """
+    config_path = experiment_dir / "config.json"
+    result_path = experiment_dir / "result.pkl"
+    error_path = experiment_dir / "error.txt"
+    log_path = experiment_dir / "log.out"
+    skipped_marker = experiment_dir / ".skipped"
+    finished_marker = experiment_dir / ".finished"
+
+    # Try new format first
+    if config_path.exists():
+        config_data = json.loads(config_path.read_text())
+        config_data_clean = {k: v for k, v in config_data.items() if k != "depends_on"}
+        cfg = Config(config_data_clean)
+        name = config_data.get("name", "")
+
+        result_value = None
+        if result_path.exists():
+            with open(result_path, "rb") as f:
+                result_value = pickle.load(f)
+
+        error = None
+        if error_path.exists():
+            error = error_path.read_text()
+
+        log = ""
+        if log_path.exists():
+            log = log_path.read_text()
+
+        skipped = skipped_marker.exists()
+        finished = finished_marker.exists()
+
+        instance = Result(
+            cfg=cfg,
+            name=name,
+            out=experiment_dir,
+            result=result_value,
+            error=error,
+            log=log,
+            finished=finished,
+            skipped=skipped,
+        )
+        return instance
+
+    # Fall back to legacy format
+    legacy_path = experiment_dir / "experiment.pkl"
+    if legacy_path.exists():
+        with open(legacy_path, "rb") as f:
+            instance = pickle.load(f)
+        instance.out = experiment_dir
+        return instance
+
+    return None
+
+
 def _load_experiments_from_dirs(
     experiment_dirs: list[Path], *, finished_only: bool = False
 ) -> Runs[Result]:
@@ -497,15 +562,11 @@ def _load_experiments_from_dirs(
     """
     results = []
     for experiment_dir in experiment_dirs:
-        experiment_path = experiment_dir / "experiment.pkl"
-
         if finished_only and not (experiment_dir / ".finished").exists():
             continue
 
-        if experiment_path.exists():
-            with open(experiment_path, "rb") as f:
-                instance = pickle.load(f)
-            instance.out = experiment_dir
+        instance = _load_result_from_dir(experiment_dir)
+        if instance is not None:
             results.append(instance)
 
     return Runs(results)
@@ -559,17 +620,13 @@ def _list_runs(base_dir: Path) -> None:
         failed = 0
         for experiment_dir in experiment_dirs:
             finished_marker = experiment_dir / ".finished"
-            experiment_path = experiment_dir / "experiment.pkl"
-            if finished_marker.exists() and experiment_path.exists():
-                try:
-                    with open(experiment_path, "rb") as f:
-                        instance = pickle.load(f)
-                    if instance.error:
-                        failed += 1
-                    else:
-                        completed += 1
-                except Exception:
+            error_path = experiment_dir / "error.txt"
+            if finished_marker.exists():
+                # New format: check error.txt
+                if error_path.exists() and error_path.read_text().strip():
                     failed += 1
+                else:
+                    completed += 1
 
         pending = total - completed - failed
 
@@ -609,9 +666,7 @@ def _write_run_dir(experiment_dir, config, commit_hash):
     """
     experiment_dir.mkdir(parents=True, exist_ok=True)
     config_json_path = experiment_dir / "config.json"
-    config_json_path.write_text(
-        json.dumps(dict(config), indent=2, default=str)
-    )
+    config_json_path.write_text(json.dumps(dict(config), indent=2, default=str))
     if commit_hash is not None:
         (experiment_dir / ".commit").write_text(commit_hash)
 
@@ -806,9 +861,7 @@ class ExperimentRunner:
 
         # Discover finished experiments from previous batches on disk.
         # Used for cross-batch dependency validation and resolution.
-        _disk_dirs = _discover_all_experiments_latest(
-            base_dir, finished_only=True
-        )
+        _disk_dirs = _discover_all_experiments_latest(base_dir, finished_only=True)
         _disk_configs_by_name: dict[str, tuple[dict, Path]] = {}
         for _d in _disk_dirs:
             _cfg = json.loads((_d / "config.json").read_text())
@@ -835,7 +888,8 @@ class ExperimentRunner:
             # Gather disk configs for cross-batch dependency validation
             batch_names = {c.get("name", "") for c in flat_configs}
             ext_disk_configs = [
-                cfg for name, (cfg, _) in _disk_configs_by_name.items()
+                cfg
+                for name, (cfg, _) in _disk_configs_by_name.items()
                 if name not in batch_names
             ]
             _validate_dependencies(flat_configs, ext_disk_configs)
@@ -924,12 +978,9 @@ class ExperimentRunner:
             if any(c.get("depends_on") for c in dir_configs):
                 sorted_configs = _topological_sort(dir_configs)
                 name_to_dir = {
-                    c.get("name", ""): d
-                    for c, d in zip(dir_configs, experiment_dirs)
+                    c.get("name", ""): d for c, d in zip(dir_configs, experiment_dirs)
                 }
-                experiment_dirs = [
-                    name_to_dir[c["name"]] for c in sorted_configs
-                ]
+                experiment_dirs = [name_to_dir[c["name"]] for c in sorted_configs]
 
             all_experiment_dirs = list(experiment_dirs)
 
@@ -979,29 +1030,22 @@ class ExperimentRunner:
             else:
                 _cfg_path = _d / "config.json"
                 if _cfg_path.exists():
-                    _run_names.add(
-                        json.loads(_cfg_path.read_text()).get("name", "")
-                    )
+                    _run_names.add(json.loads(_cfg_path.read_text()).get("name", ""))
 
         existing_names = {c.get("name", "") for c in all_configs_runs}
         disk_configs: list[dict] = []
         for name, (cfg, d) in _disk_configs_by_name.items():
             if name not in _run_names:
-                exp_pkl = d / "experiment.pkl"
-                if exp_pkl.exists():
-                    with open(exp_pkl, "rb") as f:
-                        dep_result = pickle.load(f)
-                    dep_result.out = d
+                dep_result = _load_result_from_dir(d)
+                if dep_result is not None:
                     completed[name] = dep_result
                 if name not in existing_names:
                     disk_configs.append(cfg)
         if disk_configs:
-            all_configs_runs = Runs(
-                list(all_configs_runs) + disk_configs
-            )
+            all_configs_runs = Runs(list(all_configs_runs) + disk_configs)
 
         for experiment_dir in experiment_dirs:
-            experiment_path = experiment_dir / "experiment.pkl"
+            result_path = experiment_dir / "result.pkl"
 
             if is_fresh_start:
                 # Use in-memory config data
@@ -1039,12 +1083,12 @@ class ExperimentRunner:
                 wants_deps = False
 
             finished_marker = experiment_dir / ".finished"
-            is_cached = experiment_path.exists() and finished_marker.exists()
+            is_cached = finished_marker.exists()
 
             if is_cached:
-                with open(experiment_path, "rb") as f:
-                    exp_obj = pickle.load(f)
-                exp_obj.out = experiment_dir
+                exp_obj = _load_result_from_dir(experiment_dir)
+                if exp_obj is None:
+                    is_cached = False
             if is_cached:
                 completed[config_name] = exp_obj
                 marker_path = experiment_dir / ".pyexp"
@@ -1081,8 +1125,9 @@ class ExperimentRunner:
                         )
                     else:
                         experiment_dir.mkdir(parents=True, exist_ok=True)
-                    with open(experiment_path, "wb") as f:
-                        pickle.dump(exp_obj, f)
+                    # Save error info
+                    (experiment_dir / "error.txt").write_text(exp_obj.error or "")
+                    (experiment_dir / ".skipped").touch()
                     (experiment_dir / ".finished").touch()
                     completed[config_name] = exp_obj
                     status = "skipped"
@@ -1107,15 +1152,13 @@ class ExperimentRunner:
                         )
                     else:
                         experiment_dir.mkdir(parents=True, exist_ok=True)
-                    with open(experiment_path, "wb") as f:
-                        pickle.dump(exp_obj, f)
 
                     for attempt in range(max_retries + 1):
                         exec_instance.run(
                             fn,
                             exp_obj,
                             deps_runs,
-                            experiment_path,
+                            result_path,
                             capture=capture,
                             stash=stash,
                             snapshot_path=snapshot_path,
@@ -1123,9 +1166,16 @@ class ExperimentRunner:
                             wants_deps=wants_deps,
                         )
 
-                        with open(experiment_path, "rb") as f:
-                            exp_obj = pickle.load(f)
-                        exp_obj.out = experiment_dir
+                        # Reconstruct Result from files
+                        exp_obj = _load_result_from_dir(experiment_dir)
+                        if exp_obj is None:
+                            exp_obj = Result(
+                                cfg=config,
+                                name=config_name,
+                                out=experiment_dir,
+                                error="Failed to load result from experiment directory",
+                                finished=True,
+                            )
 
                         if not exp_obj.error:
                             break
@@ -1146,18 +1196,22 @@ class ExperimentRunner:
                         print("---", file=sys.stderr)
 
                         if attempt < max_retries:
+                            # Clear previous error files for retry
+                            error_path = experiment_dir / "error.txt"
+                            if error_path.exists():
+                                error_path.unlink()
+                            if result_path.exists():
+                                result_path.unlink()
+                            finished_marker = experiment_dir / ".finished"
+                            if finished_marker.exists():
+                                finished_marker.unlink()
                             exp_obj = Result(
                                 cfg=config,
                                 name=config_name,
                                 out=experiment_dir,
                             )
-                            with open(experiment_path, "wb") as f:
-                                pickle.dump(exp_obj, f)
 
                     completed[config_name] = exp_obj
-
-                    log_path = experiment_dir / "log.out"
-                    log_path.write_text(exp_obj.log or "")
                     status = "failed" if exp_obj.error else "passed"
 
             if progress:

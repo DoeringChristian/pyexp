@@ -1,10 +1,10 @@
 default = "main"
 
 [containers.main]
-uuid = "0f9ffa93-f727-489a-9b2f-13524e91c91e"
+uuid = "427a9996-46d4-4d65-9d4c-7e830a2011bf"
 profile = "default"
-created_at = "2026-01-23T17:53:49.259769806Z"
-image_tag = "claudepod:4a95d4c6a77f"
+created_at = "2026-02-27T16:04:15.325734231Z"
+image_tag = "claudepod:89399e544332"
 
 [containers.main.docker]
 container_runtime = "podman"
@@ -37,15 +37,12 @@ size = "1m"
 [containers.main.commands]
 default = "claude"
 
-[containers.main.commands.bash]
-args = ""
-
-[containers.main.commands.zsh]
-args = ""
-
 [containers.main.commands.shell]
 args = ""
 command = "bash"
+
+[containers.main.commands.bash]
+args = ""
 
 [containers.main.commands.claude]
 install = '''
@@ -53,3 +50,6 @@ RUN mkdir -p /home/code/.npm-global && \
     npm config set prefix /home/code/.npm-global && \
     npm install --silent -g @anthropic-ai/claude-code'''
 args = "--dangerously-skip-permissions --max-turns 99999999"
+
+[containers.main.commands.zsh]
+args = ""
