@@ -1904,9 +1904,8 @@ class TestFilterWithDependencies:
                 assert not ft_exp.skipped
                 break
 
-    def test_filter_skips_when_dependency_not_finished(self, tmp_path):
-        """--filter should skip downstream if upstream dep has no finished result."""
-        import pickle
+    def test_filter_errors_when_dependency_not_on_disk(self, tmp_path):
+        """--filter should error if downstream dep doesn't exist on disk."""
 
         @experiment(name="pipeline3")
         def pipeline3(cfg, out, deps):
@@ -1919,23 +1918,10 @@ class TestFilterWithDependencies:
                 {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
             ]
 
-        # Run with filter "finetune" only -- pretrain never ran, no finished result
-        with patch.object(sys, "argv", ["test", "--no-stash", "--filter", "finetune"]):
-            pipeline3.run(output_dir=tmp_path, executor="inline")
-
-        # Verify finetune was marked as skipped
-        base_dir = tmp_path / "pipeline3"
-        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
-
-        ts = _get_latest_timestamp(base_dir)
-        exp_dirs = _discover_experiment_dirs(base_dir, ts)
-        for d in exp_dirs:
-            cfg = json.loads((d / "config.json").read_text())
-            if cfg["name"] == "finetune":
-                with open(d / "experiment.pkl", "rb") as f:
-                    ft_exp = pickle.load(f)
-                assert ft_exp.skipped
-                break
+        # Run with filter "finetune" only -- pretrain never ran, should error
+        with pytest.raises(ValueError, match="depends on"):
+            with patch.object(sys, "argv", ["test", "--no-stash", "--filter", "finetune"]):
+                pipeline3.run(output_dir=tmp_path, executor="inline")
 
     def test_filter_loads_dependency_from_previous_batch(self, tmp_path):
         """--filter should load deps from a previous batch when not in current batch."""
@@ -1999,9 +1985,8 @@ class TestFilterWithDependencies:
         else:
             pytest.fail("finetune dir not found in batch 2")
 
-    def test_filter_skips_when_dep_never_ran_any_batch(self, tmp_path):
-        """--filter should still skip if the dependency never ran in any batch."""
-        import pickle
+    def test_filter_errors_when_dep_never_ran_any_batch(self, tmp_path):
+        """--filter should error if dependency never ran in any batch."""
 
         @experiment(name="nobatch")
         def nobatch(cfg, out, deps):
@@ -2014,24 +1999,12 @@ class TestFilterWithDependencies:
                 {"name": "finetune", "lr": 0.001, "depends_on": "pretrain"},
             ]
 
-        # Run with --filter finetune only; pretrain never ran anywhere
-        with patch.object(
-            sys, "argv", ["test", "--no-stash", "--filter", "finetune"]
-        ):
-            nobatch.run(output_dir=tmp_path, executor="inline")
-
-        base_dir = tmp_path / "nobatch"
-        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
-
-        ts = _get_latest_timestamp(base_dir)
-        exp_dirs = _discover_experiment_dirs(base_dir, ts)
-        for d in exp_dirs:
-            cfg = json.loads((d / "config.json").read_text())
-            if cfg["name"] == "finetune":
-                with open(d / "experiment.pkl", "rb") as f:
-                    ft_exp = pickle.load(f)
-                assert ft_exp.skipped
-                break
+        # Run with --filter finetune only; pretrain never ran anywhere — should error
+        with pytest.raises(ValueError, match="depends on"):
+            with patch.object(
+                sys, "argv", ["test", "--no-stash", "--filter", "finetune"]
+            ):
+                nobatch.run(output_dir=tmp_path, executor="inline")
 
     def test_cross_batch_dependency(self, tmp_path):
         """depends_on referencing an experiment from a previous batch should work."""

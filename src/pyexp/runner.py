@@ -176,11 +176,7 @@ def _normalize_depends_on(deps: Any) -> list[str | dict]:
 
 
 def _resolve_depends_on(
-    depends_on: list[str | dict],
-    configs_runs: Runs,
-    config_name: str,
-    *,
-    allow_missing: bool = False,
+    depends_on: list[str | dict], configs_runs: Runs, config_name: str
 ) -> list[str]:
     """Resolve depends_on keys to concrete config names using Runs indexing.
 
@@ -188,21 +184,14 @@ def _resolve_depends_on(
     - str: glob-style pattern matching on name (e.g., "pretrain*")
     - dict: key-value matching on config fields (e.g., {"stage": "pretrain"})
 
-    Args:
-        allow_missing: If True, silently skip keys that match no configs
-            (useful when deps may live outside the current batch).
-
     Raises:
-        ValueError: If a key matches no configs (and allow_missing is False),
-                    or matches the config itself.
+        ValueError: If a key matches no configs, or matches the config itself.
     """
     resolved: list[str] = []
     for key in depends_on:
         try:
             result = configs_runs[key]
         except (IndexError, TypeError):
-            if allow_missing:
-                continue
             raise ValueError(
                 f"Config '{config_name}' depends on {key!r}, "
                 f"which matches no config in this batch."
@@ -233,10 +222,9 @@ def _validate_dependencies(
 ) -> None:
     """Validate depends_on references and detect cycles.
 
-    depends_on values use the same indexing as Runs (glob patterns or dict queries).
     Resolution checks both the current batch and ``disk_configs`` (finished
-    experiments from previous batches).  Cycle detection only covers batch-local
-    deps since external deps are already finished.
+    experiments from previous runs on disk).  Cycle detection only covers
+    batch-local deps since external deps are already finished.
 
     Raises:
         ValueError: If a dependency key matches no config (in batch or on disk),
@@ -251,9 +239,7 @@ def _validate_dependencies(
     for config in configs:
         config_name = config["name"]
         deps = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_depends_on(
-            deps, all_configs_runs, config_name
-        )
+        resolved = _resolve_depends_on(deps, all_configs_runs, config_name)
         # Only batch-local deps participate in cycle detection
         adj[config_name] = [r for r in resolved if r in batch_names]
 
@@ -282,23 +268,36 @@ def _validate_dependencies(
 def _topological_sort(configs: list[dict]) -> list[dict]:
     """Return configs in dependency order (Kahn's algorithm).
 
-    depends_on keys are resolved via Runs indexing.
-    Configs with no dependencies come first.
+    Only orders batch-local dependencies; external deps are ignored since
+    they are already finished.
     """
     configs_runs = Runs(configs)
+    batch_names = {c["name"] for c in configs}
     name_to_config = {c["name"]: c for c in configs}
     in_degree: dict[str, int] = {c["name"]: 0 for c in configs}
     dependents: dict[str, list[str]] = {c["name"]: [] for c in configs}
 
     for config in configs:
         deps = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_depends_on(
-            deps, configs_runs, config["name"], allow_missing=True
-        )
-        in_degree[config["name"]] = len(resolved)
-        for dep in resolved:
-            if dep in dependents:
-                dependents[dep].append(config["name"])
+        # Only resolve against batch configs; skip external deps
+        local_resolved: list[str] = []
+        for key in deps:
+            try:
+                result = configs_runs[key]
+            except (IndexError, TypeError):
+                continue
+            items = list(result) if isinstance(result, Runs) else [result]
+            for item in items:
+                name = (
+                    item.get("name", "")
+                    if isinstance(item, dict)
+                    else getattr(item, "name", "")
+                )
+                if name in batch_names and name != config["name"]:
+                    local_resolved.append(name)
+        in_degree[config["name"]] = len(local_resolved)
+        for dep in local_resolved:
+            dependents[dep].append(config["name"])
 
     # Start with nodes that have no dependencies
     queue = [name for name, deg in in_degree.items() if deg == 0]
@@ -819,7 +818,21 @@ class ExperimentRunner:
             flat_configs = [cfg for _, cfg in self._submissions]
             _validate_configs(flat_configs)
             _validate_unique_names(flat_configs)
-            # Exclude disk configs that overlap with this batch
+
+            # Apply filter early, before dependency resolution
+            if filter:
+                original_count = len(flat_configs)
+                flat_configs = _filter_by_name(
+                    flat_configs, filter, lambda c: c.get("name", "")
+                )
+                if not flat_configs:
+                    print(f"No configs match filter '{filter}'")
+                    return None
+                print(
+                    f"Filter '{filter}': {len(flat_configs)}/{original_count} configs selected"
+                )
+
+            # Gather disk configs for cross-batch dependency validation
             batch_names = {c.get("name", "") for c in flat_configs}
             ext_disk_configs = [
                 cfg for name, (cfg, _) in _disk_configs_by_name.items()
@@ -890,7 +903,7 @@ class ExperimentRunner:
             submission_fns[sub_name] = fn_sub
 
         if is_fresh_start:
-            # Use in-memory data from Phase A (no filesystem discovery needed)
+            # Use in-memory data from Phase A (filtering already applied)
             all_configs_runs = Runs(flat_configs)
 
             # Build mapping from dir path to Config object for deferred writing
@@ -899,27 +912,6 @@ class ExperimentRunner:
             }
 
             all_experiment_dirs = list(experiment_dirs)
-
-            # Apply filter using in-memory config names
-            if filter:
-                dir_to_flat = {
-                    str(d): fc for d, fc in zip(experiment_dirs, flat_configs)
-                }
-
-                def get_config_name_mem(exp_dir: Path) -> str:
-                    fc = dir_to_flat.get(str(exp_dir))
-                    return fc.get("name", "") if fc else ""
-
-                original_count = len(experiment_dirs)
-                experiment_dirs = _filter_by_name(
-                    experiment_dirs, filter, get_config_name_mem
-                )
-                if not experiment_dirs:
-                    print(f"No configs match filter '{filter}'")
-                    return None
-                print(
-                    f"Filter '{filter}': {len(experiment_dirs)}/{original_count} configs selected"
-                )
         else:
             # Continue run: discover from filesystem (existing logic)
             experiment_dirs = _discover_experiment_dirs(base_dir, timestamp)
