@@ -124,11 +124,15 @@ class InlineExecutor(Executor):
         except Exception as e:
             error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             experiment.error = error_msg
+            if not capture:
+                print(error_msg, file=sys.stderr)
         finally:
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
 
+        if experiment.error and experiment.error not in log:
+            log = log + experiment.error if log else experiment.error
         experiment.log = log
         experiment.finished = True
 
@@ -359,6 +363,8 @@ class ForkExecutor(Executor):
                 error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
                 experiment.error = error_msg
                 experiment.finished = True
+                if not capture:
+                    print(error_msg, file=sys.stderr)
                 try:
                     with open(result_path, "wb") as f:
                         pickle.dump(experiment, f)
@@ -393,6 +399,8 @@ class ForkExecutor(Executor):
                 if not experiment.finished:
                     experiment.error = f"ForkError: child exited with code {exit_code}"
                     experiment.finished = True
+                if experiment.error and experiment.error not in log:
+                    log = log + experiment.error if log else experiment.error
                 experiment.log = log
                 with open(result_path, "wb") as f:
                     pickle.dump(experiment, f)
@@ -400,6 +408,8 @@ class ForkExecutor(Executor):
             else:
                 # Child crashed before writing result
                 experiment.error = f"ForkError: exited with code {exit_code}"
+                if experiment.error not in log:
+                    log = log + experiment.error if log else experiment.error
                 experiment.log = log
                 experiment.finished = True
                 with open(result_path, "wb") as f:
