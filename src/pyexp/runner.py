@@ -9,6 +9,7 @@ import inspect
 import json
 import pickle
 import re
+import sys
 
 from .config import Config, Runs
 from .executors import Executor, ExecutorName, get_executor
@@ -175,7 +176,11 @@ def _normalize_depends_on(deps: Any) -> list[str | dict]:
 
 
 def _resolve_depends_on(
-    depends_on: list[str | dict], configs_runs: Runs, config_name: str
+    depends_on: list[str | dict],
+    configs_runs: Runs,
+    config_name: str,
+    *,
+    allow_missing: bool = False,
 ) -> list[str]:
     """Resolve depends_on keys to concrete config names using Runs indexing.
 
@@ -183,14 +188,21 @@ def _resolve_depends_on(
     - str: glob-style pattern matching on name (e.g., "pretrain*")
     - dict: key-value matching on config fields (e.g., {"stage": "pretrain"})
 
+    Args:
+        allow_missing: If True, silently skip keys that match no configs
+            (useful when deps may live outside the current batch).
+
     Raises:
-        ValueError: If a key matches no configs, or matches the config itself.
+        ValueError: If a key matches no configs (and allow_missing is False),
+                    or matches the config itself.
     """
     resolved: list[str] = []
     for key in depends_on:
         try:
             result = configs_runs[key]
         except (IndexError, TypeError):
+            if allow_missing:
+                continue
             raise ValueError(
                 f"Config '{config_name}' depends on {key!r}, "
                 f"which matches no config in this batch."
@@ -216,24 +228,34 @@ def _resolve_depends_on(
     return resolved
 
 
-def _validate_dependencies(configs: list[dict]) -> None:
+def _validate_dependencies(
+    configs: list[dict], disk_configs: list[dict] | None = None
+) -> None:
     """Validate depends_on references and detect cycles.
 
     depends_on values use the same indexing as Runs (glob patterns or dict queries).
+    Resolution checks both the current batch and ``disk_configs`` (finished
+    experiments from previous batches).  Cycle detection only covers batch-local
+    deps since external deps are already finished.
 
     Raises:
-        ValueError: If a dependency key matches no config,
+        ValueError: If a dependency key matches no config (in batch or on disk),
                     a config depends on itself, or there is a cycle.
     """
-    configs_runs = Runs(configs)
+    all_configs = configs + (disk_configs or [])
+    all_configs_runs = Runs(all_configs)
+    batch_names = {c["name"] for c in configs}
 
     # Build adjacency for cycle detection: name -> list of resolved dependency names
     adj: dict[str, list[str]] = {}
     for config in configs:
         config_name = config["name"]
         deps = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_depends_on(deps, configs_runs, config_name)
-        adj[config_name] = resolved
+        resolved = _resolve_depends_on(
+            deps, all_configs_runs, config_name
+        )
+        # Only batch-local deps participate in cycle detection
+        adj[config_name] = [r for r in resolved if r in batch_names]
 
     # Cycle detection via DFS
     WHITE, GRAY, BLACK = 0, 1, 2
@@ -270,10 +292,13 @@ def _topological_sort(configs: list[dict]) -> list[dict]:
 
     for config in configs:
         deps = _normalize_depends_on(config.get("depends_on"))
-        resolved = _resolve_depends_on(deps, configs_runs, config["name"])
+        resolved = _resolve_depends_on(
+            deps, configs_runs, config["name"], allow_missing=True
+        )
         in_degree[config["name"]] = len(resolved)
         for dep in resolved:
-            dependents[dep].append(config["name"])
+            if dep in dependents:
+                dependents[dep].append(config["name"])
 
     # Start with nodes that have no dependencies
     queue = [name for name, deg in in_degree.items() if deg == 0]
@@ -655,6 +680,8 @@ class _ProgressBar:
             else:
                 line += f" [{display_name}]"
 
+        # Flush stdout so any pending output appears before the progress bar
+        sys.stdout.flush()
         # Clear to end of line and print
         sys.stderr.write(f"{line}\033[K")
         sys.stderr.flush()
@@ -778,11 +805,27 @@ class ExperimentRunner:
         # =================================================================
         is_fresh_start = not continue_run
 
+        # Discover finished experiments from previous batches on disk.
+        # Used for cross-batch dependency validation and resolution.
+        _disk_dirs = _discover_all_experiments_latest(
+            base_dir, finished_only=True
+        )
+        _disk_configs_by_name: dict[str, tuple[dict, Path]] = {}
+        for _d in _disk_dirs:
+            _cfg = json.loads((_d / "config.json").read_text())
+            _disk_configs_by_name[_cfg.get("name", "")] = (_cfg, _d)
+
         if is_fresh_start:
             flat_configs = [cfg for _, cfg in self._submissions]
             _validate_configs(flat_configs)
             _validate_unique_names(flat_configs)
-            _validate_dependencies(flat_configs)
+            # Exclude disk configs that overlap with this batch
+            batch_names = {c.get("name", "") for c in flat_configs}
+            ext_disk_configs = [
+                cfg for name, (cfg, _) in _disk_configs_by_name.items()
+                if name not in batch_names
+            ]
+            _validate_dependencies(flat_configs, ext_disk_configs)
             flat_configs = _topological_sort(flat_configs)
 
             if hash_configs:
@@ -930,54 +973,40 @@ class ExperimentRunner:
 
         completed: dict[str, Result] = {}
 
-        if filter:
-            filtered_set = set(str(d) for d in experiment_dirs)
-            for exp_dir in all_experiment_dirs:
-                if str(exp_dir) in filtered_set:
-                    continue
-                finished_marker = exp_dir / ".finished"
-                exp_pkl = exp_dir / "experiment.pkl"
-                if finished_marker.exists() and exp_pkl.exists():
-                    cfg_data = json.loads((exp_dir / "config.json").read_text())
-                    dep_name = cfg_data.get("name", "")
+        # Augment all_configs_runs with on-disk experiments so that
+        # cross-batch dependencies can be resolved.  Also pre-load
+        # finished external deps into ``completed``.
+        # Only skip names that will actually be executed (in experiment_dirs),
+        # NOT all batch names — filtered-out batch experiments should still
+        # be loadable from disk.
+        _run_names: set[str] = set()
+        for _d in experiment_dirs:
+            if is_fresh_start:
+                _c = dir_to_config_obj.get(str(_d))
+                _run_names.add(_c.get("name", "") if _c else "")
+            else:
+                _cfg_path = _d / "config.json"
+                if _cfg_path.exists():
+                    _run_names.add(
+                        json.loads(_cfg_path.read_text()).get("name", "")
+                    )
+
+        existing_names = {c.get("name", "") for c in all_configs_runs}
+        disk_configs: list[dict] = []
+        for name, (cfg, d) in _disk_configs_by_name.items():
+            if name not in _run_names:
+                exp_pkl = d / "experiment.pkl"
+                if exp_pkl.exists():
                     with open(exp_pkl, "rb") as f:
                         dep_result = pickle.load(f)
-                    dep_result.out = exp_dir
-                    completed[dep_name] = dep_result
-
-            # Fallback: load filtered-out deps from previous runs if not
-            # found in current batch
-            needed_deps: set[str] = set()
-            for exp_dir in experiment_dirs:
-                if is_fresh_start:
-                    cfg_data = dict(dir_to_config_obj.get(str(exp_dir), {}))
-                else:
-                    cfg_data = json.loads((exp_dir / "config.json").read_text())
-                dep_keys = _normalize_depends_on(cfg_data.get("depends_on"))
-                if dep_keys:
-                    resolved = _resolve_depends_on(
-                        dep_keys, all_configs_runs, cfg_data.get("name", "")
-                    )
-                    for dep_name in resolved:
-                        if dep_name not in completed:
-                            needed_deps.add(dep_name)
-
-            if needed_deps:
-                all_latest_dirs = _discover_all_experiments_latest(
-                    base_dir, finished_only=True
-                )
-                for latest_dir in all_latest_dirs:
-                    exp_pkl = latest_dir / "experiment.pkl"
-                    if exp_pkl.exists():
-                        cfg_data = json.loads(
-                            (latest_dir / "config.json").read_text()
-                        )
-                        dep_name = cfg_data.get("name", "")
-                        if dep_name in needed_deps and dep_name not in completed:
-                            with open(exp_pkl, "rb") as f:
-                                dep_result = pickle.load(f)
-                            dep_result.out = latest_dir
-                            completed[dep_name] = dep_result
+                    dep_result.out = d
+                    completed[name] = dep_result
+                if name not in existing_names:
+                    disk_configs.append(cfg)
+        if disk_configs:
+            all_configs_runs = Runs(
+                list(all_configs_runs) + disk_configs
+            )
 
         for experiment_dir in experiment_dirs:
             experiment_path = experiment_dir / "experiment.pkl"
@@ -1115,13 +1144,14 @@ class ExperimentRunner:
                             f" (retrying, {remaining} left)" if remaining > 0 else ""
                         )
                         print(
-                            f"\n--- Error in {config_name or 'experiment'}{retry_info} ---"
+                            f"\n--- Error in {config_name or 'experiment'}{retry_info} ---",
+                            file=sys.stderr,
                         )
-                        print(error_msg)
+                        print(error_msg, file=sys.stderr)
                         if exp_obj.log:
-                            print("--- Log output ---")
-                            print(exp_obj.log)
-                        print("---")
+                            print("--- Log output ---", file=sys.stderr)
+                            print(exp_obj.log, file=sys.stderr)
+                        print("---", file=sys.stderr)
 
                         if attempt < max_retries:
                             exp_obj = Result(

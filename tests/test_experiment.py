@@ -1153,6 +1153,25 @@ class TestSubprocessExecution:
         assert "Test error" in results[0].error
         assert results[0].cfg["name"] == "failing"
 
+    def test_subprocess_error_printed_to_stderr(self, tmp_path, capsys):
+        """Errors from subprocess experiments should be printed to stderr."""
+
+        @experiment
+        def my_exp(config):
+            raise ValueError("visible error")
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "failing", "x": 1}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="subprocess", retry=0)
+
+        captured = capsys.readouterr()
+        assert "--- Error in failing ---" in captured.err
+        assert "ValueError" in captured.err
+        assert "visible error" in captured.err
+
     def test_subprocess_continues_after_failure(self, tmp_path):
         """Other experiments continue even if one fails."""
 
@@ -2013,6 +2032,106 @@ class TestFilterWithDependencies:
                     ft_exp = pickle.load(f)
                 assert ft_exp.skipped
                 break
+
+    def test_cross_batch_dependency(self, tmp_path):
+        """depends_on referencing an experiment from a previous batch should work."""
+        import pickle
+        import time
+
+        # Batch 1: run upstream only
+        @experiment(name="batch1")
+        def batch1(cfg, out, deps):
+            return {"value": 42}
+
+        @batch1.configs
+        def b1_configs():
+            return [{"name": "upstream", "x": 1}]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            batch1.run(output_dir=tmp_path, executor="inline")
+
+        # Verify upstream finished
+        base_dir = tmp_path / "batch1"
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts1 = _get_latest_timestamp(base_dir)
+        dirs1 = _discover_experiment_dirs(base_dir, ts1)
+        assert len(dirs1) == 1
+        assert (dirs1[0] / ".finished").exists()
+
+        time.sleep(1.1)
+
+        # Batch 2: run downstream that depends on upstream (not in this batch)
+        @experiment(name="batch1")
+        def batch2(cfg, out, deps):
+            return {"dep_value": deps[0].result["value"]}
+
+        @batch2.configs
+        def b2_configs():
+            return [{"name": "downstream", "y": 2, "depends_on": "upstream"}]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            batch2.run(output_dir=tmp_path, executor="inline")
+
+        ts2 = _get_latest_timestamp(base_dir)
+        assert ts2 != ts1
+        dirs2 = _discover_experiment_dirs(base_dir, ts2)
+        ds_dir = [d for d in dirs2 if "downstream" in str(d)][0]
+        assert (ds_dir / ".finished").exists()
+        with open(ds_dir / "experiment.pkl", "rb") as f:
+            ds_result = pickle.load(f)
+        assert ds_result.result == {"dep_value": 42}
+
+    def test_cross_batch_dependency_with_filter(self, tmp_path):
+        """--filter should not crash when filtered experiment has cross-batch dep."""
+        import pickle
+        import time
+
+        # Batch 1: run upstream
+        @experiment(name="pipe")
+        def pipe1(cfg, out, deps):
+            return {"value": cfg["x"]}
+
+        @pipe1.configs
+        def p1_configs():
+            return [{"name": "upstream", "x": 10}]
+
+        with patch.object(sys, "argv", ["test", "--no-stash"]):
+            pipe1.run(output_dir=tmp_path, executor="inline")
+
+        time.sleep(1.1)
+
+        # Batch 2: two experiments, one depends on upstream (cross-batch)
+        @experiment(name="pipe")
+        def pipe2(cfg, out, deps):
+            if deps:
+                return {"val": deps[0].result["value"] + cfg["x"]}
+            return {"val": cfg["x"]}
+
+        @pipe2.configs
+        def p2_configs():
+            return [
+                {"name": "independent", "x": 5},
+                {"name": "downstream", "x": 3, "depends_on": "upstream"},
+            ]
+
+        # Filter to only independent — should not crash even though
+        # downstream has an unresolvable dep (upstream not in batch)
+        with patch.object(
+            sys, "argv", ["test", "--no-stash", "--filter", "independent"]
+        ):
+            pipe2.run(output_dir=tmp_path, executor="inline")
+
+        base_dir = tmp_path / "pipe"
+        from pyexp.runner import _get_latest_timestamp, _discover_experiment_dirs
+
+        ts = _get_latest_timestamp(base_dir)
+        dirs = _discover_experiment_dirs(base_dir, ts)
+        ind_dir = [d for d in dirs if "independent" in str(d)][0]
+        assert (ind_dir / ".finished").exists()
+        with open(ind_dir / "experiment.pkl", "rb") as f:
+            ind_result = pickle.load(f)
+        assert ind_result.result == {"val": 5}
 
 
 class TestCrossTimestampResults:
