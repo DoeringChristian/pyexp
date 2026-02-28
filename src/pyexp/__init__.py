@@ -21,7 +21,13 @@ from .executors import (
     SubprocessExecutor,
     get_executor,
 )
-from .utils import checkout_snapshot, stash, stash_and_snapshot
+from .utils import (
+    checkout_snapshot,
+    package_files,
+    stash,
+    stash_and_snapshot,
+    DEFAULT_PACKAGE_SUFFIXES,
+)
 from .log import LazyFigure, Logger, LogReader
 
 __all__ = [
@@ -32,6 +38,7 @@ __all__ = [
     "merge",
     "register",
     "checkout_snapshot",
+    "package_files",
     "stash",
     "stash_and_snapshot",
     "sweep",
@@ -50,4 +57,5 @@ __all__ = [
     "LazyFigure",
     "Logger",
     "LogReader",
+    "DEFAULT_PACKAGE_SUFFIXES",
 ]

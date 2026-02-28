@@ -1,9 +1,40 @@
 """Utility functions for pyexp."""
 
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+
+# Default file suffixes to include in code packages (like Metaflow)
+DEFAULT_PACKAGE_SUFFIXES = {".py"}
+
+# Directories to always exclude from packaging
+EXCLUDE_DIRS = {
+    "__pycache__",
+    ".git",
+    ".hg",
+    ".svn",
+    ".venv",
+    "venv",
+    ".env",
+    "env",
+    ".tox",
+    ".nox",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".hypothesis",
+    "node_modules",
+    ".eggs",
+    "*.egg-info",
+    "dist",
+    "build",
+    ".ipynb_checkpoints",
+    ".coverage",
+    "htmlcov",
+    "__pypackages__",
+}
 
 
 def _find_git_root() -> Path:
@@ -153,15 +184,110 @@ def checkout_snapshot(commit_hash: str, dest: Path) -> Path:
     return dest
 
 
-def stash_and_snapshot(dest: Path) -> tuple[str, Path]:
-    """Stash current repo state and extract a file snapshot into dest.
+def _should_exclude_dir(name: str) -> bool:
+    """Check if a directory name should be excluded from packaging."""
+    if name.startswith("."):
+        return True
+    if name in EXCLUDE_DIRS:
+        return True
+    if name.endswith(".egg-info"):
+        return True
+    return False
+
+
+def _collect_files_by_suffix(
+    root: Path,
+    suffixes: set[str] | None = None,
+) -> list[tuple[Path, Path]]:
+    """Collect files matching the given suffixes from a directory tree.
+
+    Args:
+        root: Root directory to walk.
+        suffixes: Set of file suffixes to include (e.g., {".py"}).
+                  If None, uses DEFAULT_PACKAGE_SUFFIXES.
+
+    Returns:
+        List of (source_path, relative_path) tuples.
+    """
+    if suffixes is None:
+        suffixes = DEFAULT_PACKAGE_SUFFIXES
+
+    files = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Filter out excluded directories in-place to prevent descending
+        dirnames[:] = [d for d in dirnames if not _should_exclude_dir(d)]
+
+        rel_dir = Path(dirpath).relative_to(root)
+
+        for filename in filenames:
+            # Skip hidden files
+            if filename.startswith("."):
+                continue
+
+            # Check suffix
+            if any(filename.endswith(suffix) for suffix in suffixes):
+                src = Path(dirpath) / filename
+                rel = rel_dir / filename
+                files.append((src, rel))
+
+    return files
+
+
+def package_files(
+    dest: Path,
+    root: Path | None = None,
+    suffixes: set[str] | None = None,
+) -> Path:
+    """Package files with specific suffixes into a destination directory.
+
+    This follows the Metaflow approach of only including relevant source files
+    rather than copying the entire repository.
+
+    Args:
+        dest: Destination directory to copy files into.
+        root: Root directory to package from. Defaults to git root.
+        suffixes: Set of file suffixes to include (e.g., {".py"}).
+                  If None, uses DEFAULT_PACKAGE_SUFFIXES.
+
+    Returns:
+        Path to the destination directory.
+    """
+    if root is None:
+        root = _find_git_root()
+
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+
+    files = _collect_files_by_suffix(root, suffixes)
+
+    for src, rel in files:
+        dst = dest / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+
+    return dest
+
+
+def stash_and_snapshot(
+    dest: Path,
+    suffixes: set[str] | None = None,
+) -> tuple[str, Path]:
+    """Stash current repo state and create a packaged snapshot.
+
+    Creates a git commit hash for reference/comparison, then packages only
+    the relevant source files (by suffix) into the destination directory.
 
     Args:
         dest: Directory to populate with the snapshot files.
+        suffixes: Set of file suffixes to include. Defaults to {".py"}.
 
     Returns:
         Tuple of (commit_hash, snapshot_path).
     """
+    # Create git commit for reference (not exported, just for tracking)
     commit_hash = stash()
-    snapshot_path = checkout_snapshot(commit_hash, dest)
+
+    # Package only relevant files by suffix
+    snapshot_path = package_files(dest, suffixes=suffixes)
+
     return commit_hash, snapshot_path
