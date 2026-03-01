@@ -182,6 +182,9 @@ def run_worker(payload_path: str) -> int:
                 experiment_dir.mkdir(parents=True, exist_ok=True)
                 (experiment_dir / "error.txt").write_text(error_msg)
                 (experiment_dir / ".finished").touch()
+            else:
+                # Can't write to disk — print so the executor can capture it
+                print(error_msg, file=sys.stderr)
         except Exception:
             # If we can't even write the error, just print it
             traceback.print_exc()

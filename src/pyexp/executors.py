@@ -231,11 +231,13 @@ class SubprocessExecutor(Executor):
             if capture:
                 proc = subprocess.run(
                     cmd,
-                    capture_output=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
                     text=True,
                     env=env,
                 )
-                log = proc.stdout + proc.stderr
+                log = proc.stdout
+                stderr = proc.stderr
             else:
                 # Tee: show output live AND capture it for the log file.
                 # Merge stderr into stdout so tqdm bars (which write to
@@ -257,9 +259,11 @@ class SubprocessExecutor(Executor):
                     log_parts.append(chunk)
                 proc.wait()
                 log = b"".join(log_parts).decode("utf-8", errors="replace")
+                stderr = ""
 
-            # Save log file
-            (experiment_dir / "log.out").write_text(log)
+            # Save log file (stdout + stderr combined)
+            full_log = (log + stderr) if stderr else log
+            (experiment_dir / "log.out").write_text(full_log)
 
             finished_marker = experiment_dir / ".finished"
             error_path = experiment_dir / "error.txt"
@@ -272,15 +276,17 @@ class SubprocessExecutor(Executor):
                 if result_path.exists():
                     with open(result_path, "rb") as f:
                         experiment.result = pickle.load(f)
-                experiment.log = log
+                experiment.log = full_log
                 experiment.finished = True
             else:
-                # Subprocess crashed before completing
+                # Subprocess crashed before completing — build error from
+                # captured output so the traceback is always visible.
                 error_msg = f"SubprocessError: exited with code {proc.returncode}"
-                if log.strip():
-                    error_msg += f"\n{log}"
+                output = stderr.strip() or log.strip()
+                if output:
+                    error_msg += f"\n\n{output}"
                 experiment.error = error_msg
-                experiment.log = log
+                experiment.log = full_log
                 experiment.finished = True
                 # Write error file
                 error_path.write_text(error_msg)

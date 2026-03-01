@@ -786,6 +786,7 @@ class ExperimentRunner:
         hash_configs: bool = False,
         filter: str | None = None,
         continue_run: str | None = None,
+        deps_finished_only: bool = False,
     ) -> None:
         """Execute all submitted experiments.
 
@@ -797,6 +798,8 @@ class ExperimentRunner:
             hash_configs: Append config parameter hash to run directory names.
             filter: Regex pattern to filter configs by name.
             continue_run: Timestamp of a previous run to continue.
+            deps_finished_only: If True, only resolve external dependencies
+                from experiments that have a .finished marker.
         """
         if not self._submissions:
             raise RuntimeError(
@@ -861,7 +864,7 @@ class ExperimentRunner:
 
         # Discover finished experiments from previous batches on disk.
         # Used for cross-batch dependency validation and resolution.
-        _disk_dirs = _discover_all_experiments_latest(base_dir, finished_only=True)
+        _disk_dirs = _discover_all_experiments_latest(base_dir, finished_only=deps_finished_only)
         _disk_configs_by_name: dict[str, tuple[dict, Path]] = {}
         for _d in _disk_dirs:
             _cfg = json.loads((_d / "config.json").read_text())
