@@ -1,19 +1,22 @@
-"""Executor classes for running experiments in different isolation modes.
+"""Executor classes for running functions in different isolation modes.
 
-This module provides a modular system for experiment execution. Each executor
-implements a different isolation strategy:
+Each executor runs ``fn(*args, **kwargs)`` and returns a :class:`FnResult`
+containing the return value and captured output. On error the traceback
+is included in ``log`` and ``result`` is the sentinel :data:`MISSING`.
 
 - InlineExecutor: Runs in the same process (no isolation)
 - SubprocessExecutor: Runs in a subprocess using cloudpickle (cross-platform)
 - ForkExecutor: Runs in a forked process (Unix only, fastest isolation)
-- RayExecutor: Runs using Ray for distributed execution (requires `pip install pyexp[ray]`)
+- RayExecutor: Runs using Ray for distributed execution (requires ``pip install pyexp[ray]``)
 
 Custom executors can be created by subclassing Executor.
 """
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal, TYPE_CHECKING
+from typing import Any, Callable, Literal
+import io
 import os
 import pickle
 import subprocess
@@ -23,225 +26,161 @@ import traceback
 
 import cloudpickle
 
-if TYPE_CHECKING:
-    from .runner import Result
-    from .config import Runs
-
 # Valid executor names
 ExecutorName = Literal["inline", "subprocess", "fork", "ray"]
 
+# Sentinel to distinguish "fn returned None" from "fn raised"
+MISSING = type("MISSING", (), {"__repr__": lambda self: "MISSING", "__bool__": lambda self: False})()
+
+
+@dataclass
+class FnResult:
+    """Result of running a function via an executor.
+
+    ``result`` is :data:`MISSING` when the function raised an exception.
+    The traceback is appended to ``log``.
+    """
+
+    result: Any = field(default_factory=lambda: MISSING)
+    log: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.result is not MISSING
+
+
+def _build_pythonpath(snapshot_path: Path | None = None) -> str:
+    """Build PYTHONPATH for a subprocess.
+
+    When *snapshot_path* is set, remap repo-local sys.path entries to their
+    snapshot equivalents so that the subprocess imports from the snapshot.
+    """
+    if snapshot_path is not None:
+        try:
+            from .utils import _find_git_root
+
+            git_root = _find_git_root()
+            git_root_str = str(git_root.resolve())
+            snapshot_str = str(snapshot_path.resolve())
+
+            remapped = []
+            for p in sys.path:
+                resolved = str(Path(p).resolve()) if p else ""
+                if resolved.startswith(git_root_str):
+                    relative = resolved[len(git_root_str):]
+                    remapped.append(snapshot_str + relative)
+                else:
+                    remapped.append(p)
+            pythonpath = os.pathsep.join(remapped)
+        except Exception:
+            pythonpath = os.pathsep.join(sys.path)
+    else:
+        pythonpath = os.pathsep.join(sys.path)
+
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        pythonpath = pythonpath + os.pathsep + existing
+    return pythonpath
+
 
 class Executor(ABC):
-    """Abstract base class for experiment executors.
-
-    Subclass this to implement custom execution strategies.
-    """
+    """Abstract base class for executors."""
 
     @abstractmethod
     def run(
         self,
         fn: Callable,
-        experiment: "Result",
-        deps: "Runs | None",
-        result_path: Path,
-        *,
+        *args: Any,
         capture: bool = True,
-        stash: bool = True,
         snapshot_path: Path | None = None,
-        wants_out: bool = False,
-        wants_deps: bool = False,
-    ) -> None:
-        """Run a single experiment and pickle the result.
-
-        Args:
-            fn: The experiment function to call.
-            experiment: The Result dataclass (cfg/name/out already set).
-            deps: Dependency experiments (Runs), or None.
-            result_path: Path where the pickled experiment should be saved.
-            capture: If True (default), capture output. If False, show output live.
-            stash: If True, capture git commit hash at the start of the experiment.
-            snapshot_path: If set, run experiment from this snapshot directory.
-            wants_out: If True, pass out as second arg to fn.
-            wants_deps: If True, pass deps as third arg to fn.
-
-        The executor should:
-        1. Call fn(cfg) / fn(cfg, out) / fn(cfg, out, deps)
-        2. Store return value in experiment.result
-        3. On error: set experiment.error
-        4. Set experiment.log with captured stdout/stderr
-        5. Pickle the experiment to result_path
-        """
-        pass
-
-
-def _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path=None):
-    """Call the experiment function with the right arguments and store result."""
-    if result_path is not None:
-        experiment.out = result_path.parent
-    if wants_deps:
-        experiment.result = fn(experiment.cfg, experiment.out, deps)
-    elif wants_out:
-        experiment.result = fn(experiment.cfg, experiment.out)
-    else:
-        experiment.result = fn(experiment.cfg)
+        **kwargs: Any,
+    ) -> FnResult:
+        """Run *fn* and return a :class:`FnResult`."""
+        ...
 
 
 class InlineExecutor(Executor):
-    """Executor that runs experiments in the same process.
-
-    This provides no isolation - crashes will affect the main process.
-    Useful for debugging or when isolation overhead is not desired.
-    """
+    """Runs the function in the same process (no isolation)."""
 
     def run(
         self,
         fn: Callable,
-        experiment: "Result",
-        deps: "Runs | None",
-        result_path: Path,
-        *,
+        *args: Any,
         capture: bool = True,
-        stash: bool = True,
         snapshot_path: Path | None = None,
-        wants_out: bool = False,
-        wants_deps: bool = False,
-    ) -> None:
-        """Run experiment inline and cache result."""
-        import io
-        import sys
-
-        experiment_dir = result_path.parent
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-
-        # Capture output if requested
+        **kwargs: Any,
+    ) -> FnResult:
         log = ""
-        error_msg = None
-        result_value = None
         if capture:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = io.StringIO()
             sys.stderr = io.StringIO()
 
         try:
-            _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
-            result_value = experiment.result
-        except Exception as e:
-            error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            experiment.error = error_msg
-            if not capture:
-                print(error_msg, file=sys.stderr)
-        finally:
+            result_value = fn(*args, **kwargs)
+        except Exception:
+            error_tb = traceback.format_exc()
+            if capture:
+                log = sys.stdout.getvalue() + sys.stderr.getvalue() + error_tb
+                sys.stdout, sys.stderr = old_stdout, old_stderr
+            else:
+                log = error_tb
+            return FnResult(log=log)
+        else:
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
+            return FnResult(result=result_value, log=log)
 
-        if error_msg and error_msg not in log:
-            log = log + error_msg if log else error_msg
-        experiment.log = log
-        experiment.finished = True
 
-        # Save only the result value
-        if result_value is not None:
-            with open(result_path, "wb") as f:
-                pickle.dump(result_value, f)
-
-        # Save error if any
-        if error_msg:
-            (experiment_dir / "error.txt").write_text(error_msg)
-
-        # Save log
-        (experiment_dir / "log.out").write_text(log)
-
-        (experiment_dir / ".finished").touch()
+_WORKER_SCRIPT = """\
+import pickle,sys,traceback,cloudpickle
+p,r=sys.argv[1],sys.argv[2]
+try:
+    with open(p,"rb") as f:d=cloudpickle.load(f)
+    v=d["fn"](*d["args"],**d["kwargs"])
+    with open(r,"wb") as f:pickle.dump(v,f)
+except Exception:
+    traceback.print_exc()
+    sys.exit(1)
+"""
 
 
 class SubprocessExecutor(Executor):
-    """Executor that runs experiments in isolated subprocesses using cloudpickle.
-
-    This provides strong isolation - crashes (including segfaults) won't affect
-    the main process. Works cross-platform (Windows, macOS, Linux).
-    """
+    """Runs the function in an isolated subprocess using cloudpickle."""
 
     def run(
         self,
         fn: Callable,
-        experiment: "Result",
-        deps: "Runs | None",
-        result_path: Path,
-        *,
+        *args: Any,
         capture: bool = True,
-        stash: bool = True,
         snapshot_path: Path | None = None,
-        wants_out: bool = False,
-        wants_deps: bool = False,
-    ) -> None:
-        """Run experiment in subprocess via cloudpickle serialization."""
-        experiment_dir = result_path.parent
-        experiment_dir.mkdir(parents=True, exist_ok=True)
+        **kwargs: Any,
+    ) -> FnResult:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            result_path = tmp / "result.pkl"
+            payload_path = tmp / "payload.pkl"
 
-        # Create payload (deps not included — worker resolves them from disk)
-        payload = {
-            "fn": fn,
-            "experiment": experiment,
-            "result_path": str(result_path),
-            "stash": stash,
-            "wants_out": wants_out,
-            "wants_deps": wants_deps,
-        }
+            with open(payload_path, "wb") as f:
+                cloudpickle.dump({"fn": fn, "args": args, "kwargs": kwargs}, f)
 
-        # Write payload to temp file
-        with tempfile.NamedTemporaryFile(mode="wb", suffix=".pkl", delete=False) as f:
-            payload_path = f.name
-            cloudpickle.dump(payload, f)
-
-        try:
-            # Run worker subprocess with inherited sys.path via PYTHONPATH
             env = os.environ.copy()
+            env["PYTHONPATH"] = _build_pythonpath(snapshot_path)
 
-            # When snapshot_path is set, remap repo-local sys.path entries
-            # to their snapshot equivalents
-            if snapshot_path is not None:
-                try:
-                    from .utils import _find_git_root
+            cmd = [sys.executable, "-c", _WORKER_SCRIPT, str(payload_path), str(result_path)]
 
-                    git_root = _find_git_root()
-                    git_root_str = str(git_root.resolve())
-                    snapshot_str = str(snapshot_path.resolve())
-
-                    remapped = []
-                    for p in sys.path:
-                        resolved = str(Path(p).resolve()) if p else ""
-                        if resolved.startswith(git_root_str):
-                            relative = resolved[len(git_root_str) :]
-                            remapped.append(snapshot_str + relative)
-                        else:
-                            remapped.append(p)
-                    pythonpath = os.pathsep.join(remapped)
-                except Exception:
-                    # Fall back to normal sys.path if remapping fails
-                    pythonpath = os.pathsep.join(sys.path)
-            else:
-                pythonpath = os.pathsep.join(sys.path)
-
-            if env.get("PYTHONPATH"):
-                pythonpath = pythonpath + os.pathsep + env["PYTHONPATH"]
-            env["PYTHONPATH"] = pythonpath
-
-            cmd = [sys.executable, "-m", "pyexp.worker", payload_path]
             if capture:
                 proc = subprocess.run(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
                     env=env,
                 )
-                log = proc.stdout
-                stderr = proc.stderr
+                log = proc.stdout or ""
             else:
-                # Tee: show output live AND capture it for the log file.
-                # Merge stderr into stdout so tqdm bars (which write to
-                # stderr) are visible in real time.
+                # Tee: show output live AND capture it.
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -259,60 +198,18 @@ class SubprocessExecutor(Executor):
                     log_parts.append(chunk)
                 proc.wait()
                 log = b"".join(log_parts).decode("utf-8", errors="replace")
-                stderr = ""
 
-            # Save log file (stdout + stderr combined)
-            full_log = (log + stderr) if stderr else log
-            (experiment_dir / "log.out").write_text(full_log)
+            if result_path.exists():
+                with open(result_path, "rb") as f:
+                    result_value = pickle.load(f)
+                return FnResult(result=result_value, log=log)
 
-            finished_marker = experiment_dir / ".finished"
-            error_path = experiment_dir / "error.txt"
-
-            # Check if worker completed (wrote .finished marker)
-            if finished_marker.exists():
-                # Worker completed, read any error it may have written
-                if error_path.exists():
-                    experiment.error = error_path.read_text()
-                if result_path.exists():
-                    with open(result_path, "rb") as f:
-                        experiment.result = pickle.load(f)
-                experiment.log = full_log
-                experiment.finished = True
-            else:
-                # Subprocess crashed before completing — build error from
-                # captured output so the traceback is always visible.
-                error_msg = f"SubprocessError: exited with code {proc.returncode}"
-                output = stderr.strip() or log.strip()
-                if output:
-                    error_msg += f"\n\n{output}"
-                experiment.error = error_msg
-                experiment.log = full_log
-                experiment.finished = True
-                # Write error file
-                error_path.write_text(error_msg)
-                finished_marker.touch()
-        finally:
-            # Clean up payload file
-            Path(payload_path).unlink(missing_ok=True)
+            # No result file → function raised (traceback is in log)
+            return FnResult(log=log)
 
 
 class ForkExecutor(Executor):
-    """Executor that runs experiments in forked processes (Unix only).
-
-    This provides isolation while guaranteeing that all forked processes have
-    identical interpreter state (same loaded modules, same code versions).
-    Uses os.fork() which is very efficient (copy-on-write memory).
-
-    Advantages over SubprocessExecutor:
-    - All processes share exact same module state (no re-importing)
-    - Faster startup (no need to re-import modules)
-    - No serialization of the instance needed
-
-    Limitations:
-    - Unix only (Linux, macOS) - not available on Windows
-    - Some libraries have issues with fork (CUDA, some macOS frameworks)
-    - File descriptors are shared with parent (can cause issues)
-    """
+    """Runs the function in a forked process (Unix only, fastest isolation)."""
 
     def __init__(self):
         if not hasattr(os, "fork"):
@@ -321,156 +218,96 @@ class ForkExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Result",
-        deps: "Runs | None",
-        result_path: Path,
-        *,
+        *args: Any,
         capture: bool = True,
-        stash: bool = True,
         snapshot_path: Path | None = None,
-        wants_out: bool = False,
-        wants_deps: bool = False,
-    ) -> None:
-        """Run experiment in a forked process."""
-        experiment_dir = result_path.parent
-        experiment_dir.mkdir(parents=True, exist_ok=True)
+        **kwargs: Any,
+    ) -> FnResult:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result_path = Path(tmpdir) / "result.pkl"
 
-        # Create pipe for capturing output
-        if capture:
-            read_fd, write_fd = os.pipe()
-
-        pid = os.fork()
-
-        if pid == 0:
-            # Child process
-            try:
-                if capture:
-                    os.close(read_fd)
-                    os.dup2(write_fd, 1)  # stdout
-                    os.dup2(write_fd, 2)  # stderr
-                    os.close(write_fd)
-
-                # Best-effort sys.path manipulation for snapshot
-                if snapshot_path is not None:
-                    try:
-                        from .utils import _find_git_root
-
-                        git_root = _find_git_root()
-                        git_root_str = str(git_root.resolve())
-                        snapshot_str = str(snapshot_path.resolve())
-
-                        new_path = []
-                        for p in sys.path:
-                            resolved = str(Path(p).resolve()) if p else ""
-                            if resolved.startswith(git_root_str):
-                                relative = resolved[len(git_root_str):]
-                                new_path.append(snapshot_str + relative)
-                            else:
-                                new_path.append(p)
-                        sys.path[:] = new_path
-                    except Exception:
-                        pass  # Best-effort: continue without remapping
-
-                _call_fn(fn, experiment, deps, wants_out, wants_deps, result_path)
-
-                # Save only the result value
-                with open(result_path, "wb") as f:
-                    pickle.dump(experiment.result, f)
-                (experiment_dir / ".finished").touch()
-                os._exit(0)
-            except Exception as e:
-                # Write error information
-                error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                if not capture:
-                    print(error_msg, file=sys.stderr)
-                try:
-                    (experiment_dir / "error.txt").write_text(error_msg)
-                    (experiment_dir / ".finished").touch()
-                except Exception:
-                    pass
-                os._exit(1)
-        else:
-            # Parent process
-            log = ""
             if capture:
-                os.close(write_fd)
-                # Read all output from pipe
-                log_bytes = b""
-                while True:
-                    chunk = os.read(read_fd, 4096)
-                    if not chunk:
-                        break
-                    log_bytes += chunk
-                os.close(read_fd)
-                log = log_bytes.decode("utf-8", errors="replace")
+                read_fd, write_fd = os.pipe()
 
-            # Wait for child
-            _, status = os.waitpid(pid, 0)
-            exit_code = os.waitstatus_to_exitcode(status)
+            pid = os.fork()
 
-            finished_marker = experiment_dir / ".finished"
-            error_path = experiment_dir / "error.txt"
+            if pid == 0:
+                # Child process
+                try:
+                    if capture:
+                        os.close(read_fd)
+                        os.dup2(write_fd, 1)
+                        os.dup2(write_fd, 2)
+                        os.close(write_fd)
+                        sys.stdout = io.TextIOWrapper(os.fdopen(1, "wb", 0), line_buffering=True)
+                        sys.stderr = io.TextIOWrapper(os.fdopen(2, "wb", 0), line_buffering=True)
 
-            # Check if child completed
-            if finished_marker.exists():
-                # Child completed, read any error it may have written
-                if error_path.exists():
-                    error_msg = error_path.read_text()
-                    experiment.error = error_msg
-                    if error_msg not in log:
-                        log = log + error_msg if log else error_msg
+                    if snapshot_path is not None:
+                        try:
+                            from .utils import _find_git_root
+
+                            git_root = _find_git_root()
+                            git_root_str = str(git_root.resolve())
+                            snapshot_str = str(snapshot_path.resolve())
+
+                            new_path = []
+                            for p in sys.path:
+                                resolved = str(Path(p).resolve()) if p else ""
+                                if resolved.startswith(git_root_str):
+                                    relative = resolved[len(git_root_str):]
+                                    new_path.append(snapshot_str + relative)
+                                else:
+                                    new_path.append(p)
+                            sys.path[:] = new_path
+                        except Exception:
+                            pass
+
+                    result_value = fn(*args, **kwargs)
+
+                    with open(result_path, "wb") as f:
+                        pickle.dump(result_value, f)
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(0)
+                except Exception:
+                    traceback.print_exc()
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    os._exit(1)
+            else:
+                # Parent process
+                log = ""
+                if capture:
+                    os.close(write_fd)
+                    log_bytes = b""
+                    while True:
+                        chunk = os.read(read_fd, 4096)
+                        if not chunk:
+                            break
+                        log_bytes += chunk
+                    os.close(read_fd)
+                    log = log_bytes.decode("utf-8", errors="replace")
+
+                _, status = os.waitpid(pid, 0)
+
                 if result_path.exists():
                     with open(result_path, "rb") as f:
-                        experiment.result = pickle.load(f)
-                experiment.out = experiment_dir
-                experiment.log = log
-                experiment.finished = True
-            else:
-                # Child crashed before completing
-                error_msg = f"ForkError: exited with code {exit_code}"
-                if error_msg not in log:
-                    log = log + error_msg if log else error_msg
-                experiment.error = error_msg
-                experiment.log = log
-                experiment.finished = True
-                experiment.out = experiment_dir
-                # Write error file
-                error_path.write_text(error_msg)
-                finished_marker.touch()
+                        result_value = pickle.load(f)
+                    return FnResult(result=result_value, log=log)
 
-            # Save log file
-            (experiment_dir / "log.out").write_text(log)
+                return FnResult(log=log)
 
 
 class RayExecutor(Executor):
-    """Executor that runs experiments using Ray for distributed execution.
-
-    Ray provides distributed computing capabilities, allowing experiments to run
-    across multiple cores or machines. Ray handles serialization internally
-    (uses cloudpickle under the hood).
+    """Runs the function using Ray for distributed execution.
 
     Args:
-        address: Ray cluster address. Use "auto" to connect to an existing cluster,
-                 or None to start a local Ray instance. Default: None.
-        runtime_env: Runtime environment configuration for distributing code to workers.
-                     Useful for cluster execution. Example:
-                     {"working_dir": ".", "pip": ["pandas"], "excludes": ["*.pt"]}
-        num_cpus: Number of CPUs to use. Default: all available.
-        num_gpus: Number of GPUs to use. Default: all available.
-        **ray_init_kwargs: Additional arguments passed to ray.init().
-
-    Example:
-        # Local execution (default)
-        executor = RayExecutor()
-
-        # Connect to existing cluster with code sync
-        executor = RayExecutor(
-            address="auto",
-            runtime_env={"working_dir": ".", "excludes": ["data/", "*.pt"]}
-        )
-
-        # Specify resources
-        executor = RayExecutor(num_cpus=4, num_gpus=1)
+        address: Ray cluster address. Use ``"auto"`` to connect to an existing
+            cluster, or ``None`` to start a local instance.
+        runtime_env: Runtime environment configuration for distributing code.
+        num_cpus: Number of CPUs to use.
+        num_gpus: Number of GPUs to use.
+        **ray_init_kwargs: Additional arguments passed to ``ray.init()``.
     """
 
     def __init__(
@@ -493,7 +330,6 @@ class RayExecutor(Executor):
 
         self._runtime_env = runtime_env
 
-        # Initialize Ray if not already running
         if not self._ray.is_initialized():
             init_kwargs = {
                 "ignore_reinit_error": True,
@@ -513,88 +349,46 @@ class RayExecutor(Executor):
     def run(
         self,
         fn: Callable,
-        experiment: "Result",
-        deps: "Runs | None",
-        result_path: Path,
-        *,
+        *args: Any,
         capture: bool = True,
-        stash: bool = True,
         snapshot_path: Path | None = None,
-        wants_out: bool = False,
-        wants_deps: bool = False,
-    ) -> None:
-        """Run experiment as a Ray task."""
-        experiment_dir = result_path.parent
-        experiment_dir.mkdir(parents=True, exist_ok=True)
-
+        **kwargs: Any,
+    ) -> FnResult:
         @self._ray.remote
-        def _run_experiment(fn, experiment, deps, result_path_str, capture, wants_out, wants_deps):
-            """Ray remote function to execute experiment."""
+        def _run_fn(fn, args, kwargs, capture):
             import io
             import sys
-            import pickle
             import traceback
-            from pathlib import Path
 
-            result_path = Path(result_path_str)
-            experiment_dir = result_path.parent
-            experiment.out = experiment_dir
             log = ""
-            error_msg = None
-            result_value = None
-
-            # Capture output
             if capture:
                 old_stdout, old_stderr = sys.stdout, sys.stderr
                 sys.stdout = io.StringIO()
                 sys.stderr = io.StringIO()
 
             try:
-                if wants_deps:
-                    result_value = fn(experiment.cfg, experiment.out, deps)
-                elif wants_out:
-                    result_value = fn(experiment.cfg, experiment.out)
+                result_value = fn(*args, **kwargs)
+            except Exception:
+                error_tb = traceback.format_exc()
+                if capture:
+                    log = sys.stdout.getvalue() + sys.stderr.getvalue() + error_tb
+                    sys.stdout, sys.stderr = old_stdout, old_stderr
                 else:
-                    result_value = fn(experiment.cfg)
-            except Exception as e:
-                error_msg = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-            finally:
+                    log = error_tb
+                return {"log": log}
+            else:
                 if capture:
                     log = sys.stdout.getvalue() + sys.stderr.getvalue()
                     sys.stdout, sys.stderr = old_stdout, old_stderr
+                return {"result": result_value, "log": log}
 
-            # Save only the result value
-            if result_value is not None:
-                with open(result_path, "wb") as f:
-                    pickle.dump(result_value, f)
-
-            # Save error if any
-            if error_msg:
-                (experiment_dir / "error.txt").write_text(error_msg)
-
-            # Save log
-            (experiment_dir / "log.out").write_text(log)
-
-            (experiment_dir / ".finished").touch()
-            return {"result": result_value, "error": error_msg, "log": log}
-
-        # Submit task and wait for result
-        future = _run_experiment.remote(fn, experiment, deps, str(result_path), capture, wants_out, wants_deps)
         try:
-            result_data = self._ray.get(future)
-            experiment.result = result_data["result"]
-            experiment.error = result_data["error"]
-            experiment.log = result_data["log"]
-            experiment.finished = True
+            data = self._ray.get(_run_fn.remote(fn, args, kwargs, capture))
+            if "result" in data:
+                return FnResult(result=data["result"], log=data.get("log", ""))
+            return FnResult(log=data.get("log", ""))
         except Exception as e:
-            # Task failed at Ray level
-            error_msg = f"RayError: {e}\n{traceback.format_exc()}"
-            experiment.error = error_msg
-            experiment.log = ""
-            experiment.finished = True
-            (experiment_dir / "error.txt").write_text(error_msg)
-            (experiment_dir / "log.out").write_text("")
-            (experiment_dir / ".finished").touch()
+            return FnResult(log=f"RayError: {e}\n{traceback.format_exc()}")
 
 
 # Registry of built-in executors
@@ -607,19 +401,7 @@ EXECUTORS: dict[str, type[Executor]] = {
 
 
 def get_executor(executor: ExecutorName | Executor) -> Executor:
-    """Get an executor instance from a string name or executor instance.
-
-    Args:
-        executor: Either an executor name ("inline", "subprocess", "fork")
-                  or an Executor instance.
-
-    Returns:
-        An Executor instance.
-
-    Raises:
-        ValueError: If the executor name is not recognized.
-        RuntimeError: If the executor is not available on this platform.
-    """
+    """Get an executor instance from a string name or existing instance."""
     if isinstance(executor, Executor):
         return executor
 

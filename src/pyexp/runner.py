@@ -12,7 +12,7 @@ import re
 import sys
 
 from .config import Config, Runs
-from .executors import Executor, ExecutorName, get_executor
+from .executors import Executor, ExecutorName, FnResult, MISSING, get_executor
 
 if TYPE_CHECKING:
     from .log import Logger
@@ -44,8 +44,15 @@ class Result:
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        state["out"] = None
+        # Convert Path to str so it survives cross-process pickling
+        if state["out"] is not None:
+            state["out"] = str(state["out"])
         return state
+
+    def __setstate__(self, state):
+        if state.get("out") is not None:
+            state["out"] = Path(state["out"])
+        self.__dict__.update(state)
 
 
 _VALID_CONFIG_TYPES = (int, float, str, bool, type(None), Path)
@@ -1156,34 +1163,45 @@ class ExperimentRunner:
                     else:
                         experiment_dir.mkdir(parents=True, exist_ok=True)
 
+                    # Build the callable with the right arguments
+                    if wants_deps:
+                        _fn_args = (config, experiment_dir, deps_runs)
+                    elif wants_out:
+                        _fn_args = (config, experiment_dir)
+                    else:
+                        _fn_args = (config,)
+
                     for attempt in range(max_retries + 1):
-                        exec_instance.run(
+                        fn_result: FnResult = exec_instance.run(
                             fn,
-                            exp_obj,
-                            deps_runs,
-                            result_path,
+                            *_fn_args,
                             capture=capture,
-                            stash=stash,
                             snapshot_path=snapshot_path,
-                            wants_out=wants_out,
-                            wants_deps=wants_deps,
                         )
 
-                        # Reconstruct Result from files
-                        exp_obj = _load_result_from_dir(experiment_dir)
-                        if exp_obj is None:
-                            exp_obj = Result(
-                                cfg=config,
-                                name=config_name,
-                                out=experiment_dir,
-                                error="Failed to load result from experiment directory",
-                                finished=True,
-                            )
+                        # Write experiment artifacts from FnResult
+                        experiment_dir.mkdir(parents=True, exist_ok=True)
+                        if fn_result.ok:
+                            with open(result_path, "wb") as f:
+                                pickle.dump(fn_result.result, f)
+                        else:
+                            (experiment_dir / "error.txt").write_text(fn_result.log)
+                        (experiment_dir / "log.out").write_text(fn_result.log)
+                        (experiment_dir / ".finished").touch()
 
-                        if not exp_obj.error:
+                        exp_obj = Result(
+                            cfg=config,
+                            name=config_name,
+                            out=experiment_dir,
+                            result=fn_result.result if fn_result.ok else None,
+                            error=fn_result.log if not fn_result.ok else None,
+                            log=fn_result.log,
+                            finished=True,
+                        )
+
+                        if fn_result.ok:
                             break
 
-                        error_msg = exp_obj.error or ""
                         remaining = max_retries - attempt
                         retry_info = (
                             f" (retrying, {remaining} left)" if remaining > 0 else ""
@@ -1192,30 +1210,20 @@ class ExperimentRunner:
                             f"\n--- Error in {config_name or 'experiment'}{retry_info} ---",
                             file=sys.stderr,
                         )
-                        print(error_msg, file=sys.stderr)
-                        if exp_obj.log:
-                            print("--- Log output ---", file=sys.stderr)
-                            print(exp_obj.log, file=sys.stderr)
+                        print(fn_result.log, file=sys.stderr)
                         print("---", file=sys.stderr)
 
                         if attempt < max_retries:
                             # Clear previous error files for retry
-                            error_path = experiment_dir / "error.txt"
-                            if error_path.exists():
-                                error_path.unlink()
-                            if result_path.exists():
-                                result_path.unlink()
-                            finished_marker = experiment_dir / ".finished"
-                            if finished_marker.exists():
-                                finished_marker.unlink()
-                            exp_obj = Result(
-                                cfg=config,
-                                name=config_name,
-                                out=experiment_dir,
-                            )
+                            for _p in [
+                                experiment_dir / "error.txt",
+                                result_path,
+                                experiment_dir / ".finished",
+                            ]:
+                                _p.unlink(missing_ok=True)
 
                     completed[config_name] = exp_obj
-                    status = "failed" if exp_obj.error else "passed"
+                    status = "failed" if not fn_result.ok else "passed"
 
             if progress:
                 progress.update(status, config_name)

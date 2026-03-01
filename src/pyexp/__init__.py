@@ -15,6 +15,7 @@ from .experiment import Experiment, experiment
 from .executors import (
     Executor,
     ExecutorName,
+    FnResult,
     ForkExecutor,
     InlineExecutor,
     RayExecutor,
@@ -47,6 +48,7 @@ __all__ = [
     "ExperimentRunner",
     "Experiment",
     "experiment",
+    "FnResult",
     "Executor",
     "ExecutorName",
     "ForkExecutor",
