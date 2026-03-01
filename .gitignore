@@ -11,3 +11,5 @@ wheels/
 
 # Example output
 out/
+
+.snapshot/

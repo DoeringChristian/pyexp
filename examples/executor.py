@@ -10,7 +10,7 @@ def fn():
 
 
 if __name__ == "__main__":
-    ex = pyexp.SubprocessExecutor()
-    res = ex.run(fn, capture=False)
-    print(f"{res.log=}")
-    print(f"{res.ok=}")
+    ex = pyexp.SubprocessExecutor(snapshot=True, capture=False)
+    future = ex.submit(fn)
+    print(f"{future.log=}")
+    print(f"{future.exception()=}")

@@ -1,5 +1,6 @@
 """Utility functions for pyexp."""
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -231,6 +232,38 @@ def _collect_files_by_suffix(
                 files.append((src, rel))
 
     return files
+
+
+def content_hash(
+    root: Path | None = None,
+    suffixes: set[str] | None = None,
+) -> str:
+    """Compute a deterministic SHA-256 hash of all collected source files.
+
+    Hashes each file's relative path and contents so that any change in the
+    file tree produces a different digest.  Files are sorted by relative path
+    for determinism.
+
+    Args:
+        root: Root directory to hash from. Defaults to cwd.
+        suffixes: Set of file suffixes to include (e.g., {".py"}).
+                  If None, uses DEFAULT_PACKAGE_SUFFIXES.
+
+    Returns:
+        Hex digest string.
+    """
+    if root is None:
+        root = Path.cwd()
+
+    files = _collect_files_by_suffix(root, suffixes)
+    files.sort(key=lambda pair: pair[1])
+
+    hasher = hashlib.sha256()
+    for src, rel in files:
+        hasher.update(str(rel).encode())
+        hasher.update(src.read_bytes())
+
+    return hasher.hexdigest()
 
 
 def package_files(

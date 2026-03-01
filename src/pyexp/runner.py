@@ -12,7 +12,7 @@ import re
 import sys
 
 from .config import Config, Runs
-from .executors import Executor, ExecutorName, FnResult, MISSING, get_executor
+from .executors import Executor, ExecutorName, FnFuture, MISSING, get_executor
 
 if TYPE_CHECKING:
     from .log import Logger
@@ -663,19 +663,19 @@ def _print_dependency_graph(configs: list[dict]) -> None:
             print(f"  {name}")
 
 
-def _write_run_dir(experiment_dir, config, commit_hash):
-    """Create the experiment run directory, write config.json, and optionally .commit.
+def _write_run_dir(experiment_dir, config, snapshot_hash):
+    """Create the experiment run directory, write config.json, and optionally .snapshot.
 
     Args:
         experiment_dir: Path to the experiment run directory.
         config: Config object to serialize as config.json.
-        commit_hash: Optional git commit hash to write as .commit.
+        snapshot_hash: Optional content hash to write as .snapshot.
     """
     experiment_dir.mkdir(parents=True, exist_ok=True)
     config_json_path = experiment_dir / "config.json"
     config_json_path.write_text(json.dumps(dict(config), indent=2, default=str))
-    if commit_hash is not None:
-        (experiment_dir / ".commit").write_text(commit_hash)
+    if snapshot_hash is not None:
+        (experiment_dir / ".snapshot").write_text(snapshot_hash)
 
 
 class _ProgressBar:
@@ -789,7 +789,6 @@ class ExperimentRunner:
         executor: ExecutorName | Executor | str = "subprocess",
         capture: bool = True,
         stash: bool = True,
-        snapshot_path: Path | None = None,
         hash_configs: bool = False,
         filter: str | None = None,
         continue_run: str | None = None,
@@ -801,7 +800,6 @@ class ExperimentRunner:
             executor: Execution strategy for running experiments.
             capture: If True, capture output and show progress bar.
             stash: If True, capture git repository state.
-            snapshot_path: Pre-existing snapshot path to use.
             hash_configs: Append config parameter hash to run directory names.
             filter: Regex pattern to filter configs by name.
             continue_run: Timestamp of a previous run to continue.
@@ -826,15 +824,17 @@ class ExperimentRunner:
             exec_instance = RayExecutor(
                 address=address,
                 runtime_env={"working_dir": "."},
+                snapshot=stash,
+                capture=capture,
             )
         else:
-            exec_instance = get_executor(executor)
+            exec_instance = get_executor(executor, snapshot=stash, capture=capture)
 
         base_dir = self._output_dir / self._name
         max_retries = self._retry
 
         # Track snapshot state
-        commit_hash: str | None = None
+        snapshot_hash: str | None = None
 
         # Determine the timestamp
         if continue_run:
@@ -848,15 +848,16 @@ class ExperimentRunner:
                 if not _discover_experiment_dirs(base_dir, timestamp):
                     raise RuntimeError(f"Run not found: {timestamp}")
 
-            # Detect existing snapshot
+            # Detect existing snapshot and seed executor cache
             for exp_dir in _discover_experiment_dirs(base_dir, timestamp):
-                commit_file = exp_dir / ".commit"
-                if commit_file.exists():
-                    prev_commit = commit_file.read_text().strip()
-                    prev_snapshot = base_dir / ".snapshots" / prev_commit
+                snapshot_file = exp_dir / ".snapshot"
+                if snapshot_file.exists():
+                    prev_hash = snapshot_file.read_text().strip()
+                    prev_snapshot = Path.cwd() / ".snapshot" / prev_hash
                     if prev_snapshot.exists():
-                        snapshot_path = prev_snapshot
-                        commit_hash = prev_commit
+                        exec_instance._snapshot_path = prev_snapshot
+                        exec_instance._snapshot_hash = prev_hash
+                        snapshot_hash = prev_hash
                     break
         else:
             timestamp = _generate_timestamp()
@@ -933,28 +934,11 @@ class ExperimentRunner:
             base_dir.mkdir(parents=True, exist_ok=True)
 
             if stash:
-                try:
-                    from .utils import stash_and_snapshot
-                    import tempfile
+                snapshot_hash = exec_instance._snapshot_hash
+                if snapshot_hash is not None:
+                    print(f"Source snapshot: {snapshot_hash[:12]} -> {exec_instance._snapshot_path}")
 
-                    with tempfile.TemporaryDirectory() as tmp:
-                        commit_hash, tmp_snapshot = stash_and_snapshot(
-                            Path(tmp) / "src"
-                        )
-
-                    shared_snapshot = base_dir / ".snapshots" / commit_hash
-                    if not shared_snapshot.exists():
-                        _, snapshot_path = stash_and_snapshot(shared_snapshot)
-                    else:
-                        snapshot_path = shared_snapshot
-
-                    print(f"Source snapshot: {commit_hash[:12]} -> {snapshot_path}")
-                except Exception as e:
-                    print(f"Warning: Could not create source snapshot: {e}")
-                    snapshot_path = None
-                    commit_hash = None
-
-            _save_batch_manifest(base_dir, timestamp, run_dirs, commit=commit_hash)
+            _save_batch_manifest(base_dir, timestamp, run_dirs, commit=snapshot_hash)
 
         # =================================================================
         # Experiment Execution
@@ -1131,7 +1115,7 @@ class ExperimentRunner:
                         _write_run_dir(
                             experiment_dir,
                             dir_to_config_obj[str(experiment_dir)],
-                            commit_hash,
+                            snapshot_hash,
                         )
                     else:
                         experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -1158,7 +1142,7 @@ class ExperimentRunner:
                         _write_run_dir(
                             experiment_dir,
                             dir_to_config_obj[str(experiment_dir)],
-                            commit_hash,
+                            snapshot_hash,
                         )
                     else:
                         experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -1172,34 +1156,31 @@ class ExperimentRunner:
                         _fn_args = (config,)
 
                     for attempt in range(max_retries + 1):
-                        fn_result: FnResult = exec_instance.run(
-                            fn,
-                            *_fn_args,
-                            capture=capture,
-                            snapshot_path=snapshot_path,
-                        )
+                        future: FnFuture = exec_instance.submit(fn, *_fn_args)
 
-                        # Write experiment artifacts from FnResult
+                        ok = future.exception() is None
+
+                        # Write experiment artifacts from FnFuture
                         experiment_dir.mkdir(parents=True, exist_ok=True)
-                        if fn_result.ok:
+                        if ok:
                             with open(result_path, "wb") as f:
-                                pickle.dump(fn_result.result, f)
+                                pickle.dump(future.result(), f)
                         else:
-                            (experiment_dir / "error.txt").write_text(fn_result.log)
-                        (experiment_dir / "log.out").write_text(fn_result.log)
+                            (experiment_dir / "error.txt").write_text(future.log)
+                        (experiment_dir / "log.out").write_text(future.log)
                         (experiment_dir / ".finished").touch()
 
                         exp_obj = Result(
                             cfg=config,
                             name=config_name,
                             out=experiment_dir,
-                            result=fn_result.result if fn_result.ok else None,
-                            error=fn_result.log if not fn_result.ok else None,
-                            log=fn_result.log,
+                            result=future.result() if ok else None,
+                            error=future.log if not ok else None,
+                            log=future.log,
                             finished=True,
                         )
 
-                        if fn_result.ok:
+                        if ok:
                             break
 
                         remaining = max_retries - attempt
@@ -1210,7 +1191,7 @@ class ExperimentRunner:
                             f"\n--- Error in {config_name or 'experiment'}{retry_info} ---",
                             file=sys.stderr,
                         )
-                        print(fn_result.log, file=sys.stderr)
+                        print(future.log, file=sys.stderr)
                         print("---", file=sys.stderr)
 
                         if attempt < max_retries:
@@ -1223,7 +1204,7 @@ class ExperimentRunner:
                                 _p.unlink(missing_ok=True)
 
                     completed[config_name] = exp_obj
-                    status = "failed" if not fn_result.ok else "passed"
+                    status = "failed" if not ok else "passed"
 
             if progress:
                 progress.update(status, config_name)

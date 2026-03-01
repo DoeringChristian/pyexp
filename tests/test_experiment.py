@@ -1472,9 +1472,9 @@ def git_repo_no_commits(tmp_path):
 class TestSourceSnapshotting:
     """Tests for git-based source code snapshotting."""
 
-    def _get_snapshot_dir(self, base_dir):
-        """Helper to find the snapshot directory under .snapshots/."""
-        snapshots_dir = base_dir / ".snapshots"
+    def _get_snapshot_dir(self, base_dir=None):
+        """Helper to find the snapshot directory under cwd/.snapshot/."""
+        snapshots_dir = Path.cwd() / ".snapshot"
         if not snapshots_dir.exists():
             return None
         commit_dirs = list(snapshots_dir.iterdir())
@@ -1513,12 +1513,11 @@ class TestSourceSnapshotting:
         with patch.object(sys, "argv", ["test", "--no-stash"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        base_dir = tmp_path / "my_exp"
-        snapshots_dir = base_dir / ".snapshots"
-        assert not snapshots_dir.exists(), ".snapshots should not be created with --no-stash"
+        snapshots_dir = Path.cwd() / ".snapshot"
+        assert not snapshots_dir.exists(), ".snapshot should not be created with --no-stash"
 
     def test_commit_hash_in_batch_manifest(self, git_repo, tmp_path):
-        """Commit hash should be stored in batch manifest."""
+        """Snapshot hash should be stored in batch manifest."""
         @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
@@ -1533,11 +1532,11 @@ class TestSourceSnapshotting:
         base_dir = tmp_path / "my_exp"
         manifest = list((base_dir / ".batches").glob("*.json"))[0]
         data = json.loads(manifest.read_text())
-        assert "commit" in data, "batch manifest should contain commit hash"
-        assert len(data["commit"]) == 40, "commit hash should be 40 chars"
+        assert "commit" in data, "batch manifest should contain snapshot hash"
+        assert len(data["commit"]) == 64, "snapshot hash should be 64 chars (SHA-256)"
 
     def test_commit_hash_in_each_run_dir(self, git_repo, tmp_path):
-        """Each run directory should have a .commit file with the commit hash."""
+        """Each run directory should have a .snapshot file with the snapshot hash."""
         @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
@@ -1555,9 +1554,9 @@ class TestSourceSnapshotting:
         commit = data["commit"]
 
         for run_name in data["runs"]:
-            commit_file = base_dir / run_name / data["timestamp"] / ".commit"
-            assert commit_file.exists(), f".commit should exist in {run_name} run dir"
-            assert commit_file.read_text() == commit
+            snapshot_file = base_dir / run_name / data["timestamp"] / ".snapshot"
+            assert snapshot_file.exists(), f".snapshot should exist in {run_name} run dir"
+            assert snapshot_file.read_text() == commit
 
     def test_no_commit_hash_without_stash(self, git_repo, tmp_path):
         """Batch manifest should not contain commit hash when stash is disabled."""
@@ -1667,7 +1666,7 @@ class TestSourceSnapshotting:
         assert "(1 configs)" in captured.out
 
     def test_snapshot_works_in_repo_with_no_commits(self, git_repo_no_commits, tmp_path):
-        """Stash and snapshot should work even in a repo with no prior commits."""
+        """Content-hashed snapshot should work even in a repo with no prior commits."""
         @experiment(name="my_exp")
         def my_exp(config):
             return {"value": config["x"]}
@@ -1681,15 +1680,15 @@ class TestSourceSnapshotting:
 
         base_dir = tmp_path / "my_exp"
         snapshot_dir = self._get_snapshot_dir(base_dir)
-        assert snapshot_dir is not None, ".snapshots/<commit>/ should be created even without prior commits"
+        assert snapshot_dir is not None, ".snapshot/<hash>/ should be created even without prior commits"
 
         manifest = list((base_dir / ".batches").glob("*.json"))[0]
         data = json.loads(manifest.read_text())
         assert "commit" in data
-        assert len(data["commit"]) == 40
+        assert len(data["commit"]) == 64
 
-    def test_snapshot_symlinks_submodules(self, git_repo, tmp_path):
-        """Submodule directories in snapshot should be symlinked to originals."""
+    def test_snapshot_copies_submodule_files(self, git_repo, tmp_path):
+        """Submodule .py files should be copied into the snapshot."""
         sub_repo = tmp_path / "sub_repo"
         sub_repo.mkdir()
         _init_git_repo(sub_repo)
@@ -1719,10 +1718,8 @@ class TestSourceSnapshotting:
         base_dir = tmp_path / "out" / "my_exp"
         snapshot_dir = self._get_snapshot_dir(base_dir)
 
-        mylib_in_snapshot = snapshot_dir / "mylib"
-        assert mylib_in_snapshot.is_symlink(), "submodule should be symlinked"
-        assert mylib_in_snapshot.resolve() == (git_repo / "mylib").resolve()
-        assert (mylib_in_snapshot / "lib.py").read_text() == "value = 99"
+        assert (snapshot_dir / "mylib" / "lib.py").exists()
+        assert (snapshot_dir / "mylib" / "lib.py").read_text() == "value = 99"
 
     @pytest.mark.skipif(
         not _can_subprocess_import_pyexp(),
@@ -1730,7 +1727,7 @@ class TestSourceSnapshotting:
     )
     def test_subprocess_executes_from_snapshot(self, git_repo, tmp_path):
         """Subprocess executor should keep cwd at the original repo, not the snapshot."""
-        (git_repo / "marker.txt").write_text("repo_content")
+        (git_repo / "marker.py").write_text("content = 'repo_content'")
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -1738,7 +1735,7 @@ class TestSourceSnapshotting:
             from pathlib import Path
 
             cwd = os.getcwd()
-            marker = Path("marker.txt")
+            marker = Path("marker.py")
             content = marker.read_text() if marker.exists() else "NOT_FOUND"
             return {"cwd": cwd, "marker": content}
 
@@ -1759,15 +1756,15 @@ class TestSourceSnapshotting:
             f"Subprocess should NOT change cwd to snapshot dir {snapshot_dir}, "
             f"but cwd was {result.result['cwd']}"
         )
-        assert result.result["marker"] == "repo_content"
-        assert (snapshot_dir / "marker.txt").read_text() == "repo_content"
+        assert result.result["marker"] == "content = 'repo_content'"
+        assert (snapshot_dir / "marker.py").read_text() == "content = 'repo_content'"
 
     @pytest.mark.skipif(
         not hasattr(os, "fork"), reason="Fork not available on this platform"
     )
     def test_fork_executes_from_snapshot(self, git_repo, tmp_path):
         """Fork executor should keep cwd at the original repo, not the snapshot."""
-        (git_repo / "marker.txt").write_text("repo_content")
+        (git_repo / "marker.py").write_text("content = 'repo_content'")
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -1775,7 +1772,7 @@ class TestSourceSnapshotting:
             from pathlib import Path
 
             cwd = os.getcwd()
-            marker = Path("marker.txt")
+            marker = Path("marker.py")
             content = marker.read_text() if marker.exists() else "NOT_FOUND"
             return {"cwd": cwd, "marker": content}
 
@@ -1796,7 +1793,7 @@ class TestSourceSnapshotting:
             f"Fork should NOT change cwd to snapshot dir {snapshot_dir}, "
             f"but cwd was {result.result['cwd']}"
         )
-        assert result.result["marker"] == "repo_content"
+        assert result.result["marker"] == "content = 'repo_content'"
 
 
 class TestFilterWithDependencies:

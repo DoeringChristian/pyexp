@@ -15,6 +15,7 @@ from .experiment import Experiment, experiment
 from .executors import (
     Executor,
     ExecutorName,
+    FnFuture,
     FnResult,
     ForkExecutor,
     InlineExecutor,
@@ -24,6 +25,7 @@ from .executors import (
 )
 from .utils import (
     checkout_snapshot,
+    content_hash,
     package_files,
     stash,
     stash_and_snapshot,
@@ -39,6 +41,7 @@ __all__ = [
     "merge",
     "register",
     "checkout_snapshot",
+    "content_hash",
     "package_files",
     "stash",
     "stash_and_snapshot",
@@ -48,6 +51,7 @@ __all__ = [
     "ExperimentRunner",
     "Experiment",
     "experiment",
+    "FnFuture",
     "FnResult",
     "Executor",
     "ExecutorName",

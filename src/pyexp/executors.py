@@ -1,8 +1,8 @@
 """Executor classes for running functions in different isolation modes.
 
-Each executor runs ``fn(*args, **kwargs)`` and returns a :class:`FnResult`
-containing the return value and captured output. On error the traceback
-is included in ``log`` and ``result`` is the sentinel :data:`MISSING`.
+Each executor runs ``fn(*args, **kwargs)`` and returns a :class:`FnFuture`
+(a ``concurrent.futures.Future`` subclass) carrying the return value, any
+exception, and captured output.
 
 - InlineExecutor: Runs in the same process (no isolation)
 - SubprocessExecutor: Runs in a subprocess using cloudpickle (cross-platform)
@@ -12,10 +12,12 @@ is included in ``log`` and ``result`` is the sentinel :data:`MISSING`.
 Custom executors can be created by subclassing Executor.
 """
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
+import concurrent.futures
 import io
 import os
 import pickle
@@ -47,6 +49,17 @@ class FnResult:
     @property
     def ok(self) -> bool:
         return self.result is not MISSING
+
+
+class FnFuture(Future):
+    """A ``concurrent.futures.Future`` with an additional ``log`` attribute.
+
+    ``log`` contains captured stdout/stderr (and traceback on error).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.log: str = ""
 
 
 def _build_pythonpath(snapshot_path: Path | None = None) -> str:
@@ -83,34 +96,39 @@ def _build_pythonpath(snapshot_path: Path | None = None) -> str:
     return pythonpath
 
 
-class Executor(ABC):
+class Executor(concurrent.futures.Executor):
     """Abstract base class for executors."""
 
+    def __init__(self, *, snapshot: bool = False, capture: bool = True):
+        self._snapshot = snapshot
+        self._capture = capture
+        self._snapshot_path: Path | None = None
+        self._snapshot_hash: str | None = None
+
+        if snapshot:
+            from .utils import content_hash, package_files
+
+            h = content_hash()
+            dest = Path.cwd() / ".snapshot" / h
+            if not dest.exists():
+                package_files(dest)
+            self._snapshot_path = dest
+            self._snapshot_hash = h
+
     @abstractmethod
-    def run(
-        self,
-        fn: Callable,
-        *args: Any,
-        capture: bool = True,
-        snapshot_path: Path | None = None,
-        **kwargs: Any,
-    ) -> FnResult:
-        """Run *fn* and return a :class:`FnResult`."""
+    def submit(self, fn, /, *args, **kwargs) -> FnFuture:
+        """Submit *fn* for execution and return a :class:`FnFuture`."""
         ...
 
 
 class InlineExecutor(Executor):
     """Runs the function in the same process (no isolation)."""
 
-    def run(
-        self,
-        fn: Callable,
-        *args: Any,
-        capture: bool = True,
-        snapshot_path: Path | None = None,
-        **kwargs: Any,
-    ) -> FnResult:
+    def submit(self, fn, /, *args, **kwargs) -> FnFuture:
+        future = FnFuture()
         log = ""
+        capture = self._capture
+
         if capture:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = io.StringIO()
@@ -118,19 +136,23 @@ class InlineExecutor(Executor):
 
         try:
             result_value = fn(*args, **kwargs)
-        except Exception:
+        except Exception as exc:
             error_tb = traceback.format_exc()
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue() + error_tb
                 sys.stdout, sys.stderr = old_stdout, old_stderr
             else:
                 log = error_tb
-            return FnResult(log=log)
+            future.log = log
+            future.set_exception(exc)
+            return future
         else:
             if capture:
                 log = sys.stdout.getvalue() + sys.stderr.getvalue()
                 sys.stdout, sys.stderr = old_stdout, old_stderr
-            return FnResult(result=result_value, log=log)
+            future.log = log
+            future.set_result(result_value)
+            return future
 
 
 _WORKER_SCRIPT = """\
@@ -149,14 +171,10 @@ except Exception:
 class SubprocessExecutor(Executor):
     """Runs the function in an isolated subprocess using cloudpickle."""
 
-    def run(
-        self,
-        fn: Callable,
-        *args: Any,
-        capture: bool = True,
-        snapshot_path: Path | None = None,
-        **kwargs: Any,
-    ) -> FnResult:
+    def submit(self, fn, /, *args, **kwargs) -> FnFuture:
+        capture = self._capture
+        future = FnFuture()
+
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             result_path = tmp / "result.pkl"
@@ -166,7 +184,7 @@ class SubprocessExecutor(Executor):
                 cloudpickle.dump({"fn": fn, "args": args, "kwargs": kwargs}, f)
 
             env = os.environ.copy()
-            env["PYTHONPATH"] = _build_pythonpath(snapshot_path)
+            env["PYTHONPATH"] = _build_pythonpath(self._snapshot_path)
 
             cmd = [sys.executable, "-c", _WORKER_SCRIPT, str(payload_path), str(result_path)]
 
@@ -199,30 +217,31 @@ class SubprocessExecutor(Executor):
                 proc.wait()
                 log = b"".join(log_parts).decode("utf-8", errors="replace")
 
+            future.log = log
+
             if result_path.exists():
                 with open(result_path, "rb") as f:
                     result_value = pickle.load(f)
-                return FnResult(result=result_value, log=log)
+                future.set_result(result_value)
+            else:
+                # No result file → function raised (traceback is in log)
+                future.set_exception(RuntimeError(log))
 
-            # No result file → function raised (traceback is in log)
-            return FnResult(log=log)
+        return future
 
 
 class ForkExecutor(Executor):
     """Runs the function in a forked process (Unix only, fastest isolation)."""
 
-    def __init__(self):
+    def __init__(self, *, snapshot: bool = False, capture: bool = True):
         if not hasattr(os, "fork"):
             raise RuntimeError("ForkExecutor is only available on Unix systems")
+        super().__init__(snapshot=snapshot, capture=capture)
 
-    def run(
-        self,
-        fn: Callable,
-        *args: Any,
-        capture: bool = True,
-        snapshot_path: Path | None = None,
-        **kwargs: Any,
-    ) -> FnResult:
+    def submit(self, fn, /, *args, **kwargs) -> FnFuture:
+        capture = self._capture
+        future = FnFuture()
+
         with tempfile.TemporaryDirectory() as tmpdir:
             result_path = Path(tmpdir) / "result.pkl"
 
@@ -242,13 +261,13 @@ class ForkExecutor(Executor):
                         sys.stdout = io.TextIOWrapper(os.fdopen(1, "wb", 0), line_buffering=True)
                         sys.stderr = io.TextIOWrapper(os.fdopen(2, "wb", 0), line_buffering=True)
 
-                    if snapshot_path is not None:
+                    if self._snapshot_path is not None:
                         try:
                             from .utils import _find_git_root
 
                             git_root = _find_git_root()
                             git_root_str = str(git_root.resolve())
-                            snapshot_str = str(snapshot_path.resolve())
+                            snapshot_str = str(self._snapshot_path.resolve())
 
                             new_path = []
                             for p in sys.path:
@@ -290,12 +309,16 @@ class ForkExecutor(Executor):
 
                 _, status = os.waitpid(pid, 0)
 
+                future.log = log
+
                 if result_path.exists():
                     with open(result_path, "rb") as f:
                         result_value = pickle.load(f)
-                    return FnResult(result=result_value, log=log)
+                    future.set_result(result_value)
+                else:
+                    future.set_exception(RuntimeError(log))
 
-                return FnResult(log=log)
+        return future
 
 
 class RayExecutor(Executor):
@@ -316,8 +339,11 @@ class RayExecutor(Executor):
         runtime_env: dict | None = None,
         num_cpus: int | None = None,
         num_gpus: int | None = None,
+        snapshot: bool = False,
+        capture: bool = True,
         **ray_init_kwargs,
     ):
+        super().__init__(snapshot=snapshot, capture=capture)
         try:
             import ray
 
@@ -346,14 +372,9 @@ class RayExecutor(Executor):
 
             self._ray.init(**init_kwargs)
 
-    def run(
-        self,
-        fn: Callable,
-        *args: Any,
-        capture: bool = True,
-        snapshot_path: Path | None = None,
-        **kwargs: Any,
-    ) -> FnResult:
+    def submit(self, fn, /, *args, **kwargs) -> FnFuture:
+        capture = self._capture
+
         @self._ray.remote
         def _run_fn(fn, args, kwargs, capture):
             import io
@@ -382,13 +403,19 @@ class RayExecutor(Executor):
                     sys.stdout, sys.stderr = old_stdout, old_stderr
                 return {"result": result_value, "log": log}
 
+        future = FnFuture()
         try:
             data = self._ray.get(_run_fn.remote(fn, args, kwargs, capture))
+            future.log = data.get("log", "")
             if "result" in data:
-                return FnResult(result=data["result"], log=data.get("log", ""))
-            return FnResult(log=data.get("log", ""))
+                future.set_result(data["result"])
+            else:
+                future.set_exception(RuntimeError(future.log))
         except Exception as e:
-            return FnResult(log=f"RayError: {e}\n{traceback.format_exc()}")
+            future.log = f"RayError: {e}\n{traceback.format_exc()}"
+            future.set_exception(e)
+
+        return future
 
 
 # Registry of built-in executors
@@ -400,7 +427,7 @@ EXECUTORS: dict[str, type[Executor]] = {
 }
 
 
-def get_executor(executor: ExecutorName | Executor) -> Executor:
+def get_executor(executor: ExecutorName | Executor, *, snapshot: bool = False, capture: bool = True) -> Executor:
     """Get an executor instance from a string name or existing instance."""
     if isinstance(executor, Executor):
         return executor
@@ -409,6 +436,6 @@ def get_executor(executor: ExecutorName | Executor) -> Executor:
         if executor not in EXECUTORS:
             available = ", ".join(EXECUTORS.keys())
             raise ValueError(f"Unknown executor '{executor}'. Available: {available}")
-        return EXECUTORS[executor]()
+        return EXECUTORS[executor](snapshot=snapshot, capture=capture)
 
     raise TypeError(f"executor must be str or Executor, got {type(executor).__name__}")
