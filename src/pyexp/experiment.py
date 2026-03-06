@@ -129,6 +129,7 @@ class Experiment:
         retry: int = 4,
         stash: bool = True,
         hash_configs: bool = False,
+        max_workers: int = 1,
     ):
         import inspect
 
@@ -139,6 +140,7 @@ class Experiment:
         self._retry_default = retry
         self._stash_default = stash
         self._hash_configs_default = hash_configs
+        self._max_workers_default = max_workers
         self._configs_fn: Callable[[], list[dict]] | None = None
 
         # Detect signature
@@ -200,6 +202,7 @@ class Experiment:
         retry: int | None = None,
         stash: bool | None = None,
         hash_configs: bool | None = None,
+        max_workers: int | None = None,
     ) -> None:
         """Full pipeline: parse CLI args, create runner, submit, execute.
 
@@ -258,6 +261,12 @@ class Experiment:
         else:
             enable_hash_configs = self._hash_configs_default
 
+        # Max workers: run() arg > constructor arg
+        if max_workers is not None:
+            resolved_max_workers = max_workers
+        else:
+            resolved_max_workers = self._max_workers_default
+
         if configs_fn is None:
             raise RuntimeError(
                 "No configs function provided. "
@@ -303,6 +312,7 @@ class Experiment:
             hash_configs=enable_hash_configs,
             filter=args.filter,
             continue_run=args.continue_run,
+            max_workers=resolved_max_workers,
         )
 
     def __getitem__(self, key):
@@ -323,6 +333,7 @@ def experiment(
     retry: int = 4,
     stash: bool = True,
     hash_configs: bool = False,
+    max_workers: int = 1,
 ) -> "Experiment | Callable[[Callable[[dict], Any]], Experiment]":
     """Decorator to create an Experiment from a function.
 
@@ -374,6 +385,7 @@ def experiment(
             retry=retry,
             stash=stash,
             hash_configs=hash_configs,
+            max_workers=max_workers,
         )
 
         # Copy function metadata for nice repr

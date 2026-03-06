@@ -793,6 +793,7 @@ class ExperimentRunner:
         filter: str | None = None,
         continue_run: str | None = None,
         deps_finished_only: bool = False,
+        max_workers: int = 1,
     ) -> None:
         """Execute all submitted experiments.
 
@@ -826,9 +827,12 @@ class ExperimentRunner:
                 runtime_env={"working_dir": "."},
                 snapshot=stash,
                 capture=capture,
+                max_workers=max_workers,
             )
         else:
-            exec_instance = get_executor(executor, snapshot=stash, capture=capture)
+            exec_instance = get_executor(
+                executor, snapshot=stash, capture=capture, max_workers=max_workers
+            )
 
         base_dir = self._output_dir / self._name
         max_retries = self._retry
@@ -872,7 +876,9 @@ class ExperimentRunner:
 
         # Discover finished experiments from previous batches on disk.
         # Used for cross-batch dependency validation and resolution.
-        _disk_dirs = _discover_all_experiments_latest(base_dir, finished_only=deps_finished_only)
+        _disk_dirs = _discover_all_experiments_latest(
+            base_dir, finished_only=deps_finished_only
+        )
         _disk_configs_by_name: dict[str, tuple[dict, Path]] = {}
         for _d in _disk_dirs:
             _cfg = json.loads((_d / "config.json").read_text())
@@ -936,7 +942,9 @@ class ExperimentRunner:
             if stash:
                 snapshot_hash = exec_instance._snapshot_hash
                 if snapshot_hash is not None:
-                    print(f"Source snapshot: {snapshot_hash[:12]} -> {exec_instance._snapshot_path}")
+                    print(
+                        f"Source snapshot: {snapshot_hash[:12]} -> {exec_instance._snapshot_path}"
+                    )
 
             _save_batch_manifest(base_dir, timestamp, run_dirs, commit=snapshot_hash)
 

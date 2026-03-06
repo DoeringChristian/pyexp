@@ -6,11 +6,14 @@ import pyexp
 
 def fn():
     print("test")
-    signal.signal(SIGSEGV)
+
+    return "test"
 
 
 if __name__ == "__main__":
-    ex = pyexp.SubprocessExecutor(snapshot=True, capture=False)
+    ex = pyexp.SshExecutor(snapshot=True, capture=False, hosts=["doeringc@rgllab"])
     future = ex.submit(fn)
+    res = future.result()
+    print(f"{res=}")
     print(f"{future.log=}")
     print(f"{future.exception()=}")
