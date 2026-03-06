@@ -848,15 +848,32 @@ class SshExecutor(Executor):
                 )
                 self._run_scp(scp_cmd, check=True)
 
-            # Copy requirements/manifest files if provisioner needs them
+            # Copy project files needed by the provisioner
             if self._provision is not None:
-                for attr in ("requirements", "manifest"):
-                    fname = getattr(self._provision, attr, None)
-                    if fname and Path(fname).exists():
-                        self._run_scp(
-                            self._scp_to(fname, host.host, f"{work_dir}/{fname}"),
-                            check=True,
-                        )
+                # Pixi needs the whole project tree (path deps in manifest)
+                if getattr(self._provision, "manifest", None) is not None:
+                    scp_cmd = (
+                        ["scp", "-r"]
+                        + self._ssh_options
+                        + [str(Path.cwd()) + "/.", f"{host.host}:{work_dir}"]
+                    )
+                    self._run_scp(scp_cmd, check=True)
+                else:
+                    # Copy specific files for non-pixi provisioners
+                    for attr in ("requirements",):
+                        fname = getattr(self._provision, attr, None)
+                        if fname and Path(fname).exists():
+                            self._run_scp(
+                                self._scp_to(fname, host.host, f"{work_dir}/{fname}"),
+                                check=True,
+                            )
+                    # Common project metadata
+                    for extra in ("pyproject.toml",):
+                        if Path(extra).exists():
+                            self._run_scp(
+                                self._scp_to(extra, host.host, f"{work_dir}/{extra}"),
+                                check=True,
+                            )
 
                 for cmd in self._provision.provision_commands(work_dir):
                     self._run_ssh(host.host, cmd, check=True)
