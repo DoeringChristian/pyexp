@@ -934,12 +934,12 @@ class SshExecutor(Executor):
 
                 # Determine python executable
                 provision = self._provision
-                if provision is not None and hasattr(provision, "venv_path"):
-                    venv_path = getattr(provision, "venv_path")
+                venv_path = getattr(provision, "venv_path", None) if provision else None
+                pixi_env = getattr(provision, "environment", None) if provision else None
+                if venv_path:
                     python_bin = f"{work_dir}/{venv_path}/bin/python"
-                elif provision is not None and hasattr(provision, "environment"):
-                    env = getattr(provision, "environment")
-                    env_flag = f" -e {shlex.quote(env)}" if env else ""
+                elif provision is not None and getattr(provision, "manifest", None) is not None:
+                    env_flag = f" -e {shlex.quote(pixi_env)}" if pixi_env else ""
                     python_bin = f"pixi run{env_flag} python"
                 else:
                     python_bin = "python3"
