@@ -1033,3 +1033,56 @@ def get_executor(
         )
 
     raise TypeError(f"executor must be str or Executor, got {type(executor).__name__}")
+
+
+# --- Default executor & @async_fn decorator ---
+
+_default_executor: Executor | None = None
+
+
+def set_default_executor(executor: Executor | None) -> None:
+    """Set the global default executor used by :func:`async_fn` decorated functions."""
+    global _default_executor
+    _default_executor = executor
+
+
+def get_default_executor() -> Executor:
+    """Return the global default executor, creating a :class:`SubprocessExecutor` if unset."""
+    global _default_executor
+    if _default_executor is None:
+        _default_executor = SubprocessExecutor()
+    return _default_executor
+
+
+import functools
+
+
+def async_fn(fn: Callable | None = None, *, executor: Executor | None = None) -> Callable:
+    """Decorator that submits calls to an executor, returning a :class:`FnFuture`.
+
+    Can be used bare or with arguments::
+
+        @async_fn
+        def compute(x):
+            return x ** 2
+
+        @async_fn(executor=my_executor)
+        def compute(x):
+            return x ** 2
+
+    When called, the decorated function submits itself on *executor* (or the
+    global default executor) and returns a :class:`FnFuture`.
+    """
+    def _wrap(fn: Callable) -> Callable:
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs) -> FnFuture:
+            ex = executor or get_default_executor()
+            return ex.submit(fn, *args, **kwargs)
+        wrapper._original = fn
+        return wrapper
+
+    if fn is not None:
+        # Used as @async_fn without parens
+        return _wrap(fn)
+    # Used as @async_fn(...) with parens
+    return _wrap

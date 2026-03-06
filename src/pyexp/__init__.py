@@ -27,7 +27,10 @@ from .executors import (
     SshHost,
     SubprocessExecutor,
     UvProvisioner,
+    async_fn,
+    get_default_executor,
     get_executor,
+    set_default_executor,
 )
 from .utils import (
     checkout_snapshot,
@@ -71,7 +74,10 @@ __all__ = [
     "SshHost",
     "SubprocessExecutor",
     "UvProvisioner",
+    "async_fn",
+    "get_default_executor",
     "get_executor",
+    "set_default_executor",
     "LazyFigure",
     "Logger",
     "LogReader",

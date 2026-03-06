@@ -6,7 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from pyexp.executors import FnFuture, SubprocessExecutor, InlineExecutor, ForkExecutor
+from pyexp.executors import (
+    FnFuture,
+    SubprocessExecutor,
+    InlineExecutor,
+    ForkExecutor,
+    async_fn,
+    get_default_executor,
+    set_default_executor,
+)
 
 
 def _add(a, b):
@@ -216,3 +224,103 @@ def test_error_handling_async(executor_cls):
     assert exc is not None
     assert f.log  # log should have traceback info
     executor.shutdown()
+
+
+# --- @async_fn decorator tests ---
+
+
+class TestAsyncFnDecorator:
+    def setup_method(self):
+        # Reset global executor before each test
+        set_default_executor(None)
+
+    def teardown_method(self):
+        set_default_executor(None)
+
+    def test_bare_decorator(self):
+        """@async_fn without parens wraps the function."""
+        @async_fn
+        def compute(x):
+            return x * 2
+
+        f = compute(5)
+        assert isinstance(f, FnFuture)
+        assert f.result(timeout=10) == 10
+
+    def test_decorator_with_parens(self):
+        """@async_fn() with empty parens works."""
+        @async_fn()
+        def compute(x):
+            return x + 1
+
+        f = compute(3)
+        assert isinstance(f, FnFuture)
+        assert f.result(timeout=10) == 4
+
+    def test_decorator_with_explicit_executor(self):
+        """@async_fn(executor=...) uses the provided executor."""
+        ex = InlineExecutor()
+
+        @async_fn(executor=ex)
+        def compute(x):
+            return x ** 2
+
+        f = compute(4)
+        assert f.result(timeout=10) == 16
+
+    def test_default_executor_is_subprocess(self):
+        """Default executor is a SubprocessExecutor when unset."""
+        ex = get_default_executor()
+        assert isinstance(ex, SubprocessExecutor)
+
+    def test_set_default_executor(self):
+        """set_default_executor changes the global default."""
+        ex = InlineExecutor()
+        set_default_executor(ex)
+        assert get_default_executor() is ex
+
+    def test_uses_global_default(self):
+        """Decorated function uses the globally set executor."""
+        ex = InlineExecutor()
+        set_default_executor(ex)
+
+        @async_fn
+        def compute(x):
+            return x + 10
+
+        f = compute(5)
+        assert f.result(timeout=10) == 15
+
+    def test_preserves_function_name(self):
+        """Wrapper preserves the original function name."""
+        @async_fn
+        def my_function():
+            pass
+
+        assert my_function.__name__ == "my_function"
+
+    def test_original_accessible(self):
+        """Original function is accessible via _original."""
+        @async_fn
+        def compute(x):
+            return x
+
+        assert compute._original(42) == 42
+
+    def test_kwargs(self):
+        """Keyword arguments are forwarded."""
+        @async_fn
+        def greet(name, greeting="hello"):
+            return f"{greeting} {name}"
+
+        f = greet("world", greeting="hi")
+        assert f.result(timeout=10) == "hi world"
+
+    def test_error_propagation(self):
+        """Errors from the decorated function are captured."""
+        @async_fn
+        def boom():
+            raise ValueError("kaboom")
+
+        f = boom()
+        assert f.exception(timeout=10) is not None
