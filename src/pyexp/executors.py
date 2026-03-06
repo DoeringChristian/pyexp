@@ -940,7 +940,7 @@ class SshExecutor(Executor):
                     python_bin = f"{work_dir}/{venv_path}/bin/python"
                 elif provision is not None and getattr(provision, "manifest", None) is not None:
                     env_flag = f" -e {shlex.quote(pixi_env)}" if pixi_env else ""
-                    python_bin = f"pixi run{env_flag} python"
+                    python_bin = f"$HOME/.pixi/bin/pixi run{env_flag} python"
                 else:
                     python_bin = "python3"
 
