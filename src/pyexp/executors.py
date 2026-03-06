@@ -171,8 +171,12 @@ class PixiProvisioner:
     extra_packages: list[str] = field(default_factory=list)
 
     def provision_commands(self, work_dir: str) -> list[str]:
-        cmds = []
-        install_cmd = f"cd {work_dir} && pixi install"
+        pixi_prefix = 'export PATH="$HOME/.pixi/bin:$PATH" && '
+        cmds = [
+            # Bootstrap pixi if not already installed
+            'command -v pixi >/dev/null 2>&1 || curl -fsSL https://pixi.sh/install.sh | bash',
+        ]
+        install_cmd = f"{pixi_prefix}cd {work_dir} && pixi install"
         if self.manifest:
             install_cmd += f" --manifest-path {shlex.quote(self.manifest)}"
         if self.environment:
@@ -181,7 +185,7 @@ class PixiProvisioner:
 
         packages = ["cloudpickle"] + self.extra_packages
         if packages:
-            add_cmd = f"cd {work_dir} && pixi add {' '.join(shlex.quote(p) for p in packages)}"
+            add_cmd = f"{pixi_prefix}cd {work_dir} && pixi add {' '.join(shlex.quote(p) for p in packages)}"
             if self.environment:
                 add_cmd += f" -e {shlex.quote(self.environment)}"
             cmds.append(add_cmd)

@@ -111,21 +111,22 @@ class TestPixiProvisioner:
     def test_basic_commands(self):
         p = PixiProvisioner()
         cmds = p.provision_commands("/tmp/work")
-        assert len(cmds) == 2  # install + add cloudpickle
-        assert "pixi install" in cmds[0]
-        assert "pixi add" in cmds[1]
-        assert "cloudpickle" in cmds[1]
+        assert len(cmds) == 3  # bootstrap + install + add cloudpickle
+        assert "install.sh" in cmds[0]  # pixi bootstrap
+        assert "pixi install" in cmds[1]
+        assert "pixi add" in cmds[2]
+        assert "cloudpickle" in cmds[2]
 
     def test_with_manifest(self):
         p = PixiProvisioner(manifest="pixi.toml")
         cmds = p.provision_commands("/tmp/work")
-        assert "--manifest-path pixi.toml" in cmds[0]
+        assert "--manifest-path pixi.toml" in cmds[1]
 
     def test_with_environment(self):
         p = PixiProvisioner(environment="gpu")
         cmds = p.provision_commands("/tmp/work")
-        assert "-e gpu" in cmds[0]
         assert "-e gpu" in cmds[1]
+        assert "-e gpu" in cmds[2]
 
     def test_extra_packages(self):
         p = PixiProvisioner(extra_packages=["numpy"])
