@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Protocol, runtime_checkable
 import concurrent.futures
 import io
+import logging
 import os
 import pickle
 import shlex
@@ -29,6 +30,8 @@ import tempfile
 import threading
 import traceback
 import uuid
+
+log = logging.getLogger(__name__)
 
 import cloudpickle
 
@@ -770,35 +773,41 @@ class SshExecutor(Executor):
     def _run_ssh(
         self, host: str, command: str, *, check: bool = False
     ) -> subprocess.CompletedProcess:
+        log.debug("ssh %s: %s", host, command)
         result = subprocess.run(
             self._ssh_cmd(host, command),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        if check and result.returncode != 0:
-            raise RuntimeError(
-                f"SSH command failed on {host} (rc={result.returncode}):\n"
-                f"  command: {command}\n"
-                f"  output: {result.stdout}"
-            )
+        if result.returncode != 0:
+            log.warning("ssh %s failed (rc=%d): %s", host, result.returncode, result.stdout.rstrip())
+            if check:
+                raise RuntimeError(
+                    f"SSH command failed on {host} (rc={result.returncode}):\n"
+                    f"  command: {command}\n"
+                    f"  output: {result.stdout}"
+                )
         return result
 
     def _run_scp(
         self, cmd: list[str], *, check: bool = False
     ) -> subprocess.CompletedProcess:
+        log.debug("scp: %s", " ".join(cmd))
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
         )
-        if check and result.returncode != 0:
-            raise RuntimeError(
-                f"SCP command failed (rc={result.returncode}):\n"
-                f"  command: {' '.join(cmd)}\n"
-                f"  output: {result.stdout}"
-            )
+        if result.returncode != 0:
+            log.warning("scp failed (rc=%d): %s", result.returncode, result.stdout.rstrip())
+            if check:
+                raise RuntimeError(
+                    f"SCP command failed (rc={result.returncode}):\n"
+                    f"  command: {' '.join(cmd)}\n"
+                    f"  output: {result.stdout}"
+                )
         return result
 
     # --- Host selection ---
@@ -814,6 +823,7 @@ class SshExecutor(Executor):
                 host = self._hosts[idx]
                 if self._semaphores[host.host].acquire(blocking=False):
                     self._host_index = (idx + 1) % n
+                    log.debug("acquired host %s", host.host)
                     return host
             # None available non-blocking; pick next in rotation and block
             block_idx = self._host_index
@@ -821,11 +831,14 @@ class SshExecutor(Executor):
             block_host = self._hosts[block_idx]
 
         # Block outside the lock
+        log.debug("waiting for host %s", block_host.host)
         self._semaphores[block_host.host].acquire(blocking=True)
+        log.debug("acquired host %s (after wait)", block_host.host)
         return block_host
 
     def _release_host(self, host: SshHost) -> None:
         self._semaphores[host.host].release()
+        log.debug("released host %s", host.host)
 
     # --- Provisioning ---
 
@@ -836,11 +849,13 @@ class SshExecutor(Executor):
         with self._provision_lock:
             if self._provisioned.get(host.host):
                 return
+            log.info("provisioning %s", host.host)
             work_dir = self._work_dir_for(host)
             self._run_ssh(host.host, f"mkdir -p {shlex.quote(work_dir)}", check=True)
 
             # Copy snapshot if enabled
             if self._snapshot_path is not None:
+                log.info("copying snapshot to %s:%s", host.host, work_dir)
                 scp_cmd = (
                     ["scp", "-r"]
                     + self._ssh_options
@@ -852,6 +867,7 @@ class SshExecutor(Executor):
             if self._provision is not None:
                 # Pixi needs the whole project tree (path deps in manifest)
                 if getattr(self._provision, "manifest", None) is not None:
+                    log.info("copying project tree to %s:%s", host.host, work_dir)
                     scp_cmd = (
                         ["scp", "-r"]
                         + self._ssh_options
@@ -863,6 +879,7 @@ class SshExecutor(Executor):
                     for attr in ("requirements",):
                         fname = getattr(self._provision, attr, None)
                         if fname and Path(fname).exists():
+                            log.debug("copying %s to %s:%s", fname, host.host, work_dir)
                             self._run_scp(
                                 self._scp_to(fname, host.host, f"{work_dir}/{fname}"),
                                 check=True,
@@ -870,15 +887,18 @@ class SshExecutor(Executor):
                     # Common project metadata
                     for extra in ("pyproject.toml",):
                         if Path(extra).exists():
+                            log.debug("copying %s to %s:%s", extra, host.host, work_dir)
                             self._run_scp(
                                 self._scp_to(extra, host.host, f"{work_dir}/{extra}"),
                                 check=True,
                             )
 
+                log.info("running provision commands on %s", host.host)
                 for cmd in self._provision.provision_commands(work_dir):
                     self._run_ssh(host.host, cmd, check=True)
 
             self._provisioned[host.host] = True
+            log.info("provisioned %s", host.host)
 
     # --- Submit ---
 
@@ -894,6 +914,7 @@ class SshExecutor(Executor):
                 self._provision_host(host)
                 work_dir = self._work_dir_for(host)
                 task_dir = f"{work_dir}/tasks/{task_id}"
+                log.info("task %s: submitting to %s", task_id, host.host)
                 self._run_ssh(host.host, f"mkdir -p {shlex.quote(task_dir)}")
 
                 # Serialize payload
@@ -944,9 +965,10 @@ class SshExecutor(Executor):
                 )
                 remote_cmd = " && ".join(parts)
 
+                log.debug("task %s: executing on %s", task_id, host.host)
                 proc = self._run_ssh(host.host, remote_cmd)
-                log = proc.stdout or ""
-                future.log = log
+                output = proc.stdout or ""
+                future.log = output
 
                 # Download result
                 result_local = os.path.join(tmpdir, "result.pkl")
@@ -958,8 +980,10 @@ class SshExecutor(Executor):
                     with open(result_local, "rb") as f:
                         result_value = pickle.load(f)
                     future.set_result(result_value)
+                    log.info("task %s: completed on %s", task_id, host.host)
                 else:
-                    future.set_exception(RuntimeError(log))
+                    future.set_exception(RuntimeError(output))
+                    log.warning("task %s: failed on %s", task_id, host.host)
 
                 # Cleanup remote task dir
                 self._run_ssh(host.host, f"rm -rf {shlex.quote(task_dir)}")
@@ -967,6 +991,7 @@ class SshExecutor(Executor):
                 if not future.done():
                     future.log = traceback.format_exc()
                     future.set_exception(exc)
+                log.error("task %s: exception: %s", task_id, exc)
             finally:
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 self._release_host(host)
