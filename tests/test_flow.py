@@ -5,7 +5,7 @@ import pytest
 import pyexp
 from pyexp.database import FileDatabase, set_default_database
 from pyexp.executors import InlineExecutor, set_default_executor
-from pyexp.flow import Flow
+from pyexp.flow import Flow, FlowResult
 from pyexp.task import Task, clear_task_registry
 
 
@@ -71,7 +71,8 @@ def test_run_builds_and_evaluates_dag(monkeypatch):
         double(source())
 
     result = my_flow.run()
-    assert result == 20
+    assert isinstance(result, FlowResult)
+    assert result[-1].result == 20
 
 
 def test_run_no_return_evaluates_all(monkeypatch):
@@ -123,7 +124,7 @@ def test_run_ignores_tasks_created_before_flow(monkeypatch):
         real()
 
     result = my_flow.run()
-    assert result == "real"
+    assert result[0].result == "real"
     assert stray_count == 0  # stray was never executed
 
 
@@ -139,7 +140,7 @@ def test_run_with_kwargs(monkeypatch):
         return greet(name)
 
     result = my_flow.run(name="alice")
-    assert result == "hello alice"
+    assert result[-1].result == "hello alice"
 
 
 def test_run_cli_overrides_defaults(monkeypatch):
@@ -154,7 +155,7 @@ def test_run_cli_overrides_defaults(monkeypatch):
         return greet(name)
 
     result = my_flow.run()
-    assert result == "hello bob"
+    assert result[-1].result == "hello bob"
 
 
 def test_run_cli_overrides_run_kwargs(monkeypatch):
@@ -169,7 +170,7 @@ def test_run_cli_overrides_run_kwargs(monkeypatch):
         return greet(name)
 
     result = my_flow.run(name="override")
-    assert result == "hello cli"
+    assert result[-1].result == "hello cli"
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +194,8 @@ def test_multiple_roots_returns_tuple(monkeypatch):
         return a(), b()
 
     result = my_flow.run()
-    assert result == (1, 2)
+    assert result[0].result == 1
+    assert result[1].result == 2
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +234,7 @@ def test_spin_reruns_target_loads_others(monkeypatch, tmp_path):
     # Spin: only re-run double, load source from cache
     monkeypatch.setattr("sys.argv", ["test", "--spin", "double"])
     result = my_flow.run()
-    assert result == 20
+    assert result[-1].result == 20
     assert call_counts["source"] == 0  # loaded from cache
     assert call_counts["double"] == 1  # re-executed
 
@@ -338,7 +340,7 @@ def test_cli_int_param(monkeypatch):
         return repeat(count)
 
     result = my_flow.run()
-    assert result == "xxxxx"
+    assert result[-1].result == "xxxxx"
 
 
 def test_cli_bool_flag(monkeypatch):
@@ -353,7 +355,7 @@ def test_cli_bool_flag(monkeypatch):
         return log(verbose)
 
     result = my_flow.run()
-    assert result == "verbose"
+    assert result[-1].result == "verbose"
 
 
 def test_cli_no_bool_flag(monkeypatch):
@@ -368,4 +370,166 @@ def test_cli_no_bool_flag(monkeypatch):
         return log(verbose)
 
     result = my_flow.run()
-    assert result == "quiet"
+    assert result[-1].result == "quiet"
+
+
+# ---------------------------------------------------------------------------
+# FlowResult
+# ---------------------------------------------------------------------------
+
+
+def test_flow_result_int_index(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def first():
+        return "a"
+
+    @pyexp.task
+    def second(x):
+        return "b"
+
+    @pyexp.flow
+    def my_flow():
+        second(first())
+
+    result = my_flow.run()
+    assert isinstance(result, FlowResult)
+    assert result[0].result == "a"
+    assert result[1].result == "b"
+    assert result[-1].result == "b"
+
+
+def test_flow_result_str_index_by_name(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def compute(x):
+        return x * 2
+
+    @pyexp.flow
+    def my_flow():
+        compute(1).name("pretrain")
+        compute(2).name("finetune")
+
+    result = my_flow.run()
+    assert result["pretrain"].result == 2
+    assert result["finetune"].result == 4
+
+
+def test_flow_result_str_index_by_fn_name(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def alpha():
+        return 10
+
+    @pyexp.task
+    def beta(x):
+        return x + 1
+
+    @pyexp.flow
+    def my_flow():
+        beta(alpha())
+
+    result = my_flow.run()
+    assert result["alpha"].result == 10
+    assert result["beta"].result == 11
+
+
+def test_flow_result_str_regex_multiple_matches(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def step(tag):
+        return tag
+
+    @pyexp.flow
+    def my_flow():
+        step("a").name("train_phase1")
+        step("b").name("train_phase2")
+        step("c").name("eval_final")
+
+    result = my_flow.run()
+    sub = result["train.*"]
+    assert isinstance(sub, FlowResult)
+    assert len(sub) == 2
+    assert sub[0].result == "a"
+    assert sub[1].result == "b"
+
+
+def test_flow_result_str_no_match(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def compute():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        compute()
+
+    result = my_flow.run()
+    with pytest.raises(KeyError, match="No task matching"):
+        result["nonexistent"]
+
+
+def test_flow_result_len_and_iter(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def val(x):
+        return x
+
+    @pyexp.flow
+    def my_flow():
+        val(1).name("one")
+        val(2).name("two")
+        val(3).name("three")
+
+    result = my_flow.run()
+    assert len(result) == 3
+    results = [t.result for t in result]
+    assert results == [1, 2, 3]
+
+
+def test_flow_result_repr(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def val():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        val().name("my_task")
+
+    result = my_flow.run()
+    r = repr(result)
+    assert "FlowResult(1 tasks)" in r
+    assert "my_task" in r
+
+
+def test_task_result_property_before_eval():
+    @pyexp.task
+    def val():
+        return 1
+
+    t = val()
+    with pytest.raises(RuntimeError, match="not been evaluated"):
+        t.result
+
+
+def test_task_result_property_after_eval(monkeypatch):
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def val():
+        return 42
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    result = my_flow.run()
+    assert result[0].result == 42

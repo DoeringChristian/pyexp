@@ -1,6 +1,9 @@
 import pyexp
 
 
+def test(): ...
+
+
 @pyexp.task
 def task1():
     return "test"
@@ -8,6 +11,7 @@ def task1():
 
 @pyexp.task
 def task2(t1):
+    test("test")
     print(f"{t1=}")
     return f"task2({t1})"
 

@@ -11,13 +11,53 @@ from __future__ import annotations
 
 import argparse
 import inspect
+import re
 import sys
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .executors import Executor, get_default_executor, get_executor
 from .task import Task, _collect_dag, _eval_tasks, _resolve_args, _save_task_result, _task_registry, _topo_sort, clear_task_registry
 
 _NOT_SET = object()  # sentinel to distinguish "not provided on CLI" from argparse defaults
+
+
+def _task_label(t: Task) -> str:
+    """Return the task's explicit name if set, otherwise the function name."""
+    return t._name or t._fn.__name__
+
+
+class FlowResult:
+    """Indexable collection of evaluated tasks from a flow run."""
+
+    def __init__(self, tasks: list[Task]) -> None:
+        self._tasks = tasks
+
+    def __getitem__(self, key: int | str) -> Task | FlowResult:
+        if isinstance(key, int):
+            return self._tasks[key]
+        if isinstance(key, str):
+            matches = [t for t in self._tasks if re.search(key, _task_label(t))]
+            if not matches:
+                available = sorted({_task_label(t) for t in self._tasks})
+                raise KeyError(f"No task matching '{key}'. Available: {available}")
+            if len(matches) == 1:
+                return matches[0]
+            return FlowResult(matches)
+        raise TypeError(f"FlowResult indices must be int or str, not {type(key).__name__}")
+
+    def __len__(self) -> int:
+        return len(self._tasks)
+
+    def __iter__(self) -> Iterator[Task]:
+        return iter(self._tasks)
+
+    def __repr__(self) -> str:
+        lines = [f"FlowResult({len(self._tasks)} tasks):"]
+        for t in self._tasks:
+            label = _task_label(t)
+            status = "evaluated" if t._evaluated else "pending"
+            lines.append(f"  {label} [{t._hash}] {status}")
+        return "\n".join(lines)
 
 
 class Flow:
@@ -66,8 +106,7 @@ class Flow:
         else:
             _eval_tasks(root_list, executor)
 
-        results = tuple(t._result for t in root_list)
-        return results[0] if len(results) == 1 else results
+        return FlowResult(all_tasks)
 
     def _parse_args(self) -> argparse.Namespace:
         parser = argparse.ArgumentParser(description=f"Flow: {self.name}")
@@ -124,11 +163,6 @@ def flow(fn: Callable | None = None, *, name: str | None = None) -> Flow | Calla
     if fn is not None:
         return _wrap(fn)
     return _wrap
-
-
-def _task_label(t: Task) -> str:
-    """Return the task's explicit name if set, otherwise the function name."""
-    return t._name or t._fn.__name__
 
 
 def _spin_eval(roots: list[Task], spin_name: str, executor: Executor | None = None) -> None:

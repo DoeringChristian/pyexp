@@ -53,7 +53,7 @@ from .task import (
     eval,
     clear_task_registry,
 )
-from .flow import Flow, flow
+from .flow import Flow, FlowResult, flow
 from .log import LazyFigure, Logger, LogReader
 
 __all__ = [
@@ -106,5 +106,6 @@ __all__ = [
     "eval",
     "clear_task_registry",
     "Flow",
+    "FlowResult",
     "flow",
 ]

@@ -107,6 +107,13 @@ class Task:
         db = self._db or get_default_database()
         return Runs(db.load(self._hash))
 
+    @property
+    def result(self) -> Any:
+        """Access the task's result after evaluation."""
+        if not self._evaluated:
+            raise RuntimeError("Task has not been evaluated yet")
+        return self._result
+
     def name(self, name: str) -> Task:
         """Assign a human-readable name to this task (returns self for chaining)."""
         self._name = name
