@@ -11,7 +11,7 @@ def task1():
 
 @pyexp.task
 def task2(t1):
-    test("test")
+    # test("test")
     print(f"{t1=}")
     return f"task2({t1})"
 
@@ -28,3 +28,4 @@ if __name__ == "__main__":
 
     # test is also exposed as a cli argument
     result = flow(test=True)
+    print(f"{result=}")

@@ -533,3 +533,110 @@ def test_task_result_property_after_eval(monkeypatch):
 
     result = my_flow.run()
     assert result[0].result == 42
+
+
+# ---------------------------------------------------------------------------
+# Retry
+# ---------------------------------------------------------------------------
+
+
+def test_retry_succeeds_after_failures(monkeypatch):
+    """@task(retry=3): fails twice then succeeds on third attempt."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    call_count = 0
+
+    @pyexp.task(retry=3)
+    def flaky():
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise ValueError("not yet")
+        return "ok"
+
+    @pyexp.flow
+    def my_flow():
+        flaky()
+
+    result = my_flow.run()
+    assert result[-1].result == "ok"
+    assert call_count == 3
+
+
+def test_retry_default_no_retry(monkeypatch):
+    """@task (default retry=1) with failure raises immediately."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def fail_once():
+        raise ValueError("boom")
+
+    @pyexp.flow
+    def my_flow():
+        fail_once()
+
+    with pytest.raises(RuntimeError, match="failed"):
+        my_flow.run()
+
+
+def test_retry_all_attempts_fail(monkeypatch):
+    """@task(retry=2): all attempts fail → raises last error."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    call_count = 0
+
+    @pyexp.task(retry=2)
+    def always_fail():
+        nonlocal call_count
+        call_count += 1
+        raise ValueError("always fails")
+
+    @pyexp.flow
+    def my_flow():
+        always_fail()
+
+    with pytest.raises(RuntimeError, match="failed"):
+        my_flow.run()
+    assert call_count == 2
+
+
+def test_retry_in_eval(monkeypatch):
+    """retry works through pyexp.eval() (no flow)."""
+    call_count = 0
+
+    @pyexp.task(retry=3)
+    def flaky():
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise ValueError("not yet")
+        return "ok"
+
+    result = pyexp.eval(flaky())
+    assert result == "ok"
+    assert call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Progress bar
+# ---------------------------------------------------------------------------
+
+
+def test_flow_progress_bar_runs(monkeypatch, capsys):
+    """Flow with progress bar completes without errors; output goes to stderr."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def step(x):
+        return x * 2
+
+    @pyexp.flow
+    def my_flow():
+        step(1).name("double")
+        step(2).name("triple")
+
+    result = my_flow.run()
+    assert len(result) == 2
+    # Progress output goes to stderr
+    captured = capsys.readouterr()
+    assert "passed" in captured.err or "█" in captured.err

@@ -21,6 +21,71 @@ from .task import Task, _collect_dag, _eval_tasks, _resolve_args, _save_task_res
 _NOT_SET = object()  # sentinel to distinguish "not provided on CLI" from argparse defaults
 
 
+# ---------------------------------------------------------------------------
+# Progress bar
+# ---------------------------------------------------------------------------
+
+
+class _FlowProgress:
+    """Simple ANSI progress bar for flow execution (writes to stderr)."""
+
+    def __init__(self, total: int = 0, width: int = 40):
+        self.total = total
+        self.width = width
+        self.current = 0
+        self.passed = 0
+        self.failed = 0
+        self.cached = 0
+        self._render()
+
+    def start(self, name: str = ""):
+        self._render(name, running=True)
+
+    def update(self, status: str, name: str = ""):
+        self.current += 1
+        if status == "passed":
+            self.passed += 1
+        elif status == "failed":
+            self.failed += 1
+        elif status == "cached":
+            self.cached += 1
+        self._render(name)
+
+    def _render(self, name: str = "", running: bool = False):
+        pct = self.current / self.total if self.total > 0 else 1
+        filled = int(self.width * pct)
+        bar = "█" * filled + "░" * (self.width - filled)
+
+        parts = []
+        if self.passed:
+            parts.append(f"\033[32m{self.passed} passed\033[0m")
+        if self.failed:
+            parts.append(f"\033[31m{self.failed} failed\033[0m")
+        if self.cached:
+            parts.append(f"\033[33m{self.cached} cached\033[0m")
+        status = ", ".join(parts) if parts else ""
+
+        max_name_len = 30
+        display_name = name[:max_name_len] + "..." if len(name) > max_name_len else name
+
+        line = f"\r{bar} {self.current}/{self.total}"
+        if status:
+            line += f" {status}"
+        if display_name:
+            if running:
+                line += f" \033[36m[running: {display_name}]\033[0m"
+            else:
+                line += f" [{display_name}]"
+
+        sys.stdout.flush()
+        sys.stderr.write(f"{line}\033[K")
+        sys.stderr.flush()
+
+    def finish(self):
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
 def _task_label(t: Task) -> str:
     """Return the task's explicit name if set, otherwise the function name."""
     return t._name or t._fn.__name__
@@ -101,10 +166,14 @@ class Flow:
                 dep_hashes.add(dep._hash)
         root_list = [t for t in all_tasks if t._hash not in dep_hashes]
 
+        progress = _FlowProgress()
+
         if spin_name:
-            _spin_eval(root_list, spin_name, executor)
+            _spin_eval(root_list, spin_name, executor, progress=progress)
         else:
-            _eval_tasks(root_list, executor)
+            _eval_tasks(root_list, executor, progress=progress)
+
+        progress.finish()
 
         return FlowResult(all_tasks)
 
@@ -165,12 +234,17 @@ def flow(fn: Callable | None = None, *, name: str | None = None) -> Flow | Calla
     return _wrap
 
 
-def _spin_eval(roots: list[Task], spin_name: str, executor: Executor | None = None) -> None:
+def _spin_eval(
+    roots: list[Task], spin_name: str, executor: Executor | None = None, progress: Any = None
+) -> None:
     """Re-run only tasks matching *spin_name*, load others from cache."""
     dag = _collect_dag(roots)
     order = _topo_sort(dag)
     ex = executor or get_default_executor()
     results: dict[str, Any] = {}
+
+    if progress is not None:
+        progress.total = len(order)
 
     # Find spin targets — match on explicit .name() first, then fn.__name__
     spin_targets = {t._hash for t in order if _task_label(t) == spin_name}
@@ -179,25 +253,41 @@ def _spin_eval(roots: list[Task], spin_name: str, executor: Executor | None = No
         raise ValueError(f"No task named '{spin_name}'. Available: {available}")
 
     for t in order:
+        label = _task_label(t)
         if t._hash in spin_targets:
-            # Execute normally
-            args, kwargs = _resolve_args(t, results)
-            future = ex.submit(t._fn, *args, **kwargs)
-            res = future.wait()
+            if progress is not None:
+                progress.start(label)
+
+            # Execute with retry
+            res = None
+            for _attempt in range(t._retry):
+                args, kwargs = _resolve_args(t, results)
+                future = ex.submit(t._fn, *args, **kwargs)
+                res = future.wait()
+                if res.ok:
+                    break
+
             if not res.ok:
-                raise RuntimeError(f"Task {_task_label(t)} ({t._hash}) failed:\n{res.log}")
+                if progress is not None:
+                    progress.update("failed", label)
+                    progress.finish()
+                raise RuntimeError(f"Task {label} ({t._hash}) failed:\n{res.log}")
             t._result = res.result
             t._evaluated = True
             _save_task_result(t, log=res.log, snapshot=ex.snapshot_hash)
             results[t._hash] = t._result
+            if progress is not None:
+                progress.update("passed", label)
         else:
             # Load from cache
             runs = t.runs
             if not runs:
                 raise RuntimeError(
-                    f"Spin requires cached result for '{_task_label(t)}' ({t._hash}), "
+                    f"Spin requires cached result for '{label}' ({t._hash}), "
                     f"but no previous runs found. Run the full flow first."
                 )
             t._result = runs[-1].result
             t._evaluated = True
             results[t._hash] = t._result
+            if progress is not None:
+                progress.update("cached", label)

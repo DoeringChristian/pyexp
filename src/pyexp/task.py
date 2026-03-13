@@ -69,7 +69,7 @@ def _task_hash(fn: Callable, args: tuple, kwargs: dict) -> str:
 class Task:
     """A lazy node in a computation DAG."""
 
-    __slots__ = ("_fn", "_args", "_kwargs", "_hash", "_result", "_evaluated", "_db", "_name")
+    __slots__ = ("_fn", "_args", "_kwargs", "_hash", "_result", "_evaluated", "_db", "_name", "_retry")
 
     def __init__(
         self,
@@ -86,6 +86,7 @@ class Task:
         self._evaluated: bool = False
         self._db = None
         self._name: str | None = None
+        self._retry: int = 1
 
     # -- dependency introspection --
 
@@ -209,7 +210,9 @@ def _save_task_result(t: Task, log: str = "", snapshot: str | None = None) -> No
     db.save(t._hash, t._result, log=log, metadata=meta)
 
 
-def _eval_tasks(roots: list[Task], executor: Executor | None = None) -> None:
+def _eval_tasks(
+    roots: list[Task], executor: Executor | None = None, progress: Any = None
+) -> None:
     """Evaluate tasks in topological order (blocking)."""
     dag = _collect_dag(roots)
     order = _topo_sort(dag)
@@ -217,15 +220,32 @@ def _eval_tasks(roots: list[Task], executor: Executor | None = None) -> None:
     results: dict[str, Any] = {}
     snapshot = ex.snapshot_hash
 
+    if progress is not None:
+        progress.total = len(order)
+
     for t in order:
+        label = t._name or t._fn.__name__
         if t._evaluated:
             results[t._hash] = t._result
+            if progress is not None:
+                progress.update("cached", label)
             continue
 
-        args, kwargs = _resolve_args(t, results)
-        future = ex.submit(t._fn, *args, **kwargs)
-        res = future.wait()
+        if progress is not None:
+            progress.start(label)
+
+        res = None
+        for _attempt in range(t._retry):
+            args, kwargs = _resolve_args(t, results)
+            future = ex.submit(t._fn, *args, **kwargs)
+            res = future.wait()
+            if res.ok:
+                break
+
         if not res.ok:
+            if progress is not None:
+                progress.update("failed", label)
+                progress.finish()
             raise RuntimeError(
                 f"Task {t._fn.__name__} ({t._hash}) failed:\n{res.log}"
             )
@@ -233,6 +253,8 @@ def _eval_tasks(roots: list[Task], executor: Executor | None = None) -> None:
         t._evaluated = True
         _save_task_result(t, log=res.log, snapshot=snapshot)
         results[t._hash] = t._result
+        if progress is not None:
+            progress.update("passed", label)
 
 
 # ---------------------------------------------------------------------------
@@ -241,18 +263,18 @@ def _eval_tasks(roots: list[Task], executor: Executor | None = None) -> None:
 
 
 def task(
-    fn: Callable | None = None, *, executor: Executor | None = None
+    fn: Callable | None = None, *, executor: Executor | None = None, retry: int = 1
 ) -> Callable:
     """Decorator that makes a function return a :class:`Task` when called.
 
-    Supports ``@task`` and ``@task(executor=...)``::
+    Supports ``@task``, ``@task(executor=...)``, and ``@task(retry=N)``::
 
         @task
         def compute(x):
             return x ** 2
 
-        @task(executor=my_executor)
-        def compute(x):
+        @task(retry=3)
+        def flaky(x):
             return x ** 2
     """
 
@@ -263,6 +285,7 @@ def task(
             if h in _task_registry:
                 return _task_registry[h]
             t = Task(fn, args, kwargs, h)
+            t._retry = retry
             _task_registry[h] = t
             return t
 
