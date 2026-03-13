@@ -45,7 +45,7 @@ class FileDatabase:
     def save(
         self, key: str, value: Any, *, log: str = "", metadata: dict | None = None
     ) -> Entry:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")
         run_dir = self.base_dir / key / ts
         run_dir.mkdir(parents=True, exist_ok=True)
 

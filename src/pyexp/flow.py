@@ -13,12 +13,32 @@ import argparse
 import inspect
 import re
 import sys
+from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
+from .database import get_default_database
 from .executors import Executor, get_default_executor, get_executor
 from .task import Task, _collect_dag, _eval_tasks, _resolve_args, _save_task_result, _task_registry, _topo_sort, clear_task_registry
 
 _NOT_SET = object()  # sentinel to distinguish "not provided on CLI" from argparse defaults
+
+
+@dataclass
+class _FlowEntry:
+    """Lightweight stand-in for a :class:`Task` when loading historical results."""
+
+    name: str
+    key: str
+    _result: Any
+    _evaluated: bool = True
+
+    @property
+    def result(self) -> Any:
+        return self._result
+
+    @property
+    def _hash(self) -> str:
+        return self.key
 
 
 # ---------------------------------------------------------------------------
@@ -86,18 +106,20 @@ class _FlowProgress:
         sys.stderr.flush()
 
 
-def _task_label(t: Task) -> str:
+def _task_label(t: Task | _FlowEntry) -> str:
     """Return the task's explicit name if set, otherwise the function name."""
+    if isinstance(t, _FlowEntry):
+        return t.name
     return t._name or t._fn.__name__
 
 
 class FlowResult:
     """Indexable collection of evaluated tasks from a flow run."""
 
-    def __init__(self, tasks: list[Task]) -> None:
+    def __init__(self, tasks: list[Task | _FlowEntry]) -> None:
         self._tasks = tasks
 
-    def __getitem__(self, key: int | str) -> Task | FlowResult:
+    def __getitem__(self, key: int | str) -> Task | _FlowEntry | FlowResult:
         if isinstance(key, int):
             return self._tasks[key]
         if isinstance(key, str):
@@ -113,7 +135,7 @@ class FlowResult:
     def __len__(self) -> int:
         return len(self._tasks)
 
-    def __iter__(self) -> Iterator[Task]:
+    def __iter__(self) -> Iterator[Task | _FlowEntry]:
         return iter(self._tasks)
 
     def __repr__(self) -> str:
@@ -135,6 +157,21 @@ class Flow:
 
     def __call__(self, **overrides) -> Any:
         return self.run(**overrides)
+
+    def __getitem__(self, key: int) -> FlowResult:
+        """Load historical flow results from the database.
+
+        ``flow[-1]`` returns the most recent run, ``flow[0]`` the first, etc.
+        """
+        db = get_default_database()
+        runs = db.load(self.name)
+        if not runs:
+            raise RuntimeError(f"No previous runs for flow '{self.name}'")
+        manifest = runs[key].result  # list of (label, storage_key, result)
+        entries = []
+        for label, storage_key, result in manifest:
+            entries.append(_FlowEntry(name=label, key=storage_key, _result=result))
+        return FlowResult(entries)
 
     def run(self, **overrides) -> Any:
         """Parse CLI, build DAG, evaluate (or spin), return results."""
@@ -174,6 +211,11 @@ class Flow:
             _eval_tasks(root_list, executor, progress=progress)
 
         progress.finish()
+
+        # Save manifest so flow[i] can reconstruct results without re-running
+        db = get_default_database()
+        manifest = [(_task_label(t), t._storage_key, t._result) for t in all_tasks]
+        db.save(self.name, manifest)
 
         return FlowResult(all_tasks)
 

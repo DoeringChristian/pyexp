@@ -16,7 +16,7 @@ def exp(config: Config, pretrain=None):
 
 
 @pyexp.flow
-def run():
+def flow():
     datasets = ["fabric_hex"]
 
     for dataset in datasets:
@@ -46,4 +46,8 @@ def run():
 
 if __name__ == "__main__":
 
-    run()
+    # Returns the last flow result
+    last_flow = flow[-1]
+    print(f"{type(last_flow)=}")
+
+    flow()

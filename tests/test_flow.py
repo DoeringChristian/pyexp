@@ -640,3 +640,92 @@ def test_flow_progress_bar_runs(monkeypatch, capsys):
     # Progress output goes to stderr
     captured = capsys.readouterr()
     assert "passed" in captured.err or "█" in captured.err
+
+
+# ---------------------------------------------------------------------------
+# Flow indexing (historical results)
+# ---------------------------------------------------------------------------
+
+
+def test_flow_getitem_loads_last_result(monkeypatch, tmp_path):
+    """flow[-1] loads the most recent cached result for each task."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def source():
+        return 10
+
+    @pyexp.task
+    def double(x):
+        return x * 2
+
+    @pyexp.flow
+    def my_flow():
+        double(source())
+
+    # Run to populate the database
+    my_flow.run()
+    clear_task_registry()
+
+    # Load from cache — no run() needed
+    result = my_flow[-1]
+    assert isinstance(result, FlowResult)
+    assert result[-1].result == 20
+
+
+def test_flow_getitem_first_run(monkeypatch, tmp_path):
+    """flow[0] loads the first cached result."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def val():
+        return 42
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    my_flow.run()
+    clear_task_registry()
+
+    result = my_flow[0]
+    assert result[0].result == 42
+
+
+def test_flow_getitem_no_runs_raises():
+    """flow[-1] raises if no previous runs exist."""
+
+    @pyexp.flow
+    def my_flow():
+        pass
+
+    with pytest.raises(RuntimeError, match="No previous runs"):
+        my_flow[-1]
+
+
+def test_flow_getitem_multiple_runs(monkeypatch, tmp_path):
+    """flow[0] returns first run results, flow[-1] returns latest."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    counter = {"n": 0}
+
+    @pyexp.task
+    def counting():
+        counter["n"] += 1
+        return counter["n"]
+
+    @pyexp.flow
+    def my_flow():
+        counting()
+
+    # First run
+    my_flow.run()
+    clear_task_registry()
+
+    # Second run
+    my_flow.run()
+    clear_task_registry()
+
+    assert my_flow[0][0].result == 1
+    assert my_flow[-1][0].result == 2
+    assert my_flow[1][0].result == 2

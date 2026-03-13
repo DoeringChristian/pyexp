@@ -103,10 +103,17 @@ class Task:
         return deps
 
     @property
+    def _storage_key(self) -> str:
+        """Database key: ``name_hash`` if named, otherwise just the hash."""
+        if self._name:
+            return f"{self._name}_{self._hash}"
+        return self._hash
+
+    @property
     def runs(self) -> Runs[Entry]:
         """Load previous results from the database."""
         db = self._db or get_default_database()
-        return Runs(db.load(self._hash))
+        return Runs(db.load(self._storage_key))
 
     @property
     def result(self) -> Any:
@@ -207,7 +214,7 @@ def _save_task_result(t: Task, log: str = "", snapshot: str | None = None) -> No
     meta: dict[str, Any] = {"fn": f"{t._fn.__module__}.{t._fn.__qualname__}"}
     if snapshot is not None:
         meta["snapshot"] = snapshot
-    db.save(t._hash, t._result, log=log, metadata=meta)
+    db.save(t._storage_key, t._result, log=log, metadata=meta)
 
 
 def _eval_tasks(
