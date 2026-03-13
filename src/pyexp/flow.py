@@ -173,6 +173,33 @@ class Flow:
             entries.append(_FlowEntry(name=label, key=storage_key, _result=result))
         return FlowResult(entries)
 
+    def results(self, **kwargs) -> FlowResult:
+        """Re-collect tasks and load each one's latest cached result.
+
+        Calls the flow function to rebuild the DAG (without executing it),
+        then loads the most recent result for each task from the database.
+        """
+        resolved = {
+            pname: kwargs.get(pname, param.default)
+            for pname, param in self._sig.parameters.items()
+            if pname in kwargs or param.default is not inspect.Parameter.empty
+        }
+        before = set(_task_registry.keys())
+        self._fn(**resolved)
+        tasks = [t for h, t in _task_registry.items() if h not in before]
+        if not tasks:
+            raise RuntimeError(f"Flow '{self.name}' produced no tasks")
+        for t in tasks:
+            runs = t.runs
+            if not runs:
+                raise RuntimeError(
+                    f"No cached results for task '{_task_label(t)}' ({t._hash}). "
+                    f"Run the flow first."
+                )
+            t._result = runs[-1].result
+            t._evaluated = True
+        return FlowResult(tasks)
+
     def run(self, **overrides) -> Any:
         """Parse CLI, build DAG, evaluate (or spin), return results."""
         args = self._parse_args()

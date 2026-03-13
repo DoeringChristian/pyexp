@@ -48,6 +48,9 @@ if __name__ == "__main__":
 
     # Returns the last flow result
     last_flow = flow[-1]
-    print(f"{type(last_flow)=}")
+    print(f"{last_flow=}")
+
+    results = flow.results()
+    print(f"{results[0]=}")
 
     flow()

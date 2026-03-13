@@ -729,3 +729,87 @@ def test_flow_getitem_multiple_runs(monkeypatch, tmp_path):
     assert my_flow[0][0].result == 1
     assert my_flow[-1][0].result == 2
     assert my_flow[1][0].result == 2
+
+
+# ---------------------------------------------------------------------------
+# Flow.results() — re-collect tasks and load cached results
+# ---------------------------------------------------------------------------
+
+
+def test_flow_results_loads_cached(monkeypatch):
+    """flow.results() re-collects tasks and loads the latest cached result."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def source():
+        return 10
+
+    @pyexp.task
+    def double(x):
+        return x * 2
+
+    @pyexp.flow
+    def my_flow():
+        double(source())
+
+    my_flow.run()
+    clear_task_registry()
+
+    result = my_flow.results()
+    assert isinstance(result, FlowResult)
+    assert result[-1].result == 20
+
+
+def test_flow_results_with_kwargs(monkeypatch):
+    """flow.results(name=...) rebuilds the DAG with the given kwargs."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def greet(name):
+        return f"hello {name}"
+
+    @pyexp.flow
+    def my_flow(name="world"):
+        greet(name)
+
+    my_flow.run(name="alice")
+    clear_task_registry()
+
+    result = my_flow.results(name="alice")
+    assert result[0].result == "hello alice"
+
+
+def test_flow_results_no_cache_raises():
+    """flow.results() raises if no cached results exist."""
+
+    @pyexp.task
+    def val():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    with pytest.raises(RuntimeError, match="No cached results"):
+        my_flow.results()
+
+
+def test_flow_results_returns_real_tasks(monkeypatch):
+    """flow.results() returns actual Task objects, not _FlowEntry."""
+    monkeypatch.setattr("sys.argv", ["test"])
+    from pyexp.task import Task
+
+    @pyexp.task
+    def val():
+        return 42
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    my_flow.run()
+    clear_task_registry()
+
+    result = my_flow.results()
+    assert isinstance(result[0], Task)
+    assert result[0].result == 42
