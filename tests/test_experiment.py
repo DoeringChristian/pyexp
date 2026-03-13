@@ -457,15 +457,15 @@ class TestExperimentRun:
         with patch.object(sys, "argv", ["test", "--filter", "^exp_"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
-        # Check which experiments actually ran by looking for experiment.pkl files
+        # Check which experiments actually ran by looking for result.pkl files
         base_dir = tmp_path / "my_exp"
         ran_names = []
-        for exp_pkl in base_dir.rglob("experiment.pkl"):
+        for result_pkl in base_dir.rglob("result.pkl"):
             import pickle
-            with open(exp_pkl, "rb") as f:
-                exp = pickle.load(f)
-            if exp.result and exp.result.get("ran"):
-                ran_names.append(exp.result["name"])
+            with open(result_pkl, "rb") as f:
+                result = pickle.load(f)
+            if isinstance(result, dict) and result.get("ran"):
+                ran_names.append(result["name"])
 
         assert sorted(ran_names) == ["exp_a", "exp_b"]
 
@@ -519,11 +519,7 @@ class TestResultsMethod:
 
         time.sleep(1.1)  # Ensure different timestamp
 
-        # Modify configs for second run
-        @my_exp.configs
-        def configs2():
-            return [{"name": "test", "x": 99}]
-
+        # Run same config again (same hash → same dir, new timestamp)
         with patch.object(sys, "argv", ["test"]):
             my_exp.run(output_dir=tmp_path, executor="inline")
 
@@ -531,9 +527,9 @@ class TestResultsMethod:
         results = my_exp.results(timestamp=first_timestamp, output_dir=tmp_path)
         assert results[0].result["value"] == 1
 
-        # Load latest (second run)
+        # Load latest (second run — same config, newer timestamp)
         results_latest = my_exp.results(output_dir=tmp_path)
-        assert results_latest[0].result["value"] == 99
+        assert results_latest[0].result["value"] == 1
 
     def test_results_always_1d(self, tmp_path):
         """results() always returns a 1D Runs regardless of sweep shape."""
@@ -610,7 +606,8 @@ class TestResultsMethod:
 
         data = json.loads(manifests[0].read_text())
         assert len(data["runs"]) == 2
-        assert data["runs"] == ["a", "b"]
+        # With hash_configs=True (default), run dirs include hash suffix
+        assert all(r.startswith("a-") or r.startswith("b-") for r in data["runs"])
         assert "timestamp" in data
 
         timestamp = data["timestamp"]
@@ -625,7 +622,7 @@ class TestGetitem:
     """Tests for Experiment.__getitem__."""
 
     def test_getitem_loads_result(self, tmp_path):
-        """my_exp['test'] loads a result by name."""
+        """my_exp['test'] returns all historical runs for that name."""
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -640,12 +637,42 @@ class TestGetitem:
 
         # Override output_dir for results lookup
         my_exp._output_dir = tmp_path
-        result = my_exp["test"]
+        runs = my_exp["test"]
+        assert isinstance(runs, Runs)
+        assert len(runs) >= 1
+        result = runs[-1]
         assert result.result["value"] == 10
         assert result.name == "test"
 
-    def test_getitem_glob_pattern(self, tmp_path):
-        """my_exp['pretrain.*'] returns matching results."""
+    def test_getitem_multiple_runs(self, tmp_path):
+        """my_exp['test'] returns runs from multiple invocations."""
+
+        @experiment(name="my_exp")
+        def my_exp(config):
+            return {"value": config["x"]}
+
+        @my_exp.configs
+        def configs():
+            return [{"name": "test", "x": 5}]
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        import time
+        time.sleep(1.1)  # ensure different timestamp
+
+        with patch.object(sys, "argv", ["test"]):
+            my_exp.run(output_dir=tmp_path, executor="inline")
+
+        my_exp._output_dir = tmp_path
+        runs = my_exp["test"]
+        assert isinstance(runs, Runs)
+        assert len(runs) == 2
+        # Sorted oldest-first, so [-1] is the latest
+        assert runs[-1].result["value"] == 5
+
+    def test_getitem_pattern_via_results(self, tmp_path):
+        """Pattern matching is available via results()['pretrain.*']."""
 
         @experiment(name="my_exp")
         def my_exp(config):
@@ -663,7 +690,7 @@ class TestGetitem:
             my_exp.run(output_dir=tmp_path, executor="inline")
 
         my_exp._output_dir = tmp_path
-        pretrain_results = my_exp["pretrain.*"]
+        pretrain_results = my_exp.results()["pretrain.*"]
         assert isinstance(pretrain_results, Runs)
         assert len(pretrain_results) == 2
 
@@ -874,7 +901,7 @@ class TestOutputFolderStructure:
         assert my_exp._name == "mnist_classifier"
 
     def test_new_directory_layout(self, tmp_path):
-        """Output uses <experiment>/<run_name>/<timestamp>/ layout."""
+        """Output uses <experiment>/<name-hash>/<timestamp>/ layout."""
 
         @experiment(name="test_exp")
         def my_exp(config):
@@ -890,14 +917,17 @@ class TestOutputFolderStructure:
         exp_dir = tmp_path / "test_exp"
         assert exp_dir.exists()
 
-        cfg_dir = exp_dir / "cfg"
-        assert cfg_dir.exists()
+        # With hash_configs=True (default), dir is cfg-<hash>
+        cfg_dirs = [d for d in exp_dir.iterdir()
+                    if d.is_dir() and d.name.startswith("cfg")]
+        assert len(cfg_dirs) == 1
+        cfg_dir = cfg_dirs[0]
+        assert "-" in cfg_dir.name  # has hash suffix
 
         timestamp_dirs = [d for d in cfg_dir.iterdir() if d.is_dir()]
         assert len(timestamp_dirs) == 1
 
         assert (timestamp_dirs[0] / "config.json").exists()
-        assert (timestamp_dirs[0] / "experiment.pkl").exists()
 
         batches_dir = exp_dir / ".batches"
         assert batches_dir.exists()
@@ -1842,10 +1872,10 @@ class TestFilterWithDependencies:
         for d in exp_dirs:
             cfg = json.loads((d / "config.json").read_text())
             if cfg["name"] == "finetune":
-                with open(d / "experiment.pkl", "rb") as f:
-                    ft_exp = pickle.load(f)
-                assert ft_exp.result["pretrain_val"] == 42
-                assert ft_exp.finished
+                with open(d / "result.pkl", "rb") as f:
+                    ft_result = pickle.load(f)
+                assert ft_result["pretrain_val"] == 42
+                assert (d / ".finished").exists()
                 break
 
     def test_filter_rerun_with_dependency_access(self, tmp_path):
@@ -1879,7 +1909,8 @@ class TestFilterWithDependencies:
             cfg = json.loads((d / "config.json").read_text())
             if cfg["name"] == "finetune":
                 (d / ".finished").unlink()
-                (d / "experiment.pkl").unlink()
+                if (d / "result.pkl").exists():
+                    (d / "result.pkl").unlink()
                 break
 
         # Phase 3: re-run with --continue --filter "finetune"
@@ -1894,11 +1925,11 @@ class TestFilterWithDependencies:
         for d in exp_dirs:
             cfg = json.loads((d / "config.json").read_text())
             if cfg["name"] == "finetune":
-                with open(d / "experiment.pkl", "rb") as f:
-                    ft_exp = pickle.load(f)
-                assert ft_exp.result["pretrain_val"] == 99
-                assert ft_exp.finished
-                assert not ft_exp.skipped
+                with open(d / "result.pkl", "rb") as f:
+                    ft_result = pickle.load(f)
+                assert ft_result["pretrain_val"] == 99
+                assert (d / ".finished").exists()
+                assert not (d / ".skipped").exists()
                 break
 
     def test_filter_errors_when_dependency_not_on_disk(self, tmp_path):
@@ -1973,11 +2004,10 @@ class TestFilterWithDependencies:
             cfg = json.loads((d / "config.json").read_text())
             if cfg["name"] == "finetune":
                 assert (d / ".finished").exists()
-                with open(d / "experiment.pkl", "rb") as f:
-                    ft_exp = pickle.load(f)
-                assert ft_exp.result["pretrain_val"] == 77
-                assert ft_exp.finished
-                assert not ft_exp.skipped
+                with open(d / "result.pkl", "rb") as f:
+                    ft_result = pickle.load(f)
+                assert ft_result["pretrain_val"] == 77
+                assert not (d / ".skipped").exists()
                 break
         else:
             pytest.fail("finetune dir not found in batch 2")
@@ -2048,9 +2078,9 @@ class TestFilterWithDependencies:
         dirs2 = _discover_experiment_dirs(base_dir, ts2)
         ds_dir = [d for d in dirs2 if "downstream" in str(d)][0]
         assert (ds_dir / ".finished").exists()
-        with open(ds_dir / "experiment.pkl", "rb") as f:
+        with open(ds_dir / "result.pkl", "rb") as f:
             ds_result = pickle.load(f)
-        assert ds_result.result == {"dep_value": 42}
+        assert ds_result == {"dep_value": 42}
 
     def test_cross_batch_dependency_with_filter(self, tmp_path):
         """--filter should not crash when filtered experiment has cross-batch dep."""
@@ -2099,9 +2129,9 @@ class TestFilterWithDependencies:
         dirs = _discover_experiment_dirs(base_dir, ts)
         ind_dir = [d for d in dirs if "independent" in str(d)][0]
         assert (ind_dir / ".finished").exists()
-        with open(ind_dir / "experiment.pkl", "rb") as f:
+        with open(ind_dir / "result.pkl", "rb") as f:
             ind_result = pickle.load(f)
-        assert ind_result.result == {"val": 5}
+        assert ind_result == {"val": 5}
 
 
 class TestCrossTimestampResults:
@@ -2209,8 +2239,11 @@ class TestCrossTimestampResults:
 
         ts2 = sorted((base_dir / ".batches").glob("*.json"))[-1].stem
 
-        # Remove .finished from run_a in ts2 to simulate unfinished
-        run_a_ts2_dir = base_dir / "run_a" / ts2
+        # Find run_a's directory (includes hash suffix)
+        run_a_dirs = [d for d in base_dir.iterdir()
+                      if d.is_dir() and d.name.startswith("run_a")]
+        assert len(run_a_dirs) == 1
+        run_a_ts2_dir = run_a_dirs[0] / ts2
         (run_a_ts2_dir / ".finished").unlink()
 
         # finished=True: run_a should fall back to ts1, run_b from ts1
@@ -2251,14 +2284,8 @@ class TestCrossTimestampResults:
         run_c_dir.mkdir(parents=True)
         (run_c_dir / "config.json").write_text('{"name": "run_c", "x": 99}')
         from pyexp import Config
-        result_obj = Result(
-            cfg=Config({"name": "run_c", "x": 99}),
-            name="run_c",
-            result={"value": 99},
-            finished=True,
-        )
-        with open(run_c_dir / "experiment.pkl", "wb") as f:
-            pickle.dump(result_obj, f)
+        with open(run_c_dir / "result.pkl", "wb") as f:
+            pickle.dump({"value": 99}, f)
         (run_c_dir / ".finished").touch()
 
         results = my_exp.results(output_dir=tmp_path)
@@ -2266,17 +2293,20 @@ class TestCrossTimestampResults:
         assert names == ["run_a", "run_b", "run_c"]
 
     def test_getitem_finds_across_timestamps(self, tmp_path):
-        """__getitem__ should find experiments across timestamps."""
+        """__getitem__ returns all runs across timestamps, sorted oldest-first."""
         my_exp, base_dir, ts1, ts2 = self._setup_two_batches(tmp_path)
 
         my_exp._output_dir = tmp_path
 
         # run_b only exists in ts1
-        run_b = my_exp["run_b"]
-        assert run_b.name == "run_b"
-        assert run_b.result["value"] == 2
+        run_b_runs = my_exp["run_b"]
+        assert isinstance(run_b_runs, Runs)
+        assert len(run_b_runs) == 1
+        assert run_b_runs[-1].name == "run_b"
+        assert run_b_runs[-1].result["value"] == 2
 
-        # run_a exists in both, should get the latest (ts2)
-        run_a = my_exp["run_a"]
-        assert run_a.name == "run_a"
-        assert ts2 in str(run_a.out)
+        # run_a exists in both — should get both, latest last
+        run_a_runs = my_exp["run_a"]
+        assert len(run_a_runs) == 2
+        assert run_a_runs[-1].name == "run_a"
+        assert ts2 in str(run_a_runs[-1].out)

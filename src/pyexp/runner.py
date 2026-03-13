@@ -447,6 +447,43 @@ def _discover_all_experiments_latest(
     return dirs
 
 
+def _discover_all_runs_for_name(
+    base_dir: Path, name: str, *, finished_only: bool = False
+) -> list[Path]:
+    """Discover all run directories whose name matches *name*.
+
+    A run directory matches if its directory name equals *name* or starts with
+    ``name-`` (i.e. ``<name>-<hash>``).  All timestamp subdirectories of
+    matching run directories are returned, sorted oldest-first.
+
+    Args:
+        base_dir: The experiment base directory (e.g. ``out/experiment_name``).
+        name: Config name to search for (exact prefix, not regex).
+        finished_only: If True, only include runs with a ``.finished`` marker.
+
+    Returns:
+        List of experiment directories sorted chronologically (oldest first).
+    """
+    if not base_dir.exists():
+        return []
+    dirs: list[Path] = []
+    for entry in sorted(base_dir.iterdir()):
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        # Match exact name or name-<hash>
+        if entry.name != name and not entry.name.startswith(f"{name}-"):
+            continue
+        for ts_dir in sorted(entry.iterdir()):
+            if not ts_dir.is_dir() or not (ts_dir / "config.json").exists():
+                continue
+            if finished_only and not (ts_dir / ".finished").exists():
+                continue
+            dirs.append(ts_dir)
+    # Sort by timestamp (directory name) — oldest first
+    dirs.sort(key=lambda d: d.name)
+    return dirs
+
+
 def _get_all_timestamps(base_dir: Path) -> list[str]:
     """Return all batch timestamps sorted newest-first by scanning run directories."""
     if not base_dir.exists():
@@ -789,7 +826,7 @@ class ExperimentRunner:
         executor: ExecutorName | Executor | str = "subprocess",
         capture: bool = True,
         stash: bool = True,
-        hash_configs: bool = False,
+        hash_configs: bool = True,
         filter: str | None = None,
         continue_run: str | None = None,
         deps_finished_only: bool = False,

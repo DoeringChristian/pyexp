@@ -15,12 +15,14 @@ from .runner import (
     _topological_sort,
     _discover_experiment_dirs,
     _discover_all_experiments_latest,
+    _discover_all_runs_for_name,
     _get_latest_timestamp,
     _get_latest_finished_timestamp,
     _load_experiments,
     _load_experiments_from_dirs,
     _list_runs,
     _print_dependency_graph,
+    _sanitize_name,
 )
 
 
@@ -128,7 +130,7 @@ class Experiment:
         executor: ExecutorName | Executor | str = "subprocess",
         retry: int = 4,
         stash: bool = True,
-        hash_configs: bool = False,
+        hash_configs: bool = True,
         max_workers: int = 1,
     ):
         import inspect
@@ -315,9 +317,23 @@ class Experiment:
             max_workers=resolved_max_workers,
         )
 
-    def __getitem__(self, key):
-        """Load results from latest run and index by key."""
-        return self.results()[key]
+    def __getitem__(self, key: str) -> "Runs[Result]":
+        """Load all historical runs matching *key* (a config name).
+
+        Returns a :class:`Runs` of :class:`Result` instances sorted
+        chronologically (oldest first), so ``exp['fast'][-1]`` gives the
+        most recent run with name ``'fast'``.
+        """
+        exp_name = self._name
+        resolved_output_dir = self._output_dir
+        if resolved_output_dir is None:
+            resolved_output_dir = Path.cwd() / "out"
+        base_dir = resolved_output_dir / exp_name
+
+        dirs = _discover_all_runs_for_name(base_dir, _sanitize_name(key))
+        if not dirs:
+            raise IndexError(f"No runs found for '{key}'")
+        return _load_experiments_from_dirs(dirs)
 
     def __call__(self, *args, **kwargs):
         """Call the underlying experiment function directly."""
@@ -332,7 +348,7 @@ def experiment(
     executor: ExecutorName | Executor | str = "subprocess",
     retry: int = 4,
     stash: bool = True,
-    hash_configs: bool = False,
+    hash_configs: bool = True,
     max_workers: int = 1,
 ) -> "Experiment | Callable[[Callable[[dict], Any]], Experiment]":
     """Decorator to create an Experiment from a function.
