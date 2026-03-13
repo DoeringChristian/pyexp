@@ -22,28 +22,25 @@ def run():
     for dataset in datasets:
 
         pretrain = exp(
-            Config(
-                {
-                    "learning_rate": 0.01,
-                    "epochs": 10,
-                    "dataset": dataset,
-                }
-            )
+            {
+                "learning_rate": 0.01,
+                "epochs": 10,
+                "dataset": dataset,
+            }
         ).name(f"{dataset}_pretrain")
 
         exp(
-            Config(
-                {
-                    "learning_rate": 0.01,
-                    "epochs": 10,
-                    "dataset": dataset,
-                    "finetune": True,
-                }
-            ),
+            {
+                "learning_rate": 0.01,
+                "epochs": 10,
+                "dataset": dataset,
+                "finetune": True,
+            },
             pretrain,
         ).name(f"{dataset}_finetune")
 
 
 if __name__ == "__main__":
-
-    run()
+    # Full run:    python examples/task.py
+    # Spin:        python examples/task.py --spin fabric_hex_finetune
+    run.run()

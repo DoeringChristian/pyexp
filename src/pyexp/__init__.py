@@ -40,6 +40,20 @@ from .utils import (
     stash_and_snapshot,
     DEFAULT_PACKAGE_SUFFIXES,
 )
+from .database import (
+    Database,
+    Entry,
+    FileDatabase,
+    get_default_database,
+    set_default_database,
+)
+from .task import (
+    Task,
+    task,
+    eval,
+    clear_task_registry,
+)
+from .flow import Flow, flow
 from .log import LazyFigure, Logger, LogReader
 
 __all__ = [
@@ -82,4 +96,15 @@ __all__ = [
     "Logger",
     "LogReader",
     "DEFAULT_PACKAGE_SUFFIXES",
+    "Database",
+    "Entry",
+    "FileDatabase",
+    "get_default_database",
+    "set_default_database",
+    "Task",
+    "task",
+    "eval",
+    "clear_task_registry",
+    "Flow",
+    "flow",
 ]

@@ -78,7 +78,9 @@ class FnFuture(Future):
         """
         self._condition.acquire()
         try:
-            self._condition.wait_for(lambda: self._state in ("FINISHED",), timeout=timeout)
+            self._condition.wait_for(
+                lambda: self._state in ("FINISHED",), timeout=timeout
+            )
         finally:
             self._condition.release()
 
@@ -177,7 +179,7 @@ class PixiProvisioner:
         pixi_prefix = 'export PATH="$HOME/.pixi/bin:$PATH" && '
         cmds = [
             # Bootstrap pixi if not already installed
-            'command -v pixi >/dev/null 2>&1 || curl -fsSL https://pixi.sh/install.sh | bash',
+            "command -v pixi >/dev/null 2>&1 || curl -fsSL https://pixi.sh/install.sh | bash",
         ]
         install_cmd = f"{pixi_prefix}cd {work_dir} && pixi install"
         if self.manifest:
@@ -195,7 +197,9 @@ class PixiProvisioner:
         return cmds
 
 
-def _detect_provisioner(search_dir: Path | None = None) -> "UvProvisioner | PixiProvisioner | PipProvisioner":
+def _detect_provisioner(
+    search_dir: Path | None = None,
+) -> "UvProvisioner | PixiProvisioner | PipProvisioner":
     """Detect which Python package manager is used in *search_dir* (default: cwd).
 
     Detection order (first match wins):
@@ -333,6 +337,11 @@ class Executor(concurrent.futures.Executor):
                 package_files(dest)
             self._snapshot_path = dest
             self._snapshot_hash = h
+
+    @property
+    def snapshot_hash(self) -> str | None:
+        """Return the content hash of the current code snapshot, or None."""
+        return self._snapshot_hash
 
     @abstractmethod
     def submit(self, fn, /, *args, **kwargs) -> FnFuture:
@@ -734,7 +743,9 @@ class SshExecutor(Executor):
             raise ValueError("SshExecutor requires at least one SshHost")
         super().__init__(snapshot=snapshot, capture=capture, max_workers=max_workers)
         self._hosts = [SshHost(h) if isinstance(h, str) else h for h in hosts]
-        self._provision: Provisioner | None = AutoProvisioner() if provision == "auto" else provision
+        self._provision: Provisioner | None = (
+            AutoProvisioner() if provision == "auto" else provision
+        )
         self._default_setup = setup
         self._default_work_dir = work_dir or f"/tmp/pyexp-{uuid.uuid4().hex[:12]}"
         self._ssh_options = ssh_options or []
@@ -781,7 +792,12 @@ class SshExecutor(Executor):
             text=True,
         )
         if result.returncode != 0:
-            log.warning("ssh %s failed (rc=%d): %s", host, result.returncode, result.stdout.rstrip())
+            log.warning(
+                "ssh %s failed (rc=%d): %s",
+                host,
+                result.returncode,
+                result.stdout.rstrip(),
+            )
             if check:
                 raise RuntimeError(
                     f"SSH command failed on {host} (rc={result.returncode}):\n"
@@ -801,7 +817,9 @@ class SshExecutor(Executor):
             text=True,
         )
         if result.returncode != 0:
-            log.warning("scp failed (rc=%d): %s", result.returncode, result.stdout.rstrip())
+            log.warning(
+                "scp failed (rc=%d): %s", result.returncode, result.stdout.rstrip()
+            )
             if check:
                 raise RuntimeError(
                     f"SCP command failed (rc={result.returncode}):\n"
@@ -935,10 +953,15 @@ class SshExecutor(Executor):
                 # Determine python executable
                 provision = self._provision
                 venv_path = getattr(provision, "venv_path", None) if provision else None
-                pixi_env = getattr(provision, "environment", None) if provision else None
+                pixi_env = (
+                    getattr(provision, "environment", None) if provision else None
+                )
                 if venv_path:
                     python_bin = f"{work_dir}/{venv_path}/bin/python"
-                elif provision is not None and getattr(provision, "manifest", None) is not None:
+                elif (
+                    provision is not None
+                    and getattr(provision, "manifest", None) is not None
+                ):
                     env_flag = f" -e {shlex.quote(pixi_env)}" if pixi_env else ""
                     python_bin = f"$HOME/.pixi/bin/pixi run{env_flag} python"
                 else:
@@ -1057,7 +1080,9 @@ def get_default_executor() -> Executor:
 import functools
 
 
-def async_fn(fn: Callable | None = None, *, executor: Executor | None = None) -> Callable:
+def async_fn(
+    fn: Callable | None = None, *, executor: Executor | None = None
+) -> Callable:
     """Decorator that submits calls to an executor, returning a :class:`FnFuture`.
 
     Can be used bare or with arguments::
@@ -1073,11 +1098,13 @@ def async_fn(fn: Callable | None = None, *, executor: Executor | None = None) ->
     When called, the decorated function submits itself on *executor* (or the
     global default executor) and returns a :class:`FnFuture`.
     """
+
     def _wrap(fn: Callable) -> Callable:
         @functools.wraps(fn)
         def wrapper(*args, **kwargs) -> FnFuture:
             ex = executor or get_default_executor()
             return ex.submit(fn, *args, **kwargs)
+
         wrapper._original = fn
         return wrapper
 
