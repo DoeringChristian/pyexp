@@ -1010,13 +1010,13 @@ class TestOutputFolderStructure:
         assert "Runs for test_exp" in captured.out
         assert "1 passed" in captured.out
 
-    def test_default_output_dir_relative_to_file(self):
-        """Default output_dir is relative to experiment file's directory."""
+    def test_default_output_dir_relative_to_cwd(self):
+        """Default output_dir is cwd/out."""
         @experiment
         def my_exp(config):
             return config["x"]
 
-        expected_dir = Path(__file__).parent / "out"
+        expected_dir = Path.cwd() / "out"
         assert my_exp._output_dir == expected_dir
 
     def test_output_dir_override_in_decorator(self, tmp_path):

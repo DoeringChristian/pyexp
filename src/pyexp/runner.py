@@ -775,7 +775,7 @@ class ExperimentRunner:
         retry: int = 4,
     ):
         self._name = name
-        self._output_dir = Path(output_dir) if output_dir else Path("out")
+        self._output_dir = Path(output_dir) if output_dir else Path.cwd() / "out"
         self._retry = retry
         self._submissions: list[tuple[Callable, dict]] = []
 

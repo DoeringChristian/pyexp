@@ -64,7 +64,7 @@ def _parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         metavar="DIR",
-        help="Override output directory (default: out)",
+        help="Override output directory (default: cwd/out)",
     )
     parser.add_argument(
         "--retry",
@@ -176,7 +176,7 @@ class Experiment:
         exp_name = name or self._name
         resolved_output_dir = Path(output_dir) if output_dir else self._output_dir
         if resolved_output_dir is None:
-            resolved_output_dir = Path("out")
+            resolved_output_dir = Path.cwd() / "out"
         base_dir = resolved_output_dir / exp_name
 
         if timestamp is None or timestamp == "latest":
@@ -237,7 +237,7 @@ class Experiment:
         elif self._output_dir is not None:
             resolved_output_dir = self._output_dir
         else:
-            resolved_output_dir = Path("out")
+            resolved_output_dir = Path.cwd() / "out"
 
         # Retry: CLI > run() arg > constructor arg
         if args.retry is not None:
@@ -342,8 +342,7 @@ def experiment(
 
     Args:
         name: Experiment name for the output folder. Defaults to function name.
-        output_dir: Base directory for experiment results. Defaults to "out" directory
-            relative to the file containing the experiment function.
+        output_dir: Base directory for experiment results. Defaults to cwd/out.
         executor: Default execution strategy for running experiments.
         retry: Number of times to retry a failed experiment.
         stash: If True, capture git repository state.
@@ -367,7 +366,7 @@ def experiment(
         resolved_output_dir = output_dir
         fn_file = f.__globals__.get("__file__")
         if resolved_output_dir is None and fn_file:
-            resolved_output_dir = Path(fn_file).parent / "out"
+            resolved_output_dir = Path.cwd() / "out"
 
         # Default name: <filename>.<function_name>
         if name:
