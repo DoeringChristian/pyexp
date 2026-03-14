@@ -88,6 +88,26 @@ class Task:
         self._name: str | None = None
         self._retry: int = 1
 
+    @classmethod
+    def _from_manifest(cls, *, label: str, storage_key: str, result: Any) -> Task:
+        """Reconstruct a lightweight Task from a stored manifest entry.
+
+        Sets ``_name`` to None so that ``_storage_key`` returns *storage_key*
+        directly (it's already the full key).  The *label* is stored on a
+        separate attribute for display purposes.
+        """
+        t = object.__new__(cls)
+        t._fn = None
+        t._args = ()
+        t._kwargs = {}
+        t._hash = storage_key
+        t._result = result
+        t._evaluated = True
+        t._db = None
+        t._name = label
+        t._retry = 1
+        return t
+
     # -- dependency introspection --
 
     @property
@@ -104,7 +124,13 @@ class Task:
 
     @property
     def _storage_key(self) -> str:
-        """Database key: ``name_hash`` if named, otherwise just the hash."""
+        """Database key: ``name_hash`` if named, otherwise just the hash.
+
+        For manifest-loaded tasks (``_fn is None``), ``_hash`` already holds
+        the full storage key.
+        """
+        if self._fn is None:
+            return self._hash
         if self._name:
             return f"{self._name}_{self._hash}"
         return self._hash

@@ -13,7 +13,6 @@ import argparse
 import inspect
 import re
 import sys
-from dataclasses import dataclass
 from typing import Any, Callable, Iterator
 
 from .database import get_default_database
@@ -22,36 +21,6 @@ from .task import Task, _collect_dag, _eval_tasks, _resolve_args, _save_task_res
 
 _NOT_SET = object()  # sentinel to distinguish "not provided on CLI" from argparse defaults
 
-
-@dataclass
-class _FlowEntry:
-    """Lightweight stand-in for a :class:`Task` when loading historical results."""
-
-    name: str
-    key: str
-    _result: Any
-    _evaluated: bool = True
-    kwargs: dict = None
-    _snapshot_hash: str | None = None
-
-    def __post_init__(self):
-        if self.kwargs is None:
-            self.kwargs = {}
-
-    @property
-    def result(self) -> Any:
-        return self._result
-
-    @property
-    def _hash(self) -> str:
-        return self.key
-
-    @property
-    def snapshot(self):
-        """Return a :class:`Snapshot` for this entry's flow run, or ``None``."""
-        from .utils import Snapshot
-
-        return Snapshot(self._snapshot_hash) if self._snapshot_hash else None
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +89,13 @@ class _FlowProgress:
 
 
 def _resolved_kwargs(t: Task) -> dict[str, Any]:
-    """Map a task's positional args and kwargs to a flat dict using inspect.signature."""
+    """Map a task's positional args and kwargs to a flat dict using inspect.signature.
+
+    For manifest-loaded tasks (``_fn is None``), ``_kwargs`` already holds the
+    resolved dict directly.
+    """
+    if t._fn is None:
+        return dict(t._kwargs)
     sig = inspect.signature(t._fn)
     params = list(sig.parameters.keys())
     result = {}
@@ -136,20 +111,22 @@ def _resolved_kwargs(t: Task) -> dict[str, Any]:
     return result
 
 
-def _task_label(t: Task | _FlowEntry) -> str:
+def _task_label(t: Task) -> str:
     """Return the task's explicit name if set, otherwise the function name."""
-    if isinstance(t, _FlowEntry):
-        return t.name
-    return t._name or t._fn.__name__
+    if t._name:
+        return t._name
+    if t._fn is not None:
+        return t._fn.__name__
+    return t._hash
 
 
 class FlowResult:
     """Indexable collection of evaluated tasks from a flow run."""
 
-    def __init__(self, tasks: list[Task | _FlowEntry]) -> None:
+    def __init__(self, tasks: list[Task]) -> None:
         self._tasks = tasks
 
-    def __getitem__(self, key: int | str) -> Task | _FlowEntry | FlowResult:
+    def __getitem__(self, key: int | str) -> Task | FlowResult:
         if isinstance(key, int):
             return self._tasks[key]
         if isinstance(key, str):
@@ -165,7 +142,7 @@ class FlowResult:
             param_names = list(sig.parameters.keys())
             matches = []
             for t in self._tasks:
-                kw = t.kwargs if isinstance(t, _FlowEntry) else _resolved_kwargs(t)
+                kw = _resolved_kwargs(t)
                 if not all(p in kw for p in param_names):
                     continue
                 if key(**{p: kw[p] for p in param_names}):
@@ -180,7 +157,7 @@ class FlowResult:
     def __len__(self) -> int:
         return len(self._tasks)
 
-    def __iter__(self) -> Iterator[Task | _FlowEntry]:
+    def __iter__(self) -> Iterator[Task]:
         return iter(self._tasks)
 
     @property
@@ -223,15 +200,13 @@ class Flow:
             raise RuntimeError(f"No previous runs for flow '{self.name}'")
         run_entry = runs[key]
         manifest = run_entry.result  # list of (label, storage_key, result[, kwargs])
-        snap = run_entry.metadata.get("snapshot")
         entries = []
         for entry in manifest:
             label, storage_key, result = entry[0], entry[1], entry[2]
             kw = entry[3] if len(entry) > 3 else {}
-            entries.append(_FlowEntry(
-                name=label, key=storage_key, _result=result, kwargs=kw,
-                _snapshot_hash=snap,
-            ))
+            t = Task._from_manifest(label=label, storage_key=storage_key, result=result)
+            t._kwargs = kw
+            entries.append(t)
         return FlowResult(entries)
 
     def results(self, **kwargs) -> FlowResult:
