@@ -5,7 +5,7 @@ from pyexp import Config
 
 
 @pyexp.task
-def exp(config: Config, pretrain=None):
+def exp(config: Config, name: str, pretrain=None):
     """Run a single experiment with the given config."""
     lr = config.learning_rate
     epochs = config.epochs
@@ -28,8 +28,9 @@ def flow():
                     "epochs": 10,
                     "dataset": dataset,
                 }
-            )
-        ).name(f"{dataset}_pretrain")
+            ),
+            name=f"{dataset}_pretrain",
+        )
 
         exp(
             Config(
@@ -40,17 +41,18 @@ def flow():
                     "finetune": True,
                 }
             ),
-            pretrain,
-        ).name(f"{dataset}_finetune")
+            name=f"{dataset}_finetune",
+            pretrain=pretrain,
+        )
 
 
 if __name__ == "__main__":
+
+    flow()
 
     # Returns the last flow result
     last_flow = flow[-1]
     print(f"{last_flow=}")
 
     results = flow.results()
-    print(f"{results[0]=}")
-
-    flow()
+    print(f"{results[lambda *, name: name =='fabric_hex_pretrain']=}")

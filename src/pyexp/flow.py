@@ -31,6 +31,11 @@ class _FlowEntry:
     key: str
     _result: Any
     _evaluated: bool = True
+    kwargs: dict = None
+
+    def __post_init__(self):
+        if self.kwargs is None:
+            self.kwargs = {}
 
     @property
     def result(self) -> Any:
@@ -106,6 +111,23 @@ class _FlowProgress:
         sys.stderr.flush()
 
 
+def _resolved_kwargs(t: Task) -> dict[str, Any]:
+    """Map a task's positional args and kwargs to a flat dict using inspect.signature."""
+    sig = inspect.signature(t._fn)
+    params = list(sig.parameters.keys())
+    result = {}
+    for i, arg in enumerate(t._args):
+        if i < len(params):
+            result[params[i]] = arg.result if isinstance(arg, Task) and arg._evaluated else arg
+    for k, v in t._kwargs.items():
+        result[k] = v.result if isinstance(v, Task) and v._evaluated else v
+    # Fill in defaults for parameters not covered by args or kwargs
+    for name, param in sig.parameters.items():
+        if name not in result and param.default is not inspect.Parameter.empty:
+            result[name] = param.default
+    return result
+
+
 def _task_label(t: Task | _FlowEntry) -> str:
     """Return the task's explicit name if set, otherwise the function name."""
     if isinstance(t, _FlowEntry):
@@ -130,7 +152,22 @@ class FlowResult:
             if len(matches) == 1:
                 return matches[0]
             return FlowResult(matches)
-        raise TypeError(f"FlowResult indices must be int or str, not {type(key).__name__}")
+        if callable(key):
+            sig = inspect.signature(key)
+            param_names = list(sig.parameters.keys())
+            matches = []
+            for t in self._tasks:
+                kw = t.kwargs if isinstance(t, _FlowEntry) else _resolved_kwargs(t)
+                if not all(p in kw for p in param_names):
+                    continue
+                if key(**{p: kw[p] for p in param_names}):
+                    matches.append(t)
+            if not matches:
+                raise KeyError("No tasks match the callable filter")
+            if len(matches) == 1:
+                return matches[0]
+            return FlowResult(matches)
+        raise TypeError(f"FlowResult indices must be int, str, or callable, not {type(key).__name__}")
 
     def __len__(self) -> int:
         return len(self._tasks)
@@ -167,10 +204,12 @@ class Flow:
         runs = db.load(self.name)
         if not runs:
             raise RuntimeError(f"No previous runs for flow '{self.name}'")
-        manifest = runs[key].result  # list of (label, storage_key, result)
+        manifest = runs[key].result  # list of (label, storage_key, result[, kwargs])
         entries = []
-        for label, storage_key, result in manifest:
-            entries.append(_FlowEntry(name=label, key=storage_key, _result=result))
+        for entry in manifest:
+            label, storage_key, result = entry[0], entry[1], entry[2]
+            kw = entry[3] if len(entry) > 3 else {}
+            entries.append(_FlowEntry(name=label, key=storage_key, _result=result, kwargs=kw))
         return FlowResult(entries)
 
     def results(self, **kwargs) -> FlowResult:
@@ -198,6 +237,11 @@ class Flow:
                 )
             t._result = runs[-1].result
             t._evaluated = True
+
+        # Clean up: remove tasks created by this flow from the global registry
+        for t in tasks:
+            _task_registry.pop(t._hash, None)
+
         return FlowResult(tasks)
 
     def run(self, **overrides) -> Any:
@@ -241,8 +285,12 @@ class Flow:
 
         # Save manifest so flow[i] can reconstruct results without re-running
         db = get_default_database()
-        manifest = [(_task_label(t), t._storage_key, t._result) for t in all_tasks]
+        manifest = [(_task_label(t), t._storage_key, t._result, _resolved_kwargs(t)) for t in all_tasks]
         db.save(self.name, manifest)
+
+        # Clean up: remove tasks created by this flow from the global registry
+        for t in all_tasks:
+            _task_registry.pop(t._hash, None)
 
         return FlowResult(all_tasks)
 

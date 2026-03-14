@@ -813,3 +813,123 @@ def test_flow_results_returns_real_tasks(monkeypatch):
     result = my_flow.results()
     assert isinstance(result[0], Task)
     assert result[0].result == 42
+
+
+# ---------------------------------------------------------------------------
+# Callable / lambda search
+# ---------------------------------------------------------------------------
+
+
+def test_callable_filter_by_kwarg(monkeypatch):
+    """Filter tasks by matching lambda parameter names against task kwargs."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def greet(name):
+        return f"hello {name}"
+
+    @pyexp.flow
+    def my_flow():
+        greet("alice").name("a")
+        greet("bob").name("b")
+
+    result = my_flow.run()
+    match = result[lambda name: name == "alice"]
+    assert match.result == "hello alice"
+
+
+def test_callable_filter_multiple_matches(monkeypatch):
+    """Lambda returning True for multiple tasks yields a FlowResult."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def step(x):
+        return x * 10
+
+    @pyexp.flow
+    def my_flow():
+        step(1).name("s1")
+        step(2).name("s2")
+        step(3).name("s3")
+
+    result = my_flow.run()
+    sub = result[lambda x: x > 1]
+    assert isinstance(sub, FlowResult)
+    assert len(sub) == 2
+    assert [t.result for t in sub] == [20, 30]
+
+
+def test_callable_filter_no_match_raises(monkeypatch):
+    """Lambda matching nothing raises KeyError."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def greet(name):
+        return f"hello {name}"
+
+    @pyexp.flow
+    def my_flow():
+        greet("alice")
+
+    result = my_flow.run()
+    with pytest.raises(KeyError, match="No tasks match"):
+        result[lambda name: name == "nonexistent"]
+
+
+def test_callable_filter_positional_arg_mapping(monkeypatch):
+    """Positional args are mapped to parameter names via inspect.signature."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def process(data, mode):
+        return f"{data}_{mode}"
+
+    @pyexp.flow
+    def my_flow():
+        process("input", "fast")
+
+    result = my_flow.run()
+    match = result[lambda mode: mode == "fast"]
+    assert match.result == "input_fast"
+
+
+def test_callable_filter_historical(monkeypatch):
+    """flow[-1][lambda ...] works on historical results."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def greet(name):
+        return f"hello {name}"
+
+    @pyexp.flow
+    def my_flow():
+        greet("alice").name("a")
+        greet("bob").name("b")
+
+    my_flow.run()
+    clear_task_registry()
+
+    historical = my_flow[-1]
+    match = historical[lambda name: name == "alice"]
+    assert match.result == "hello alice"
+
+
+def test_callable_filter_skips_unrelated_signatures(monkeypatch):
+    """Tasks whose kwargs don't contain the lambda's params are skipped."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def source():
+        return 10
+
+    @pyexp.task
+    def double(x):
+        return x * 2
+
+    @pyexp.flow
+    def my_flow():
+        double(source())
+
+    result = my_flow.run()
+    match = result[lambda x: x == 10]
+    assert match.result == 20
