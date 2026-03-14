@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 # Default file suffixes to include in code packages (like Metaflow)
@@ -299,6 +300,25 @@ def package_files(
         shutil.copy2(src, dst)
 
     return dest
+
+
+@dataclass
+class Snapshot:
+    """A reference to a code snapshot taken when a task or flow was executed."""
+
+    hash: str
+
+    @property
+    def path(self) -> Path:
+        """Path to the snapshot directory (``<cwd>/.snapshot/<hash>``)."""
+        return Path.cwd() / ".snapshot" / self.hash
+
+    def checkout(self, dest: Path) -> Path:
+        """Extract the snapshot into *dest* using ``checkout_snapshot``."""
+        return checkout_snapshot(self.hash, dest)
+
+    def __repr__(self) -> str:
+        return f"Snapshot({self.hash[:12]})"
 
 
 def stash_and_snapshot(

@@ -116,6 +116,17 @@ class Task:
         return Runs(db.load(self._storage_key))
 
     @property
+    def snapshot(self):
+        """Return a :class:`Snapshot` for the latest run, or ``None``."""
+        from .utils import Snapshot
+
+        runs = self.runs
+        if not runs:
+            return None
+        h = runs[-1].metadata.get("snapshot")
+        return Snapshot(h) if h else None
+
+    @property
     def result(self) -> Any:
         """Access the task's result after evaluation."""
         if not self._evaluated:

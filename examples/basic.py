@@ -51,6 +51,8 @@ if __name__ == "__main__":
     print(f"{last_flow=}")
 
     results = flow.results()
-    print(f"{results['fabric_hex_finetune']=}")
+    task1 = results["fabric_hex_finetune"]
+    task1.snapshot
+    print(f"{task1=}")
 
     flow()

@@ -933,3 +933,74 @@ def test_callable_filter_skips_unrelated_signatures(monkeypatch):
     result = my_flow.run()
     match = result[lambda x: x == 10]
     assert match.result == 20
+
+
+# ---------------------------------------------------------------------------
+# Snapshot property
+# ---------------------------------------------------------------------------
+
+
+def test_flow_result_snapshot_with_snapshot_executor(monkeypatch, tmp_path):
+    """FlowResult.snapshot returns a Snapshot when executor has snapshot=True."""
+    monkeypatch.setattr("sys.argv", ["test"])
+    from pyexp.utils import Snapshot
+
+    set_default_executor(InlineExecutor(snapshot=True, capture=False))
+    set_default_database(FileDatabase(tmp_path / "snap_db"))
+
+    @pyexp.task
+    def val():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    result = my_flow.run()
+    s = result.snapshot
+    assert isinstance(s, Snapshot)
+    assert len(s.hash) > 0
+
+
+def test_flow_result_snapshot_none_without_snapshot(monkeypatch):
+    """FlowResult.snapshot returns None when executor has no snapshot."""
+    monkeypatch.setattr("sys.argv", ["test"])
+
+    @pyexp.task
+    def val():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    result = my_flow.run()
+    assert result.snapshot is None
+
+
+def test_flow_historical_snapshot(monkeypatch, tmp_path):
+    """flow[-1].snapshot returns Snapshot from historical metadata."""
+    monkeypatch.setattr("sys.argv", ["test"])
+    from pyexp.utils import Snapshot
+
+    set_default_executor(InlineExecutor(snapshot=True, capture=False))
+    set_default_database(FileDatabase(tmp_path / "snap_db"))
+
+    @pyexp.task
+    def val():
+        return 1
+
+    @pyexp.flow
+    def my_flow():
+        val()
+
+    my_flow.run()
+    clear_task_registry()
+
+    historical = my_flow[-1]
+    s = historical.snapshot
+    assert isinstance(s, Snapshot)
+
+    # Individual entries also have snapshot
+    assert historical[0].snapshot is not None
+    assert historical[0].snapshot.hash == s.hash

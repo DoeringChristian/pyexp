@@ -32,6 +32,7 @@ class _FlowEntry:
     _result: Any
     _evaluated: bool = True
     kwargs: dict = None
+    _snapshot_hash: str | None = None
 
     def __post_init__(self):
         if self.kwargs is None:
@@ -44,6 +45,13 @@ class _FlowEntry:
     @property
     def _hash(self) -> str:
         return self.key
+
+    @property
+    def snapshot(self):
+        """Return a :class:`Snapshot` for this entry's flow run, or ``None``."""
+        from .utils import Snapshot
+
+        return Snapshot(self._snapshot_hash) if self._snapshot_hash else None
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +183,15 @@ class FlowResult:
     def __iter__(self) -> Iterator[Task | _FlowEntry]:
         return iter(self._tasks)
 
+    @property
+    def snapshot(self):
+        """Return a :class:`Snapshot` from the first task that has one, or ``None``."""
+        for t in self._tasks:
+            s = t.snapshot
+            if s is not None:
+                return s
+        return None
+
     def __repr__(self) -> str:
         lines = [f"FlowResult({len(self._tasks)} tasks):"]
         for t in self._tasks:
@@ -204,12 +221,17 @@ class Flow:
         runs = db.load(self.name)
         if not runs:
             raise RuntimeError(f"No previous runs for flow '{self.name}'")
-        manifest = runs[key].result  # list of (label, storage_key, result[, kwargs])
+        run_entry = runs[key]
+        manifest = run_entry.result  # list of (label, storage_key, result[, kwargs])
+        snap = run_entry.metadata.get("snapshot")
         entries = []
         for entry in manifest:
             label, storage_key, result = entry[0], entry[1], entry[2]
             kw = entry[3] if len(entry) > 3 else {}
-            entries.append(_FlowEntry(name=label, key=storage_key, _result=result, kwargs=kw))
+            entries.append(_FlowEntry(
+                name=label, key=storage_key, _result=result, kwargs=kw,
+                _snapshot_hash=snap,
+            ))
         return FlowResult(entries)
 
     def results(self, **kwargs) -> FlowResult:
@@ -286,7 +308,10 @@ class Flow:
         # Save manifest so flow[i] can reconstruct results without re-running
         db = get_default_database()
         manifest = [(_task_label(t), t._storage_key, t._result, _resolved_kwargs(t)) for t in all_tasks]
-        db.save(self.name, manifest)
+        meta: dict[str, Any] = {}
+        if executor.snapshot_hash is not None:
+            meta["snapshot"] = executor.snapshot_hash
+        db.save(self.name, manifest, metadata=meta)
 
         # Clean up: remove tasks created by this flow from the global registry
         for t in all_tasks:

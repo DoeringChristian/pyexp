@@ -339,3 +339,50 @@ def test_chain_eval_persists_all():
     assert t1.runs[-1].result == 10
     assert len(t2.runs) == 1
     assert t2.runs[-1].result == 20
+
+
+# ---------------------------------------------------------------------------
+# Snapshot property
+# ---------------------------------------------------------------------------
+
+
+def test_task_snapshot_with_snapshot_executor(tmp_path):
+    """task.snapshot returns a Snapshot when executor has snapshot=True."""
+    from pyexp.utils import Snapshot
+
+    set_default_executor(InlineExecutor(snapshot=True, capture=False))
+    set_default_database(FileDatabase(tmp_path / "snap_db"))
+
+    @pyexp.task
+    def val():
+        return 1
+
+    t = val()
+    t.eval()
+    s = t.snapshot
+    assert isinstance(s, Snapshot)
+    assert isinstance(s.hash, str)
+    assert len(s.hash) > 0
+
+
+def test_task_snapshot_none_without_snapshot():
+    """task.snapshot returns None when executor has no snapshot."""
+
+    @pyexp.task
+    def val():
+        return 1
+
+    t = val()
+    t.eval()
+    assert t.snapshot is None
+
+
+def test_task_snapshot_none_before_eval():
+    """task.snapshot returns None when task has no runs."""
+
+    @pyexp.task
+    def val():
+        return 1
+
+    t = val()
+    assert t.snapshot is None

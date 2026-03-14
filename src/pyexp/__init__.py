@@ -33,6 +33,7 @@ from .executors import (
     set_default_executor,
 )
 from .utils import (
+    Snapshot,
     checkout_snapshot,
     content_hash,
     package_files,
@@ -63,6 +64,7 @@ __all__ = [
     "load_config",
     "merge",
     "register",
+    "Snapshot",
     "checkout_snapshot",
     "content_hash",
     "package_files",
