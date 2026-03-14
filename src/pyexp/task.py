@@ -69,7 +69,17 @@ def _task_hash(fn: Callable, args: tuple, kwargs: dict) -> str:
 class Task:
     """A lazy node in a computation DAG."""
 
-    __slots__ = ("_fn", "_args", "_kwargs", "_hash", "_result", "_evaluated", "_db", "_name", "_retry")
+    __slots__ = (
+        "_fn",
+        "_args",
+        "_kwargs",
+        "_hash",
+        "_result",
+        "_evaluated",
+        "_db",
+        "_name",
+        "_retry",
+    )
 
     def __init__(
         self,
@@ -235,9 +245,7 @@ def _topo_sort(tasks: dict[str, Task]) -> list[Task]:
 
 def _resolve_args(task: Task, results: dict[str, Any]) -> tuple[tuple, dict]:
     """Replace Task refs in args/kwargs with concrete values."""
-    args = tuple(
-        results[a._hash] if isinstance(a, Task) else a for a in task._args
-    )
+    args = tuple(results[a._hash] if isinstance(a, Task) else a for a in task._args)
     kwargs = {
         k: results[v._hash] if isinstance(v, Task) else v
         for k, v in task._kwargs.items()
@@ -290,9 +298,7 @@ def _eval_tasks(
             if progress is not None:
                 progress.update("failed", label)
                 progress.finish()
-            raise RuntimeError(
-                f"Task {t._fn.__name__} ({t._hash}) failed:\n{res.log}"
-            )
+            raise RuntimeError(f"Task {t._fn.__name__} ({t._hash}) failed:\n{res.log}")
         t._result = res.result
         t._evaluated = True
         _save_task_result(t, log=res.log, snapshot=snapshot)
